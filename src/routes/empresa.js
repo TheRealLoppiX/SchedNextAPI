@@ -11,7 +11,7 @@ const router = express.Router();
 router.get('/admin/empresa/:id', async (req, res) => {
   const { data, error } = await supabase
     .from('empresas')
-    .select('id, nome, slug, logo_url, vertical, cor_principal, cor_destaque, status_assinatura, proxima_cobranca_em, cancelamento_agendado, plano_plataforma_id, plano_plataforma:plano_plataforma_id(id, nome, preco_mensal, permite_paleta_customizada, permite_whatsapp_bot, permite_remover_marca, permite_ia)')
+    .select('id, nome, slug, logo_url, vertical, cor_principal, cor_destaque, status_assinatura, proxima_cobranca_em, cancelamento_agendado, cpf_cnpj, plano_plataforma_id, plano_plataforma:plano_plataforma_id(id, nome, preco_mensal, permite_paleta_customizada, permite_whatsapp_bot, permite_remover_marca, permite_ia)')
     .eq('id', req.empresaId)
     .maybeSingle();
 

@@ -297,7 +297,13 @@ const clientePlanoSchema = z.object({
 // --- pagamentos.js ---
 
 const iniciarUpgradeSchema = z.object({
-  plano_plataforma_id: idLike
+  plano_plataforma_id: idLike,
+  // Só obrigatório quando o plano escolhido é pago e a empresa ainda não tem CPF/CNPJ salvo
+  // (checado na própria rota, não aqui, porque depende do estado atual da empresa no banco).
+  cpf_cnpj: z.preprocess(
+    (v) => (typeof v === 'string' ? v.replace(/\D/g, '') : v),
+    z.string().regex(/^\d{11}$|^\d{14}$/, 'Informe um CPF ou CNPJ válido.')
+  ).optional()
 });
 
 // --- apiKeys.js ---
