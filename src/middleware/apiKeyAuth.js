@@ -1,11 +1,11 @@
 const crypto = require('crypto');
 const supabase = require('../config/supabase');
 
-// Autenticação da API pública (recurso Enterprise, ver §11 do plano de plataforma) — é
+// Autenticação da API pública (recurso Enterprise, ver §11 do plano de plataforma). É
 // deliberadamente separada do JWT usado em /admin/*: quem chama essa API é um sistema
 // externo integrando com a conta do cliente, não o próprio dono logado no painel.
 // Chaves são hasheadas com SHA-256 (não bcrypt): são tokens de alta entropia gerados por
-// nós, não senhas escolhidas por humano, então não faz sentido usar hash lento — o objetivo
+// nós, não senhas escolhidas por humano, então não faz sentido usar hash lento. O objetivo
 // aqui é permitir a busca direta pelo hash, algo que bcrypt não permite.
 function hashChave(chave) {
   return crypto.createHash('sha256').update(chave).digest('hex');

@@ -6,7 +6,7 @@ const { limiteAgendamentosMesAtingido } = require('../utils/limitesPlano');
 
 const router = express.Router();
 
-// API pública (recurso Enterprise) — pensada pra um sistema externo do cliente (ex: o site
+// API pública (recurso Enterprise), pensada pra um sistema externo do cliente (ex: o site
 // institucional dele, ou um ERP próprio) consultar disponibilidade e criar agendamentos sem
 // precisar do painel admin. Autenticação via API key (ver middleware/apiKeyAuth.js), não JWT.
 router.use('/api/v1', apiPublicaLimiter, autenticarApiKey);

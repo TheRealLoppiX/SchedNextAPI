@@ -1,14 +1,18 @@
 const express = require('express');
 const supabase = require('../config/supabase');
 const { obterSlugTenant, resolverEmpresaPorSlug } = require('../utils/tenantContext');
+const validate = require('../middleware/validate');
+const { empresaAtualizarSchema, configEmpresaSchema } = require('../schemas');
 
 const router = express.Router();
 
+// :id no path é ignorado de propósito. Usar req.empresaId (vindo do token verificado)
+// evita que um admin autenticado leia dados de outro tenant só trocando o ID na URL.
 router.get('/admin/empresa/:id', async (req, res) => {
   const { data, error } = await supabase
     .from('empresas')
     .select('id, nome, slug, logo_url, vertical, cor_principal, cor_destaque, status_assinatura, proxima_cobranca_em, cancelamento_agendado, plano_plataforma_id, plano_plataforma:plano_plataforma_id(id, nome, preco_mensal, permite_paleta_customizada, permite_whatsapp_bot, permite_remover_marca, permite_ia)')
-    .eq('id', req.params.id)
+    .eq('id', req.empresaId)
     .maybeSingle();
 
   if (error) return res.status(500).json(error);
@@ -16,15 +20,16 @@ router.get('/admin/empresa/:id', async (req, res) => {
 });
 
 // ROTA PARA ATUALIZAR DADOS DA EMPRESA
-router.put('/admin/empresa/atualizar', async (req, res) => {
-  const { id, nome, logo_url, horarios, cor_principal, cor_destaque } = req.body;
+router.put('/admin/empresa/atualizar', validate(empresaAtualizarSchema), async (req, res) => {
+  const { nome, logo_url, horarios, cor_principal, cor_destaque } = req.body;
+  const id = req.empresaId;
 
   // Converte o objeto de horários para texto (JSON) para salvar no banco
   const horariosStr = horarios ? JSON.stringify(horarios) : null;
   const atualizacao = { nome, logo_url, horarios_funcionamento: horariosStr };
 
   // Paleta de cores customizada é recurso do plano Essencial+ (ver §7 do plano de
-  // plataforma) — plano Grátis mantém a paleta padrão da plataforma mesmo se enviar cor.
+  // plataforma). Plano Grátis mantém a paleta padrão da plataforma mesmo se enviar cor.
   if (cor_principal !== undefined || cor_destaque !== undefined) {
     const { data: empresaAtual } = await supabase
       .from('empresas')
@@ -62,16 +67,16 @@ router.get('/empresa/slug/:slug', async (req, res) => {
   res.json(data);
 });
 
-router.put('/admin/config-empresa', async (req, res) => {
-  const { id, nome_fantasia, logo_url, cor_primary } = req.body;
+router.put('/admin/config-empresa', validate(configEmpresaSchema), async (req, res) => {
+  const { nome_fantasia, logo_url, cor_primary } = req.body;
 
   // Bug pré-existente corrigido aqui: a coluna real no banco é `cor_principal`, não
-  // `cor_primary` (ver database-schema.md) — a query original apontava para uma coluna
+  // `cor_primary` (ver database-schema.md). A query original apontava para uma coluna
   // inexistente e derrubava a rota em toda chamada.
   const { error } = await supabase
     .from('empresas')
     .update({ nome_fantasia, logo_url, cor_principal: cor_primary })
-    .eq('id', id);
+    .eq('id', req.empresaId);
 
   if (error) {
     console.error(error);

@@ -15,7 +15,7 @@ async function gated(req, res, next) {
 
 router.use('/admin/ia', gated);
 
-// 1. Resumo executivo do dashboard — traduz os números em texto corrido com destaques,
+// 1. Resumo executivo do dashboard: traduz os números em texto corrido com destaques,
 // pra quem não quer ficar lendo tabela de estatística.
 router.post('/admin/ia/resumo-dashboard', async (req, res) => {
   const { stats, nomeEmpresa } = req.body;
@@ -34,7 +34,7 @@ router.post('/admin/ia/resumo-dashboard', async (req, res) => {
   }
 });
 
-// 2. Gerador de descrição de serviço — admin digita só o nome, IA sugere uma descrição
+// 2. Gerador de descrição de serviço: admin digita só o nome, IA sugere uma descrição
 // de vitrine pra usar no cadastro do serviço.
 router.post('/admin/ia/descricao-servico', async (req, res) => {
   const { nome, vertical } = req.body;
@@ -53,7 +53,7 @@ router.post('/admin/ia/descricao-servico', async (req, res) => {
   }
 });
 
-// 3. Sugestão de mensagem de follow-up — personaliza o texto de "sentimos sua falta"
+// 3. Sugestão de mensagem de follow-up: personaliza o texto de "sentimos sua falta"
 // enviado pro cliente que sumiu, em vez de um template fixo igual pra todo mundo.
 router.post('/admin/ia/sugestao-followup', async (req, res) => {
   const { clienteNome, nomeEmpresa, diasSemVir } = req.body;

@@ -1,12 +1,17 @@
 const express = require('express');
 const supabase = require('../config/supabase');
+const validate = require('../middleware/validate');
+const { servicoGestaoSchema, ativoSchema } = require('../schemas');
 
 const router = express.Router();
 
 router.get('/servicos', async (req, res) => {
   const { empresa } = req.query;
 
-  if (!empresa) {
+  // Só aceita slug (letras/números/hífen/underscore) ou ID numérico. Evita que um valor
+  // com vírgula/operador (ex: "x,id.gt.0") injete cláusulas extras no `.or()` do PostgREST
+  // abaixo, que monta a string do filtro por interpolação direta.
+  if (!empresa || !/^[a-zA-Z0-9_-]+$/.test(String(empresa))) {
     return res.status(400).json({ error: 'O slug da empresa é obrigatório' });
   }
 
@@ -29,18 +34,17 @@ router.get('/servicos', async (req, res) => {
 
   const { data, error } = await query;
   if (error) {
-    console.error('❌ Erro no Banco:', error);
+    console.error('Erro no Banco:', error);
     return res.status(500).json({ error: 'Erro ao buscar serviços' });
   }
   res.json(data);
 });
 
-// BUSCAR SERVIÇOS (Dashboard Admin).
+// BUSCAR SERVIÇOS (Dashboard Admin). Vive sob /admin/*, usa req.empresaId (do token
+// verificado), ignorando ?empresa= da query pra um admin não conseguir ler os serviços de
+// outro tenant só trocando o valor.
 router.get('/admin/servicos', async (req, res) => {
-  const { empresa } = req.query;
-  if (!empresa) return res.status(400).json({ error: 'ID da empresa é obrigatório' });
-
-  const { data, error } = await supabase.from('servicos').select('id, nome, duracao, valor').eq('empresa_id', empresa);
+  const { data, error } = await supabase.from('servicos').select('id, nome, duracao, valor').eq('empresa_id', req.empresaId);
   if (error) return res.status(500).json({ error: 'Erro interno' });
   res.json(data);
 });
@@ -61,7 +65,7 @@ router.get('/horarios-ocupados', async (req, res) => {
     .neq('status', 'cancelado');
 
   if (errAg) {
-    console.error('❌ Erro SQL Agendados:', errAg);
+    console.error('Erro SQL Agendados:', errAg);
     return res.status(500).json(errAg);
   }
 
@@ -73,7 +77,7 @@ router.get('/horarios-ocupados', async (req, res) => {
     .gte('data_fim', data);
 
   if (errBq) {
-    console.error('❌ Erro SQL Bloqueios:', errBq);
+    console.error('Erro SQL Bloqueios:', errBq);
     return res.status(500).json(errBq);
   }
 
@@ -86,12 +90,15 @@ router.get('/horarios-ocupados', async (req, res) => {
   });
 });
 
-// LISTAR serviços da empresa logada
-router.get('/servicos-gestao/:empresa_id', async (req, res) => {
+// LISTAR serviços da empresa logada. Movida para /admin/* (verificarTokenAdmin garante
+// req.empresaId). Antes vivia em "/servicos-gestao/:empresa_id" sem nenhuma autenticação:
+// qualquer chamador anônimo podia listar/criar/editar/excluir os serviços de qualquer
+// empresa só sabendo (ou adivinhando) o ID.
+router.get('/admin/servicos-gestao', async (req, res) => {
   const { data, error } = await supabase
     .from('servicos')
     .select('*')
-    .eq('empresa_id', req.params.empresa_id)
+    .eq('empresa_id', req.empresaId)
     .order('nome', { ascending: true });
 
   if (error) return res.status(500).json(error);
@@ -99,12 +106,12 @@ router.get('/servicos-gestao/:empresa_id', async (req, res) => {
 });
 
 // CADASTRAR novo serviço
-router.post('/servicos-gestao', async (req, res) => {
-  const { nome, valor, duracao, empresa_id, descricao } = req.body;
+router.post('/admin/servicos-gestao', validate(servicoGestaoSchema), async (req, res) => {
+  const { nome, valor, duracao, descricao } = req.body;
 
   const { data, error } = await supabase
     .from('servicos')
-    .insert({ nome, valor, duracao, empresa_id, descricao: descricao || null })
+    .insert({ nome, valor, duracao, empresa_id: req.empresaId, descricao: descricao || null })
     .select('id')
     .single();
 
@@ -113,24 +120,45 @@ router.post('/servicos-gestao', async (req, res) => {
 });
 
 // ATUALIZAR serviço existente
-router.put('/servicos-gestao/:id', async (req, res) => {
+router.put('/admin/servicos-gestao/:id', validate(servicoGestaoSchema), async (req, res) => {
   const { nome, valor, duracao, descricao } = req.body;
-  const { error } = await supabase.from('servicos').update({ nome, valor, duracao, descricao: descricao || null }).eq('id', req.params.id);
+  const { data, error } = await supabase
+    .from('servicos')
+    .update({ nome, valor, duracao, descricao: descricao || null })
+    .eq('id', req.params.id)
+    .eq('empresa_id', req.empresaId)
+    .select('id');
+
   if (error) return res.status(500).json(error);
+  if (!data || data.length === 0) return res.status(404).json({ error: 'Serviço não encontrado.' });
   res.json({ message: 'Serviço atualizado com sucesso!' });
 });
 
 // EXCLUIR serviço
-router.delete('/servicos-gestao/:id', async (req, res) => {
-  const { error } = await supabase.from('servicos').delete().eq('id', req.params.id);
+router.delete('/admin/servicos-gestao/:id', async (req, res) => {
+  const { data, error } = await supabase
+    .from('servicos')
+    .delete()
+    .eq('id', req.params.id)
+    .eq('empresa_id', req.empresaId)
+    .select('id');
+
   if (error) return res.status(500).json(error);
+  if (!data || data.length === 0) return res.status(404).json({ error: 'Serviço não encontrado.' });
   res.json({ message: 'Serviço removido!' });
 });
 
-router.put('/servicos-gestao/:id/status', async (req, res) => {
+router.put('/admin/servicos-gestao/:id/status', validate(ativoSchema), async (req, res) => {
   const { ativo } = req.body;
-  const { error } = await supabase.from('servicos').update({ ativo: !!ativo }).eq('id', req.params.id);
+  const { data, error } = await supabase
+    .from('servicos')
+    .update({ ativo: !!ativo })
+    .eq('id', req.params.id)
+    .eq('empresa_id', req.empresaId)
+    .select('id');
+
   if (error) return res.status(500).json({ error: 'Erro ao atualizar status' });
+  if (!data || data.length === 0) return res.status(404).json({ error: 'Serviço não encontrado.' });
   res.json({ message: 'Status atualizado!' });
 });
 
@@ -161,8 +189,8 @@ router.get('/disponibilidade-filtro', async (req, res) => {
   const horarioDesejado = new Date(`${data}T${hora}:00Z`);
   const horaDesejada = `${hora}:00`;
 
-  // Nota: o SQL original filtrava status NOT IN ('cancelado', 'rejeitado'), mas 'rejeitado'
-  // nunca foi um valor válido do ENUM real (ver database-schema.md) — mantemos só 'cancelado'.
+  // O SQL original filtrava status NOT IN ('cancelado', 'rejeitado'), mas 'rejeitado'
+  // nunca foi um valor válido do ENUM real (ver database-schema.md); mantemos só 'cancelado'.
   const { data: agendamentos, error: errAg } = await supabase
     .from('agendamentos')
     .select('barbeiro_id, data_hora, agendamento_servicos(servicos(duracao))')

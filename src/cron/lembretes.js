@@ -4,10 +4,10 @@ const transporter = require('../config/mailer');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 
 // América/São_Paulo é sempre UTC-3 (sem horário de verão desde 2019). O banco guarda data_hora
-// como "horário de parede pretendido, rotulado como UTC" — ou seja, um agendamento às 09:00
+// como "horário de parede pretendido, rotulado como UTC": um agendamento às 09:00
 // (horário local) é gravado como "09:00:00+00", sem conversão real de fuso (mesma convenção do
 // MySQL original, que usava DATETIME ingênuo). Isso significa que comparar esse valor direto
-// contra um Date() de verdade (que representa o instante real) fica errado por 3h — é preciso
+// contra um Date() de verdade (que representa o instante real) fica errado por 3h. É preciso
 // converter explicitamente nos dois sentidos.
 const OFFSET_BRASILIA_MS = 3 * 60 * 60 * 1000;
 
@@ -24,7 +24,7 @@ function paraInstanteReal(dataHoraDoBanco) {
 
 function iniciarLembretes() {
   cron.schedule('*/1 * * * *', async () => {
-    console.log('⏰ Verificando lembretes de agendamentos próximos...');
+    console.log('Verificando lembretes de agendamentos próximos...');
 
     const agora = new Date();
     const limite = new Date(agora.getTime() + 75 * 60000); // +1h15min
@@ -37,7 +37,7 @@ function iniciarLembretes() {
       .neq('status', 'cancelado')
       .eq('lembrete_1h_enviado', false);
 
-    if (error) return console.error('❌ Erro no SQL do Cron:', error);
+    if (error) return console.error('Erro no SQL do Cron:', error);
 
     for (const ag of agendamentos || []) {
       try {
@@ -50,7 +50,7 @@ function iniciarLembretes() {
         if (minutosFaltando < -5) continue;
 
         const tempoTexto = minutosFaltando <= 0 ? 'poucos minutos' : `${minutosFaltando} minutos`;
-        // Os números gravados já são o horário de parede certo — usar os getters UTC (não
+        // Os números gravados já são o horário de parede certo. Usar os getters UTC (não
         // toLocaleTimeString) pra não converter de fuso de novo.
         const horaFmt = `${String(dataAgendamentoBanco.getUTCHours()).padStart(2, '0')}:${String(dataAgendamentoBanco.getUTCMinutes()).padStart(2, '0')}`;
 
@@ -60,7 +60,7 @@ function iniciarLembretes() {
         await transporter.sendMail({
           from: '"Barbearia" <barberariateste@gmail.com>',
           to: ag.usuarios.email,
-          subject: `🚀 Seu horário é daqui a ${tempoTexto}!`,
+          subject: `Seu horário é daqui a ${tempoTexto}!`,
           text: msg
         });
 
@@ -75,9 +75,9 @@ function iniciarLembretes() {
         // NOTIFICAÇÃO NO APP
         await supabase.from('notificacoes').insert({ usuario_id: ag.usuario_id, titulo: 'Seu horário está próximo!', mensagem: msg });
 
-        console.log(`✅ Lembrete de ${minutosFaltando} min enviado para: ${ag.usuarios.email}`);
+        console.log(`Lembrete de ${minutosFaltando} min enviado para: ${ag.usuarios.email}`);
       } catch (err) {
-        console.error('❌ Erro no envio do lembrete:', err);
+        console.error('Erro no envio do lembrete:', err);
       }
     }
   });

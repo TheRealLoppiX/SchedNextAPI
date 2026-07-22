@@ -23,7 +23,7 @@ app.use(cors({
 }));
 
 // Protege toda a área /admin/*. O único endpoint sob /admin que fica de fora é o próprio
-// /admin/login (é ele quem emite o token) — ver src/middleware/adminAuth.js.
+// /admin/login (é ele quem emite o token). Ver src/middleware/adminAuth.js.
 app.use('/admin', verificarTokenAdmin);
 
 app.use(require('./src/routes/auth'));
@@ -48,4 +48,4 @@ iniciarLembretes();
 iniciarProcessamentoCancelamentos();
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => console.log(`🚀 Servidor rodando em http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`Servidor rodando em http://localhost:${PORT}`));

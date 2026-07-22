@@ -4,7 +4,7 @@ const { processarMensagem } = require('../services/whatsapp/bot');
 
 const router = express.Router();
 
-// Handshake de verificação da Meta Cloud API — chamado uma vez quando o webhook é cadastrado
+// Handshake de verificação da Meta Cloud API. Chamado uma vez quando o webhook é cadastrado
 // no Meta App Dashboard (WhatsApp > Configuration > Webhook).
 router.get('/whatsapp/webhook', (req, res) => {
   const modo = req.query['hub.mode'];
@@ -20,19 +20,19 @@ router.get('/whatsapp/webhook', (req, res) => {
 // Recebe mensagens inbound. Formato de payload da Meta Cloud API
 // (entry[].changes[].value.{metadata,messages}).
 router.post('/whatsapp/webhook', async (req, res) => {
-  // Sempre responde 200 rápido — é o esperado por qualquer provedor de webhook, mesmo que o
+  // Sempre responde 200 rápido, que é o esperado por qualquer provedor de webhook, mesmo que o
   // processamento abaixo não gere resposta (evita retentativas desnecessárias).
   res.sendStatus(200);
 
-  // DIAGNÓSTICO TEMPORÁRIO (remover depois de confirmar que o webhook está sendo alcançado) —
-  // ver handoff.md, sessão 2026-07-21.
-  console.log('📩 [WhatsApp webhook] payload recebido:', JSON.stringify(req.body));
+  // DIAGNÓSTICO TEMPORÁRIO (remover depois de confirmar que o webhook está sendo alcançado).
+  // Ver handoff.md, sessão 2026-07-21.
+  console.log('[WhatsApp webhook] payload recebido:', JSON.stringify(req.body));
 
   try {
     const value = req.body?.entry?.[0]?.changes?.[0]?.value;
     const mensagem = value?.messages?.[0];
     if (!mensagem) {
-      console.log('📩 [WhatsApp webhook] sem messages[0] no payload — ignorando');
+      console.log('[WhatsApp webhook] sem messages[0] no payload, ignorando');
       return;
     }
 
@@ -40,7 +40,7 @@ router.post('/whatsapp/webhook', async (req, res) => {
     const telefone = mensagem.from;
     const texto = mensagem.text?.body || '';
 
-    console.log(`📩 [WhatsApp webhook] mensagem de ${telefone} pro phone_number_id ${phoneNumberId}: "${texto}"`);
+    console.log(`[WhatsApp webhook] mensagem de ${telefone} pro phone_number_id ${phoneNumberId}: "${texto}"`);
 
     const { data: empresa } = await supabase
       .from('empresas')
@@ -49,7 +49,7 @@ router.post('/whatsapp/webhook', async (req, res) => {
       .maybeSingle();
 
     if (!empresa || !empresa.plano_plataforma?.permite_whatsapp_bot) {
-      console.log(`📩 [WhatsApp webhook] nenhuma empresa habilitada encontrada pro phone_number_id ${phoneNumberId}`);
+      console.log(`[WhatsApp webhook] nenhuma empresa habilitada encontrada pro phone_number_id ${phoneNumberId}`);
       return;
     }
 

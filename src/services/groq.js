@@ -1,4 +1,4 @@
-// Adapter fino sobre a API da Groq (compatível com o formato da OpenAI) — recurso de IA
+// Adapter fino sobre a API da Groq (compatível com o formato da OpenAI). Recurso de IA
 // gated pro plano Profissional/Enterprise (>R$100/mês, ver planos_plataforma.permite_ia).
 // Usa fetch puro (já disponível nativamente no Node) em vez de instalar o SDK da Groq,
 // mesmo padrão dos outros adapters do projeto (pagamento.js, whatsapp/provider.js).

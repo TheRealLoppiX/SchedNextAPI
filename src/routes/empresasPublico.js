@@ -9,7 +9,7 @@ const { registrarEmpresaSchema } = require('../schemas');
 const router = express.Router();
 
 // Planos da plataforma (não confundir com planos_assinatura, que é o plano de
-// fidelidade que a barbearia vende pro cliente dela) — usado pela landing e pelo
+// fidelidade que a barbearia vende pro cliente dela). Usado pela landing e pelo
 // passo de escolha de plano do cadastro self-service.
 router.get('/planos-plataforma', async (req, res) => {
   const { data, error } = await supabase
@@ -49,7 +49,7 @@ router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmp
   if (!plano) return res.status(400).json({ error: 'Plano inválido.' });
 
   // Plano Grátis ativa na hora; planos pagos entram em trial até a cobrança real ser
-  // integrada (ver adapter de pagamento em src/services/pagamento.js) — ninguém fica
+  // integrada (ver adapter de pagamento em src/services/pagamento.js). Ninguém fica
   // bloqueado esperando uma integração que ainda não existe.
   const statusInicial = plano.nome === 'Grátis' ? 'ativa' : 'trial';
   const senhaHash = await bcrypt.hash(senha, 12);

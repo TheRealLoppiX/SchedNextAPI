@@ -5,8 +5,17 @@ const jwt = require('jsonwebtoken');
 const supabase = require('../config/supabase');
 const transporter = require('../config/mailer');
 const validate = require('../middleware/validate');
-const { loginLimiter } = require('../middleware/rateLimiters');
-const { registrarSchema, loginSchema } = require('../schemas');
+const { loginLimiter, codigoLimiter } = require('../middleware/rateLimiters');
+const {
+  registrarSchema,
+  loginSchema,
+  confirmarCodigoSchema,
+  recuperarSenhaSchema,
+  resetarSenhaSchema,
+  segurancaCodigoSchema,
+  segurancaUpdateSchema,
+  segurancaValidarSchema
+} = require('../schemas');
 const validarSenhaComMigracao = require('../utils/senha');
 
 const router = express.Router();
@@ -32,11 +41,15 @@ router.post('/registrar', validate(registrarSchema), async (req, res) => {
     telefone,
     senha: senhaHash,
     empresa_id: empresa.id,
-    codigo_verificacao: codigoVerificacao
+    codigo_verificacao: codigoVerificacao,
+    // Sem isso, um cliente que se auto-cadastra pelo site nunca aparece em Admin > Clientes
+    // (routes/clientes.js filtra por tipo = 'cliente'). Só o cadastro rápido pelo admin
+    // (routes/clientes.js /rapido) setava esse campo.
+    tipo: 'cliente'
   });
 
   if (error) {
-    console.error('❌ ERRO NO BANCO DE DADOS:', error);
+    console.error('ERRO NO BANCO DE DADOS:', error);
     if (error.code === '23505') return res.status(400).json({ error: 'Este e-mail já está cadastrado.' });
     return res.status(500).json({ error: `Erro técnico: ${error.message}` });
   }
@@ -49,7 +62,7 @@ router.post('/registrar', validate(registrarSchema), async (req, res) => {
   };
 
   transporter.sendMail(mailOptions, (mailErr) => {
-    if (mailErr) console.error('❌ Erro ao enviar e-mail:', mailErr);
+    if (mailErr) console.error('Erro ao enviar e-mail:', mailErr);
   });
 
   res.status(201).json({ message: 'Cadastrado com sucesso! Verifique seu e-mail.' });
@@ -87,7 +100,7 @@ router.post('/login', loginLimiter, validate(loginSchema), async (req, res) => {
   }
 });
 
-router.post('/confirmar-codigo', async (req, res) => {
+router.post('/confirmar-codigo', codigoLimiter, validate(confirmarCodigoSchema), async (req, res) => {
   const { email, codigo } = req.body;
 
   const { data, error } = await supabase
@@ -101,7 +114,7 @@ router.post('/confirmar-codigo', async (req, res) => {
   res.json({ message: 'Conta ativada!' });
 });
 
-router.post('/recuperar-senha', async (req, res) => {
+router.post('/recuperar-senha', codigoLimiter, validate(recuperarSenhaSchema), async (req, res) => {
   const { email } = req.body;
   const codigo = Math.floor(100000 + Math.random() * 900000).toString();
 
@@ -122,7 +135,7 @@ router.post('/recuperar-senha', async (req, res) => {
   res.json({ message: 'Código enviado!' });
 });
 
-router.post('/resetar-senha', async (req, res) => {
+router.post('/resetar-senha', codigoLimiter, validate(resetarSenhaSchema), async (req, res) => {
   const { email, codigo, novaSenha } = req.body;
   const novaSenhaHash = await bcrypt.hash(novaSenha, 12);
 
@@ -147,7 +160,7 @@ router.post('/resetar-senha', async (req, res) => {
   res.json({ message: 'Senha alterada!' });
 });
 
-router.post('/seguranca-codigo', async (req, res) => {
+router.post('/seguranca-codigo', codigoLimiter, validate(segurancaCodigoSchema), async (req, res) => {
   const { id } = req.body;
   const codigo = Math.floor(100000 + Math.random() * 900000).toString();
 
@@ -166,7 +179,7 @@ router.post('/seguranca-codigo', async (req, res) => {
   res.json({ message: 'Código enviado com sucesso!' });
 });
 
-router.put('/seguranca-update/:id', async (req, res) => {
+router.put('/seguranca-update/:id', codigoLimiter, validate(segurancaUpdateSchema), async (req, res) => {
   const { email, senha, codigo } = req.body;
   const userId = req.params.id;
   const senhaHash = await bcrypt.hash(senha, 12);
@@ -190,7 +203,7 @@ router.put('/seguranca-update/:id', async (req, res) => {
   res.json({ message: 'Dados de segurança atualizados!' });
 });
 
-router.post('/seguranca-validar', async (req, res) => {
+router.post('/seguranca-validar', codigoLimiter, validate(segurancaValidarSchema), async (req, res) => {
   const { id, codigo } = req.body;
 
   const { data, error } = await supabase

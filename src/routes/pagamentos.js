@@ -1,13 +1,16 @@
 const express = require('express');
+const crypto = require('crypto');
 const supabase = require('../config/supabase');
 const { estaConfigurado, criarCheckout } = require('../services/pagamento');
+const validate = require('../middleware/validate');
+const { iniciarUpgradeSchema } = require('../schemas');
 
 const router = express.Router();
 
 const UM_MES_MS = 30 * 24 * 60 * 60 * 1000;
 
 // Protegida pelo mesmo verificarTokenAdmin de toda a área /admin/* (ver server.js).
-router.post('/admin/assinatura-plataforma/iniciar-upgrade', async (req, res) => {
+router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgradeSchema), async (req, res) => {
   const empresaId = req.empresaId;
   const { plano_plataforma_id } = req.body;
 
@@ -19,7 +22,7 @@ router.post('/admin/assinatura-plataforma/iniciar-upgrade', async (req, res) => 
 
   if (error || !plano) return res.status(400).json({ error: 'Plano inválido.' });
 
-  // Trocar de plano sempre limpa qualquer cancelamento agendado anterior — o cliente está
+  // Trocar de plano sempre limpa qualquer cancelamento agendado anterior. O cliente está
   // ativamente escolhendo continuar (ou mudar), não faz sentido manter um downgrade pendente.
   const proximaCobranca = plano.preco_mensal > 0 ? new Date(Date.now() + UM_MES_MS).toISOString() : null;
 
@@ -44,7 +47,7 @@ router.post('/admin/assinatura-plataforma/iniciar-upgrade', async (req, res) => 
   }
 });
 
-// Cancela a COBRANÇA — o plano atual continua ativo até proxima_cobranca_em, e só nessa
+// Cancela a COBRANÇA. O plano atual continua ativo até proxima_cobranca_em, e só nessa
 // data (processado pelo cron em src/cron/assinaturas.js) a conta cai pro plano Grátis.
 router.post('/admin/assinatura-plataforma/cancelar-cobranca', async (req, res) => {
   const empresaId = req.empresaId;
@@ -63,14 +66,14 @@ router.post('/admin/assinatura-plataforma/cancelar-cobranca', async (req, res) =
   res.json({ message: `Cobrança cancelada. Seu plano continua ativo até ${new Date(empresa.proxima_cobranca_em).toLocaleDateString('pt-BR')}, quando a conta passa pro plano Grátis automaticamente.` });
 });
 
-// Desfaz o cancelamento agendado — a cobrança volta a acontecer normalmente na data prevista.
+// Desfaz o cancelamento agendado. A cobrança volta a acontecer normalmente na data prevista.
 router.post('/admin/assinatura-plataforma/reativar-cobranca', async (req, res) => {
   const empresaId = req.empresaId;
   await supabase.from('empresas').update({ cancelamento_agendado: false }).eq('id', empresaId);
-  res.json({ message: 'Cobrança reativada — seu plano continua normalmente.' });
+  res.json({ message: 'Cobrança reativada. Seu plano continua normalmente.' });
 });
 
-// Cancela o PLANO imediatamente (sem reembolso) — diferente de cancelar a cobrança, aqui a
+// Cancela o PLANO imediatamente (sem reembolso). Diferente de cancelar a cobrança, aqui a
 // conta já cai pro Grátis na hora, mesmo que reste tempo pago no ciclo atual.
 router.post('/admin/assinatura-plataforma/cancelar-plano', async (req, res) => {
   const empresaId = req.empresaId;
@@ -89,16 +92,32 @@ router.post('/admin/assinatura-plataforma/cancelar-plano', async (req, res) => {
     .eq('id', empresaId);
 
   if (error) return res.status(500).json({ error: 'Erro ao cancelar o plano.' });
-  res.json({ message: 'Plano cancelado imediatamente. Você já está no plano Grátis — sem reembolso do período restante.' });
+  res.json({ message: 'Plano cancelado imediatamente. Você já está no plano Grátis, sem reembolso do período restante.' });
 });
 
-// Webhook do gateway de pagamento — formato genérico por enquanto (empresa_id + status);
-// quando o gateway real for escolhido, adaptar o parsing do payload aqui, sem mudar o resto.
-// IMPORTANTE: sem gateway real ainda não há assinatura/segredo pra validar a origem da
-// chamada — antes de aceitar tráfego de produção, adicionar aqui a verificação de assinatura
-// do gateway escolhido (todo webhook de pagamento sério manda uma), senão qualquer um pode
-// chamar essa rota e forjar status de assinatura.
+// Webhook do gateway de pagamento. Formato genérico por enquanto (empresa_id + status);
+// quando o gateway real for escolhido, TROCAR esta checagem pela verificação de assinatura
+// própria do gateway (Mercado Pago/Asaas/Pagar.me todos mandam uma). Isso é só um segredo
+// compartilhado de curto prazo pra fechar o buraco de "qualquer um pode forjar status de
+// assinatura" enquanto nenhum gateway real está configurado. Sem PAGAMENTOS_WEBHOOK_SECRET
+// definido, a rota recusa toda chamada (fail-closed) em vez de aceitar sem validar nada.
 router.post('/pagamentos/webhook', async (req, res) => {
+  const segredoEsperado = process.env.PAGAMENTOS_WEBHOOK_SECRET;
+  const segredoRecebido = req.headers['x-webhook-secret'];
+
+  if (!segredoEsperado) {
+    console.error('PAGAMENTOS_WEBHOOK_SECRET não configurado, recusando webhook de pagamento.');
+    return res.status(503).json({ error: 'Webhook de pagamento não configurado.' });
+  }
+
+  const bufEsperado = Buffer.from(segredoEsperado);
+  const bufRecebido = Buffer.from(String(segredoRecebido || ''));
+  const valido = bufEsperado.length === bufRecebido.length && crypto.timingSafeEqual(bufEsperado, bufRecebido);
+
+  if (!valido) {
+    return res.status(401).json({ error: 'Assinatura inválida.' });
+  }
+
   const { empresa_id, status_assinatura, gateway_customer_id } = req.body;
 
   if (!empresa_id || !status_assinatura) return res.status(400).json({ error: 'Payload inválido.' });

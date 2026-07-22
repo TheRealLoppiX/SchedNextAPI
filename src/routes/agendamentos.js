@@ -4,15 +4,31 @@ const bcrypt = require('bcrypt');
 const supabase = require('../config/supabase');
 const transporter = require('../config/mailer');
 const validate = require('../middleware/validate');
-const { agendarSchema } = require('../schemas');
-const { limiteAgendamentosMesAtingido } = require('../utils/limitesPlano');
+const verificarTokenCliente = require('../middleware/clienteAuth');
+const {
+  agendarSchema,
+  encaixeSchema,
+  finalizarEncaixeCompletoSchema,
+  confirmarAgendamentoSchema,
+  cancelarAgendamentoSchema,
+  finalizarCheckoutSchema,
+  agendarEncaixeSchema
+} = require('../schemas');
+const {
+  limiteAgendamentosMesAtingido,
+  confirmarLimiteAgendamentosOuDesfazer
+} = require('../utils/limitesPlano');
 
 const MENSAGEM_LIMITE_AGENDAMENTOS = 'Este estabelecimento atingiu o limite de agendamentos do mês. Peça para o administrador fazer upgrade de plano.';
 
 const router = express.Router();
 
-router.post('/agendar', validate(agendarSchema), async (req, res) => {
-  const { usuario_id, barbeiro_id, empresa_slug, data_hora, servicos, unidade_id } = req.body;
+// verificarTokenCliente garante que o agendamento é criado em nome de quem está de fato
+// logado (req.usuarioId). Antes, o usuario_id vinha direto do body, então qualquer chamador
+// podia criar/"trancar" a agenda de outro cliente só sabendo o ID dele.
+router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (req, res) => {
+  const { barbeiro_id, empresa_slug, data_hora, servicos, unidade_id } = req.body;
+  const usuario_id = req.usuarioId;
 
   // 1. EXTRAI APENAS A DATA (YYYY-MM-DD) PARA VALIDAR O DIA
   const dataApenas = data_hora.split(' ')[0];
@@ -69,6 +85,13 @@ router.post('/agendar', validate(agendarSchema), async (req, res) => {
 
   if (insErr) return res.status(500).json({ error: 'Erro no banco: ' + insErr.message });
 
+  // Reconfere o limite logo após inserir (ver comentário em utils/limitesPlano.js). Cobre a
+  // corrida em que dois agendamentos concorrentes passaram os dois pela checagem acima antes
+  // de qualquer um deles existir no banco.
+  if (!(await confirmarLimiteAgendamentosOuDesfazer(emp.id, novoAgendamento.id))) {
+    return res.status(403).json({ error: MENSAGEM_LIMITE_AGENDAMENTOS });
+  }
+
   const vinculos = servicos.map((s) => ({ agendamento_id: novoAgendamento.id, servico_id: s.id }));
   const { error: vincErr } = await supabase.from('agendamento_servicos').insert(vinculos);
   if (vincErr) return res.status(500).json({ error: 'Erro ao vincular serviços' });
@@ -80,7 +103,7 @@ router.post('/agendar', validate(agendarSchema), async (req, res) => {
       from: '"Barbearia" <barberariateste@gmail.com>',
       to: usuario.email,
       subject: 'Agendamento Confirmado!',
-      text: `Olá ${usuario.nome_completo}, seu agendamento na ${emp.nome} foi realizado!\n\n📅 Data: ${dataFormatada}\n💰 Valor: R$ ${valorTotal}`
+      text: `Olá ${usuario.nome_completo}, seu agendamento na ${emp.nome} foi realizado!\n\nData: ${dataFormatada}\nValor: R$ ${valorTotal}`
     });
   }
 
@@ -89,7 +112,7 @@ router.post('/agendar', validate(agendarSchema), async (req, res) => {
 
 // Rota para buscar estatísticas do Dashboard Admin
 router.get('/admin/stats/:empresa_id', async (req, res) => {
-  const { empresa_id } = req.params;
+  const empresa_id = req.empresaId;
   const { dataInicio, dataFim } = req.query;
 
   let query = supabase.from('agendamentos').select('id, status, data_hora').eq('empresa_id', empresa_id);
@@ -103,8 +126,8 @@ router.get('/admin/stats/:empresa_id', async (req, res) => {
   const dezMinAtras = new Date(agora.getTime() - 10 * 60000);
 
   const total = agendamentos.length;
-  // Nota: 'finalizado' nunca foi um valor válido do ENUM real de status (ver database-schema.md)
-  // — os filtros originais que incluíam 'finalizado' foram reduzidos a só 'concluido'/'cancelado'.
+  // 'finalizado' nunca foi um valor válido do ENUM real de status (ver database-schema.md).
+  // Os filtros originais que incluíam 'finalizado' foram reduzidos a só 'concluido'/'cancelado'.
   const concluidos = agendamentos.filter((a) => a.status === 'concluido').length;
   const cancelados = agendamentos.filter((a) => a.status === 'cancelado').length;
   const nao_compareceu = agendamentos.filter(
@@ -133,8 +156,12 @@ router.get('/admin/stats/:empresa_id', async (req, res) => {
   });
 });
 
-router.post('/admin/encaixe', async (req, res) => {
-  const { barbeiro_id, empresa_id, cliente_nome, data_hora, servicos_ids } = req.body;
+router.post('/admin/encaixe', validate(encaixeSchema), async (req, res) => {
+  const { barbeiro_id, cliente_nome, data_hora, servicos_ids } = req.body;
+  const empresa_id = req.empresaId;
+
+  const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', barbeiro_id).maybeSingle();
+  if (!barbeiro || barbeiro.empresa_id !== empresa_id) return res.status(404).json({ error: 'Profissional não encontrado.' });
 
   const agora = new Date();
   const dataTentativa = new Date(data_hora);
@@ -156,7 +183,7 @@ router.post('/admin/encaixe', async (req, res) => {
   const duracaoTotal = (servicosInfo || []).reduce((acc, s) => acc + (s.duracao || 0), 0);
   const valorTotal = (servicosInfo || []).reduce((acc, s) => acc + Number(s.valor || 0), 0);
 
-  // Nota: a coluna `observacoes` nunca existiu no banco real (ver database-schema.md) — a versão
+  // A coluna `observacoes` nunca existiu no banco real (ver database-schema.md); a versão
   // MySQL desta rota já estava quebrada por isso. Corrigido para usar `cliente_nome`, igual à
   // rota irmã /admin/agendar-encaixe.
   const { data: novoAgendamento, error: agError } = await supabase
@@ -179,6 +206,10 @@ router.post('/admin/encaixe', async (req, res) => {
     return res.status(500).json({ error: 'Erro ao salvar o agendamento.' });
   }
 
+  if (!(await confirmarLimiteAgendamentosOuDesfazer(empresa_id, novoAgendamento.id))) {
+    return res.status(403).json({ error: MENSAGEM_LIMITE_AGENDAMENTOS });
+  }
+
   const vinculos = servicos_ids.map((servico_id) => ({ agendamento_id: novoAgendamento.id, servico_id }));
   const { error: vincError } = await supabase.from('agendamento_servicos').insert(vinculos);
 
@@ -192,12 +223,17 @@ router.post('/admin/encaixe', async (req, res) => {
 
 // BUSCAR CLIENTES (Para a flag de pesquisa)
 router.get('/admin/buscar-clientes', async (req, res) => {
-  const { q } = req.query;
+  // Remove vírgula/parênteses antes de interpolar no `.or()`: o PostgREST separa condições por
+  // vírgula, então um valor como "x,telefone.neq.0" injetaria uma cláusula extra no filtro.
+  const q = String(req.query.q || '').replace(/[,()]/g, '');
 
+  // Sem o filtro por empresa_id, isso vazava clientes de QUALQUER tenant pra qualquer admin
+  // autenticado; a busca nunca era restrita à empresa de quem estava logado.
   const { data, error } = await supabase
     .from('usuarios')
     .select('id, nome_completo, email, telefone')
     .eq('tipo', 'cliente')
+    .eq('empresa_id', req.empresaId)
     .or(`nome_completo.ilike.%${q}%,telefone.ilike.%${q}%`)
     .limit(10);
 
@@ -217,8 +253,9 @@ router.get('/admin/buscar-clientes', async (req, res) => {
 });
 
 // ENCAIXE E CADASTRO COMPLETO (A rota "Matadora")
-router.post('/admin/finalizar-encaixe-completo', async (req, res) => {
-  const { barbeiro_id, empresa_id, data_hora, servicos_ids, isNovoCliente, clienteData } = req.body;
+router.post('/admin/finalizar-encaixe-completo', validate(finalizarEncaixeCompletoSchema), async (req, res) => {
+  const { barbeiro_id, data_hora, servicos_ids, isNovoCliente, clienteData } = req.body;
+  const empresa_id = req.empresaId;
 
   try {
     if (await limiteAgendamentosMesAtingido(empresa_id)) {
@@ -243,7 +280,7 @@ router.post('/admin/finalizar-encaixe-completo', async (req, res) => {
           senha: senhaHash,
           telefone: clienteData.telefone || null,
           data_nascimento: clienteData.data_nascimento || null,
-          empresa_id: empresa_id || null,
+          empresa_id,
           ativo: true
         })
         .select('id')
@@ -252,7 +289,17 @@ router.post('/admin/finalizar-encaixe-completo', async (req, res) => {
       if (userErr) throw userErr;
       finalUserId = novoUsuario.id;
     } else {
-      finalUserId = clienteData.id;
+      // Cliente existente: confere que pertence a esta empresa antes de vincular o
+      // agendamento a ele. Sem isso, um admin podia atender "em nome" de um cliente de
+      // outra empresa só passando o ID.
+      const { data: clienteExistente } = await supabase
+        .from('usuarios')
+        .select('id')
+        .eq('id', clienteData.id)
+        .eq('empresa_id', empresa_id)
+        .maybeSingle();
+      if (!clienteExistente) return res.status(404).json({ error: 'Cliente não encontrado.' });
+      finalUserId = clienteExistente.id;
     }
 
     const { data: novoAgendamento, error: agError } = await supabase
@@ -270,6 +317,10 @@ router.post('/admin/finalizar-encaixe-completo', async (req, res) => {
 
     if (agError) throw agError;
 
+    if (!(await confirmarLimiteAgendamentosOuDesfazer(empresa_id, novoAgendamento.id))) {
+      return res.status(403).json({ error: MENSAGEM_LIMITE_AGENDAMENTOS });
+    }
+
     if (servicos_ids && servicos_ids.length > 0) {
       const vinculos = servicos_ids.map((srvId) => ({ agendamento_id: novoAgendamento.id, servico_id: srvId }));
       const { error: vincError } = await supabase.from('agendamento_servicos').insert(vinculos);
@@ -284,23 +335,36 @@ router.post('/admin/finalizar-encaixe-completo', async (req, res) => {
 });
 
 // Rota para Confirmar Agendamento
-router.post('/admin/confirmar-agendamento', async (req, res) => {
+router.post('/admin/confirmar-agendamento', validate(confirmarAgendamentoSchema), async (req, res) => {
   const { agendamento_id } = req.body;
-  const { error } = await supabase.from('agendamentos').update({ status: 'confirmado' }).eq('id', agendamento_id);
+  const { data, error } = await supabase
+    .from('agendamentos')
+    .update({ status: 'confirmado' })
+    .eq('id', agendamento_id)
+    .eq('empresa_id', req.empresaId)
+    .select('id');
   if (error) return res.status(500).json(error);
+  if (!data || data.length === 0) return res.status(404).json({ error: 'Agendamento não encontrado.' });
   res.json({ success: true });
 });
 
-router.post('/admin/cancelar-agendamento', async (req, res) => {
+router.post('/admin/cancelar-agendamento', validate(cancelarAgendamentoSchema), async (req, res) => {
   const { agendamento_id, justificativa, enviadoPor } = req.body;
 
   if (!agendamento_id) return res.status(400).json({ error: 'ID ausente' });
 
-  // 1. Primeiro cancelamos no banco para garantir que a agenda seja liberada
-  const { error: updError } = await supabase
+  // 1. Primeiro cancelamos no banco para garantir que a agenda seja liberada. O filtro por
+  // empresa_id evita que um admin de outra empresa cancele um agendamento que não é dele.
+  const { data: cancelado, error: updError } = await supabase
     .from('agendamentos')
     .update({ status: 'cancelado', justificativa_cancelamento: justificativa, cancelado_por: enviadoPor })
-    .eq('id', agendamento_id);
+    .eq('id', agendamento_id)
+    .eq('empresa_id', req.empresaId)
+    .select('id');
+
+  if (!updError && (!cancelado || cancelado.length === 0)) {
+    return res.status(404).json({ error: 'Agendamento não encontrado.' });
+  }
 
   if (updError) {
     console.error('Erro no Update:', updError);
@@ -319,7 +383,7 @@ router.post('/admin/cancelar-agendamento', async (req, res) => {
   }
 
   // ATENÇÃO: agendamento.data_hora vem do banco com rótulo UTC (+00), mas os números gravados
-  // já são o horário de parede pretendido (sem conversão real de fuso) — usar toLocaleString
+  // já são o horário de parede pretendido (sem conversão real de fuso). Usar toLocaleString
   // aqui faria uma conversão de fuso de verdade e mostraria 3h a menos. Extraímos os
   // componentes com os getters UTC, que pegam exatamente os números gravados.
   const dhAg = new Date(agendamento.data_hora);
@@ -328,7 +392,7 @@ router.post('/admin/cancelar-agendamento', async (req, res) => {
   const mailOptions = {
     from: '"Barbearia" <barberariateste@gmail.com>',
     to: agendamento.usuarios.email,
-    subject: '⚠️ Seu agendamento foi cancelado',
+    subject: 'Seu agendamento foi cancelado',
     html: `
         <div style="font-family: sans-serif; color: #333;">
             <h2 style="color: #d32f2f;">Olá, ${agendamento.usuarios.nome_completo}!</h2>
@@ -342,7 +406,7 @@ router.post('/admin/cancelar-agendamento', async (req, res) => {
 
   transporter.sendMail(mailOptions, (error) => {
     if (error) {
-      console.error('📧 Erro ao enviar e-mail (Gmail):', error);
+      console.error('Erro ao enviar e-mail (Gmail):', error);
       return res.json({ message: 'Cancelado no banco, mas o e-mail falhou (verifique a senha de app do Gmail).' });
     }
     res.json({ message: 'Cancelado com sucesso e cliente avisado por e-mail!' });
@@ -350,7 +414,7 @@ router.post('/admin/cancelar-agendamento', async (req, res) => {
 });
 
 // ROTA DE CHECKOUT (Para finalizar o atendimento e receber o pagamento)
-router.post('/admin/finalizar-servico-checkout', async (req, res) => {
+router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchema), async (req, res) => {
   const { agendamento_id, produtos_vendidos, servicos_adicionais } = req.body;
 
   if (!agendamento_id) {
@@ -365,20 +429,43 @@ router.post('/admin/finalizar-servico-checkout', async (req, res) => {
       .eq('id', agendamento_id)
       .maybeSingle();
     if (agErr) throw agErr;
+    if (!agAtual || agAtual.empresa_id !== req.empresaId) {
+      return res.status(404).json({ error: 'Agendamento não encontrado.' });
+    }
 
     const valorBase = parseFloat(agAtual?.valor_total || 0);
 
-    // 2. Soma os serviços adicionais escolhidos no PDV
-    const valorAdicionais = (servicos_adicionais || []).reduce((acc, s) => {
-      return acc + parseFloat(String(s.valor || s.preco || '0').replace(',', '.'));
-    }, 0);
+    // 2. Soma os serviços adicionais escolhidos no PDV. O preço vem do banco (tabela
+    // `servicos`), nunca do valor que o cliente/admin mandou no body: senão uma requisição
+    // forjada podia fechar a conta por qualquer valor, incluindo 0.
+    const idsServicosAdicionais = (servicos_adicionais || []).map((s) => s.id).filter(Boolean);
+    let precoPorServico = {};
+    if (idsServicosAdicionais.length > 0) {
+      const { data: servicosReais } = await supabase
+        .from('servicos')
+        .select('id, valor')
+        .in('id', idsServicosAdicionais)
+        .eq('empresa_id', agAtual.empresa_id);
+      precoPorServico = Object.fromEntries((servicosReais || []).map((s) => [s.id, Number(s.valor) || 0]));
+    }
+    const valorAdicionais = (servicos_adicionais || []).reduce((acc, s) => acc + (precoPorServico[s.id] || 0), 0);
 
-    // 3. Soma os produtos vendidos
-    const valorProdutos = (produtos_vendidos || []).reduce((acc, p) => {
-      const preco = parseFloat(String(p.valor || p.preco || '0').replace(',', '.'));
-      const qtd = parseInt(p.quantidade || 1, 10);
-      return acc + preco * qtd;
-    }, 0);
+    // 3. Soma os produtos vendidos. Mesmo raciocínio: preço vem do banco (`produtos`), não
+    // do body. Só a quantidade é informação legítima do PDV.
+    let valorProdutos = 0;
+    if (produtos_vendidos && produtos_vendidos.length > 0) {
+      const idsProdutos = produtos_vendidos.map((p) => p.id).filter(Boolean);
+      const { data: produtosReais } = await supabase
+        .from('produtos')
+        .select('id, valor')
+        .in('id', idsProdutos)
+        .eq('empresa_id', agAtual.empresa_id);
+      const precoPorProduto = Object.fromEntries((produtosReais || []).map((p) => [p.id, Number(p.valor) || 0]));
+      valorProdutos = produtos_vendidos.reduce((acc, p) => {
+        const qtd = parseInt(p.quantidade || 1, 10);
+        return acc + (precoPorProduto[p.id] || 0) * qtd;
+      }, 0);
+    }
 
     const valorFinal = valorBase + valorAdicionais + valorProdutos;
 
@@ -386,7 +473,8 @@ router.post('/admin/finalizar-servico-checkout', async (req, res) => {
     const { error: updError } = await supabase
       .from('agendamentos')
       .update({ status: 'concluido', valor_total: valorFinal })
-      .eq('id', agendamento_id);
+      .eq('id', agendamento_id)
+      .eq('empresa_id', req.empresaId);
     if (updError) throw updError;
 
     // 5. Baixa de estoque dos produtos vendidos
@@ -406,10 +494,10 @@ router.post('/admin/finalizar-servico-checkout', async (req, res) => {
               .update({ quantidade: produtoAtual.quantidade - produto.quantidade })
               .eq('id', produto.id)
               .eq('empresa_id', agAtual.empresa_id);
-            console.log(`✅ Baixa de estoque: Produto ID ${produto.id} | Qtd: -${produto.quantidade}`);
+            console.log(`Baixa de estoque: Produto ID ${produto.id} | Qtd: -${produto.quantidade}`);
           }
         } catch (errEstoque) {
-          console.error('❌ Erro ao baixar estoque:', errEstoque);
+          console.error('Erro ao baixar estoque:', errEstoque);
         }
       }
     }
@@ -431,14 +519,12 @@ router.post('/admin/finalizar-servico-checkout', async (req, res) => {
 
 // GET AGENDAMENTOS - busca nome dos serviços via join (a.servicos não existe no banco)
 router.get('/admin/agendamentos/:empresaId', async (req, res) => {
-  const { empresaId } = req.params;
-
   const { data, error } = await supabase
     .from('agendamentos')
     .select(
       'id, data_hora, status, valor_total, duracao_total, cliente_nome, usuarios(nome_completo, telefone), barbeiros(id, nome), agendamento_servicos(servicos(nome))'
     )
-    .eq('empresa_id', empresaId)
+    .eq('empresa_id', req.empresaId)
     .order('data_hora', { ascending: false });
 
   if (error) {
@@ -472,8 +558,9 @@ router.get('/admin/agendamentos/:empresaId', async (req, res) => {
   res.json(formatado);
 });
 
-router.post('/admin/agendar-encaixe', async (req, res) => {
-  const { empresa_id, barbeiro_id, usuario_id, data_hora, servicos, cliente_nome } = req.body;
+router.post('/admin/agendar-encaixe', validate(agendarEncaixeSchema), async (req, res) => {
+  const { barbeiro_id, usuario_id, data_hora, servicos, cliente_nome } = req.body;
+  const empresa_id = req.empresaId;
 
   try {
     if (await limiteAgendamentosMesAtingido(empresa_id)) {
@@ -488,13 +575,15 @@ router.post('/admin/agendar-encaixe', async (req, res) => {
       ? servicos.reduce((acc, s) => acc + parseInt(s.duracao || 30, 10), 0)
       : 30;
 
-    // Se não tem usuario_id, usa o nome do cliente avulso; senão busca o nome do usuário vinculado
+    // Se não tem usuario_id, usa o nome do cliente avulso; senão busca o nome do usuário
+    // vinculado, já conferindo que ele pertence a esta empresa.
     let nomeClienteAvulso = null;
     if (!usuario_id && cliente_nome) {
       nomeClienteAvulso = cliente_nome;
     } else if (usuario_id) {
-      const { data: uRow } = await supabase.from('usuarios').select('nome_completo').eq('id', usuario_id).maybeSingle();
-      nomeClienteAvulso = uRow ? uRow.nome_completo : null;
+      const { data: uRow } = await supabase.from('usuarios').select('nome_completo').eq('id', usuario_id).eq('empresa_id', empresa_id).maybeSingle();
+      if (!uRow) return res.status(404).json({ error: 'Cliente não encontrado.' });
+      nomeClienteAvulso = uRow.nome_completo;
     }
 
     // Nota: duracao_total e cliente_nome existem de verdade no banco (confirmado no dump real),
@@ -516,6 +605,10 @@ router.post('/admin/agendar-encaixe', async (req, res) => {
 
     if (insertErr) throw insertErr;
 
+    if (!(await confirmarLimiteAgendamentosOuDesfazer(empresa_id, novoAgendamento.id))) {
+      return res.status(403).json({ error: MENSAGEM_LIMITE_AGENDAMENTOS });
+    }
+
     // Nota: preco_na_epoca não existe no banco real (ver database-schema.md), então nunca a inserimos.
     if (servicos && servicos.length > 0) {
       const vinculos = servicos.map((s) => ({ agendamento_id: novoAgendamento.id, servico_id: s.id }));
@@ -535,11 +628,13 @@ router.get('/admin/agendamento-usuario/:id', async (req, res) => {
   try {
     const { data: ag } = await supabase
       .from('agendamentos')
-      .select('usuario_id, valor_total, usuarios(assinante, plano_id)')
+      .select('usuario_id, valor_total, empresa_id, usuarios(assinante, plano_id)')
       .eq('id', req.params.id)
       .maybeSingle();
 
-    if (!ag) return res.json({ usuario_id: null, assinante: false, servicos_ids: [], servicos_agendados_ids: [] });
+    if (!ag || ag.empresa_id !== req.empresaId) {
+      return res.json({ usuario_id: null, assinante: false, servicos_ids: [], servicos_agendados_ids: [] });
+    }
 
     const { data: asvRows } = await supabase
       .from('agendamento_servicos')

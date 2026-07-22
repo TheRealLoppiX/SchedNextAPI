@@ -2,10 +2,12 @@ const express = require('express');
 const supabase = require('../config/supabase');
 const { permiteMultiUnidade } = require('../utils/limitesPlano');
 const { obterSlugTenant, resolverEmpresaPorSlug } = require('../utils/tenantContext');
+const validate = require('../middleware/validate');
+const { unidadeCriarSchema, unidadeAtualizarSchema } = require('../schemas');
 
 const router = express.Router();
 
-// Pública — usada pelo fluxo de agendamento do cliente pra decidir se mostra um seletor
+// Pública, usada pelo fluxo de agendamento do cliente pra decidir se mostra um seletor
 // de unidade (só faz sentido perguntar quando existe mais de uma unidade ativa).
 router.get('/unidades', async (req, res) => {
   const slug = obterSlugTenant(req);
@@ -23,8 +25,8 @@ router.get('/unidades', async (req, res) => {
   res.json(data);
 });
 
-// Multi-unidade é um recurso exclusivo do plano Enterprise (ver §3 do plano de plataforma) —
-// diferente dos limites de profissionais/agendamentos, aqui não existe "primeira unidade
+// Multi-unidade é um recurso exclusivo do plano Enterprise (ver §3 do plano de plataforma).
+// Diferente dos limites de profissionais/agendamentos, aqui não existe "primeira unidade
 // grátis": o recurso inteiro só existe pra quem tem o plano certo. Empresas sem esse plano
 // continuam funcionando exatamente como sempre funcionaram (barbeiros/agendamentos sem
 // unidade_id, ou seja, uma única localização implícita).
@@ -33,15 +35,16 @@ router.get('/admin/unidades/:empresaId', async (req, res) => {
   const { data, error } = await supabase
     .from('unidades')
     .select('*')
-    .eq('empresa_id', req.params.empresaId)
+    .eq('empresa_id', req.empresaId)
     .order('id');
 
   if (error) return res.status(500).json({ error: 'Erro ao listar unidades.' });
   res.json(data);
 });
 
-router.post('/admin/unidades', async (req, res) => {
-  const { empresa_id, nome, endereco } = req.body;
+router.post('/admin/unidades', validate(unidadeCriarSchema), async (req, res) => {
+  const { nome, endereco } = req.body;
+  const empresa_id = req.empresaId;
 
   if (!(await permiteMultiUnidade(empresa_id))) {
     return res.status(403).json({ error: 'Multi-unidade é um recurso exclusivo do plano Enterprise. Faça upgrade para cadastrar mais de uma localização.' });
@@ -59,11 +62,11 @@ router.post('/admin/unidades', async (req, res) => {
   res.status(201).json(data);
 });
 
-router.put('/admin/unidades/:id', async (req, res) => {
+router.put('/admin/unidades/:id', validate(unidadeAtualizarSchema), async (req, res) => {
   const { nome, endereco, horarios_funcionamento, ativo } = req.body;
 
   const { data: unidade } = await supabase.from('unidades').select('empresa_id').eq('id', req.params.id).maybeSingle();
-  if (!unidade) return res.status(404).json({ error: 'Unidade não encontrada.' });
+  if (!unidade || unidade.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Unidade não encontrada.' });
 
   if (!(await permiteMultiUnidade(unidade.empresa_id))) {
     return res.status(403).json({ error: 'Multi-unidade é um recurso exclusivo do plano Enterprise.' });
@@ -81,6 +84,9 @@ router.put('/admin/unidades/:id', async (req, res) => {
 });
 
 router.delete('/admin/unidades/:id', async (req, res) => {
+  const { data: unidade } = await supabase.from('unidades').select('empresa_id').eq('id', req.params.id).maybeSingle();
+  if (!unidade || unidade.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Unidade não encontrada.' });
+
   // Barbeiros/agendamentos vinculados só perdem a referência (unidade_id vira null, ver
   // ON DELETE SET NULL na migração), nunca são apagados junto.
   const { error } = await supabase.from('unidades').delete().eq('id', req.params.id);

@@ -1,8 +1,8 @@
-// Adapter de envio de WhatsApp via Meta Cloud API oficial (decisão final em 2026-07-21 — ver
+// Adapter de envio de WhatsApp via Meta Cloud API oficial (decisão final em 2026-07-21, ver
 // handoff.md; chegou a ser tentado o Twilio como BSP, mas o Sender de produção lá é pago, e a
 // Meta Cloud API direta é gratuita até ~1000 conversas/mês). Usa a Graph API direto via fetch,
 // sem SDK. Até WHATSAPP_PROVIDER_TOKEN/WHATSAPP_PHONE_NUMBER_ID estarem configurados, o
-// provider só loga a mensagem que teria sido enviada — dá pra testar a máquina de estados
+// provider só loga a mensagem que teria sido enviada, o que dá pra testar a máquina de estados
 // inteira sem depender de credenciais externas.
 
 const GRAPH_API_VERSION = 'v21.0';
@@ -13,7 +13,7 @@ function estaConfigurado() {
 
 async function enviarMensagem(telefone, texto) {
   if (!estaConfigurado()) {
-    console.log(`📱 [WhatsApp simulado] Para ${telefone}: ${texto}`);
+    console.log(`[WhatsApp simulado] Para ${telefone}: ${texto}`);
     return { enviado: false, simulado: true };
   }
 

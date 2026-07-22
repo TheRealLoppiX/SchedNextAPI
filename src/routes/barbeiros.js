@@ -1,7 +1,15 @@
 const express = require('express');
 const supabase = require('../config/supabase');
 const { obterSlugTenant, resolverEmpresaPorSlug } = require('../utils/tenantContext');
-const { limiteProfissionaisAtingido } = require('../utils/limitesPlano');
+const { limiteProfissionaisAtingido, confirmarLimiteProfissionaisOuDesfazer } = require('../utils/limitesPlano');
+const validate = require('../middleware/validate');
+const {
+  barbeiroCriarSchema,
+  barbeiroEditarSchema,
+  barbeiroStatusSchema,
+  bloqueioSchema,
+  barbeiroServicosSchema
+} = require('../schemas');
 
 const router = express.Router();
 
@@ -42,7 +50,14 @@ router.get('/barbeiros', async (req, res) => {
   res.json(resultado);
 });
 
-router.get('/barbeiro-servicos/:barbeiro_id', async (req, res) => {
+// Só usadas por AdminBarbeiros.js. Vivem sob /admin/* de propósito (verificarTokenAdmin já
+// garante req.empresaId), diferente da versão antiga que era pública ("/barbeiro-servicos"
+// sem prefixo), quando qualquer chamador anônimo podia reescrever os serviços de um barbeiro
+// de qualquer empresa só sabendo o ID.
+router.get('/admin/barbeiro-servicos/:barbeiro_id', async (req, res) => {
+  const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', req.params.barbeiro_id).maybeSingle();
+  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
+
   const { data, error } = await supabase
     .from('barbeiro_servicos')
     .select('servico_id')
@@ -53,8 +68,11 @@ router.get('/barbeiro-servicos/:barbeiro_id', async (req, res) => {
 });
 
 // Salvar/Atualizar serviços do barbeiro
-router.post('/barbeiro-servicos', async (req, res) => {
+router.post('/admin/barbeiro-servicos', validate(barbeiroServicosSchema), async (req, res) => {
   const { barbeiro_id, servicosIds } = req.body;
+
+  const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', barbeiro_id).maybeSingle();
+  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
 
   const { error: delError } = await supabase.from('barbeiro_servicos').delete().eq('barbeiro_id', barbeiro_id);
   if (delError) return res.status(500).json(delError);
@@ -69,45 +87,33 @@ router.post('/barbeiro-servicos', async (req, res) => {
 
 // Listar equipe completa para o Admin
 router.get('/admin/equipe/:empresaId', async (req, res) => {
-  const { data, error } = await supabase.from('barbeiros').select('*').eq('empresa_id', req.params.empresaId);
+  const { data, error } = await supabase.from('barbeiros').select('*').eq('empresa_id', req.empresaId);
   if (error) return res.status(500).json(error);
   res.json(data);
 });
 
-// Ativar/Desativar Barbeiro (edição completa)
-router.put('/barbeiros/:id', async (req, res) => {
-  const { id } = req.params;
-  // Nota: o campo do body ainda se chama "descricao" no front, mas a coluna real no banco
-  // é `especialidade` (bug pré-existente da versão MySQL — a rota tentava gravar em uma
-  // coluna `descricao` que nunca existiu; corrigido aqui na migração).
-  const { nome, descricao, ativo, foto_url } = req.body;
-
-  const { error } = await supabase
-    .from('barbeiros')
-    .update({ nome, especialidade: descricao, ativo, foto_url })
-    .eq('id', id);
-
-  if (error) {
-    console.error('Erro ao atualizar barbeiro:', error);
-    return res.status(500).json({ error: 'Erro interno' });
-  }
-  res.json({ message: 'Barbeiro atualizado com sucesso!' });
-});
-
-router.put('/admin/barbeiro/status', async (req, res) => {
+router.put('/admin/barbeiro/status', validate(barbeiroStatusSchema), async (req, res) => {
   const { id, ativo } = req.body;
 
-  const { error } = await supabase.from('barbeiros').update({ ativo: !!ativo }).eq('id', id);
+  const { data, error } = await supabase
+    .from('barbeiros')
+    .update({ ativo: !!ativo })
+    .eq('id', id)
+    .eq('empresa_id', req.empresaId)
+    .select('id');
+
   if (error) {
     console.error('Erro ao mudar status:', error);
     return res.status(500).json({ error: 'Erro interno' });
   }
+  if (!data || data.length === 0) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
   res.json({ message: 'Status alterado!' });
 });
 
 // Cadastrar novo barbeiro
-router.post('/admin/barbeiro', async (req, res) => {
-  const { nome, empresa_id, foto_url, unidade_id } = req.body;
+router.post('/admin/barbeiro', validate(barbeiroCriarSchema), async (req, res) => {
+  const { nome, foto_url, unidade_id } = req.body;
+  const empresa_id = req.empresaId;
 
   if (await limiteProfissionaisAtingido(empresa_id)) {
     return res.status(403).json({ error: 'Você atingiu o limite de profissionais do seu plano atual. Faça upgrade para cadastrar mais.' });
@@ -120,18 +126,33 @@ router.post('/admin/barbeiro', async (req, res) => {
     .single();
 
   if (error) return res.status(500).json(error);
+
+  if (!(await confirmarLimiteProfissionaisOuDesfazer(empresa_id, data.id))) {
+    return res.status(403).json({ error: 'Você atingiu o limite de profissionais do seu plano atual. Faça upgrade para cadastrar mais.' });
+  }
+
   res.json({ id: data.id });
 });
 
-router.put('/admin/barbeiro/editar', async (req, res) => {
+router.put('/admin/barbeiro/editar', validate(barbeiroEditarSchema), async (req, res) => {
   const { id, nome, foto_url } = req.body;
-  const { error } = await supabase.from('barbeiros').update({ nome, foto_url }).eq('id', id);
+  const { data, error } = await supabase
+    .from('barbeiros')
+    .update({ nome, foto_url })
+    .eq('id', id)
+    .eq('empresa_id', req.empresaId)
+    .select('id');
+
   if (error) return res.status(500).json(error);
+  if (!data || data.length === 0) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
   res.json({ success: true });
 });
 
 router.delete('/admin/barbeiro/:id', async (req, res) => {
   const { id } = req.params;
+
+  const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', id).maybeSingle();
+  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
 
   // Limpamos os vínculos e bloqueios primeiro para evitar erro no banco
   await supabase.from('barbeiro_servicos').delete().eq('barbeiro_id', id);
@@ -151,8 +172,11 @@ router.delete('/admin/barbeiro/:id', async (req, res) => {
 // --- BLOQUEIOS ---
 
 // 1. SALVAR BLOQUEIO (Admin)
-router.post('/admin/bloqueio', async (req, res) => {
+router.post('/admin/bloqueio', validate(bloqueioSchema), async (req, res) => {
   const { barbeiro_id, data_bloqueio, data_fim, hora_inicio, hora_fim, motivo } = req.body;
+
+  const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', barbeiro_id).maybeSingle();
+  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
 
   // Fallback: se não houver data_fim, o bloqueio é de apenas um dia
   const finalDate = data_fim || data_bloqueio;
@@ -162,7 +186,7 @@ router.post('/admin/bloqueio', async (req, res) => {
     .insert({ barbeiro_id, data_bloqueio, data_fim: finalDate, hora_inicio, hora_fim, motivo });
 
   if (error) {
-    console.error('❌ Erro ao inserir bloqueio:', error);
+    console.error('Erro ao inserir bloqueio:', error);
     return res.status(500).json(error);
   }
   res.json({ success: true });
@@ -170,6 +194,9 @@ router.post('/admin/bloqueio', async (req, res) => {
 
 // 2. LISTAR BLOQUEIOS (Usado pelo AdminBarbeiros para exibir os cards)
 router.get('/admin/bloqueios/:barbeiro_id', async (req, res) => {
+  const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', req.params.barbeiro_id).maybeSingle();
+  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
+
   const hoje = new Date().toISOString().slice(0, 10);
 
   const { data, error } = await supabase
@@ -189,6 +216,12 @@ router.get('/admin/bloqueios/:barbeiro_id', async (req, res) => {
 
 // 3. DELETAR BLOQUEIO (Admin)
 router.delete('/admin/bloqueio/:id', async (req, res) => {
+  const { data: bloqueio } = await supabase.from('bloqueios').select('id, barbeiro_id').eq('id', req.params.id).maybeSingle();
+  if (!bloqueio) return res.status(404).json({ message: 'Não encontrado' });
+
+  const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', bloqueio.barbeiro_id).maybeSingle();
+  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ message: 'Não encontrado' });
+
   const { data, error } = await supabase.from('bloqueios').delete().eq('id', req.params.id).select('id');
   if (error) return res.status(500).json(error);
   if (!data || data.length === 0) return res.status(404).json({ message: 'Não encontrado' });
@@ -200,6 +233,9 @@ router.delete('/admin/bloqueio/:id', async (req, res) => {
 router.get('/admin/agenda-barbeiro/:barbeiro_id', async (req, res) => {
   const { barbeiro_id } = req.params;
   const { data: dataQuery } = req.query; // Pega a data enviada (?data=2026-02-17)
+
+  const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', barbeiro_id).maybeSingle();
+  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
 
   const { data: agendamentos, error } = await supabase
     .from('agendamentos')
@@ -225,7 +261,7 @@ router.get('/admin/agenda-barbeiro/:barbeiro_id', async (req, res) => {
 });
 
 router.get('/admin/barbeiros-status/:empresa_id', async (req, res) => {
-  const { empresa_id } = req.params;
+  const empresa_id = req.empresaId;
   const { dataInicio, dataFim } = req.query;
 
   const { data: barbeiros, error: barbErr } = await supabase

@@ -1,16 +1,30 @@
 const express = require('express');
 const supabase = require('../config/supabase');
+const verificarTokenCliente = require('../middleware/clienteAuth');
+const validate = require('../middleware/validate');
+const { perfilAtualizarSchema, avaliarSchema } = require('../schemas');
 
 const router = express.Router();
 
-router.put('/notificacoes/ler-todas/:userId', async (req, res) => {
+// IMPORTANTE: nunca usar router.use(verificarTokenCliente) aqui. Este router é montado em
+// server.js sem prefixo de path (app.use(require(...))), igual todos os outros. Um
+// router.use() sem path intercepta TODA requisição que chega até este router na cadeia do
+// Express, mesmo pra rotas de outros arquivos (ex: /planos-plataforma, /agendar), porque o
+// middleware roda antes do matching de rota específica. Por isso o middleware é aplicado
+// individualmente em cada rota abaixo.
+
+router.put('/notificacoes/ler-todas/:userId', verificarTokenCliente, async (req, res) => {
   const { userId } = req.params;
+  if (userId !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
+
   const { error } = await supabase.from('notificacoes').update({ lida: true }).eq('usuario_id', userId);
   if (error) return res.status(500).json(error);
   res.json({ message: 'Notificações lidas' });
 });
 
-router.get('/notificacoes/:userId', async (req, res) => {
+router.get('/notificacoes/:userId', verificarTokenCliente, async (req, res) => {
+  if (req.params.userId !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
+
   const { data, error } = await supabase
     .from('notificacoes')
     .select('*')
@@ -22,7 +36,9 @@ router.get('/notificacoes/:userId', async (req, res) => {
   res.json(data);
 });
 
-router.get('/meus-agendamentos/:id', async (req, res) => {
+router.get('/meus-agendamentos/:id', verificarTokenCliente, async (req, res) => {
+  if (req.params.id !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
+
   const { data: agendamentos, error } = await supabase
     .from('agendamentos')
     .select('id, data_hora, valor_total, barbeiro_id, status, barbeiros(nome), agendamento_servicos(servicos(nome))')
@@ -56,7 +72,9 @@ router.get('/meus-agendamentos/:id', async (req, res) => {
   res.json(resultado);
 });
 
-router.get('/usuarios/:id', async (req, res) => {
+router.get('/usuarios/:id', verificarTokenCliente, async (req, res) => {
+  if (req.params.id !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
+
   const { data, error } = await supabase
     .from('usuarios')
     .select('nome_completo, email, telefone, foto_url, data_nascimento')
@@ -67,7 +85,9 @@ router.get('/usuarios/:id', async (req, res) => {
   res.json(data);
 });
 
-router.put('/atualizar-perfil/:id', async (req, res) => {
+router.put('/atualizar-perfil/:id', verificarTokenCliente, validate(perfilAtualizarSchema), async (req, res) => {
+  if (req.params.id !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
+
   const { nome_completo, telefone, nascimento, foto_url } = req.body;
   const usuarioId = req.params.id;
 
@@ -83,17 +103,18 @@ router.put('/atualizar-perfil/:id', async (req, res) => {
   res.json({ message: 'Sucesso' });
 });
 
-router.put('/cancelar-agendamento/:id', async (req, res) => {
+router.put('/cancelar-agendamento/:id', verificarTokenCliente, async (req, res) => {
   const { id } = req.params;
 
   const { data: agendamento, error: selError } = await supabase
     .from('agendamentos')
-    .select('data_hora')
+    .select('data_hora, usuario_id')
     .eq('id', id)
     .maybeSingle();
 
   if (selError) return res.status(500).json({ error: 'Erro interno' });
   if (!agendamento) return res.status(404).json({ error: 'Agendamento não encontrado' });
+  if (String(agendamento.usuario_id) !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
 
   if (new Date(agendamento.data_hora) < new Date()) {
     return res.status(400).json({ error: 'Não é possível cancelar horários passados.' });
@@ -104,19 +125,21 @@ router.put('/cancelar-agendamento/:id', async (req, res) => {
   res.json({ message: 'Agendamento cancelado com sucesso!' });
 });
 
-router.post('/avaliar', async (req, res) => {
-  const { agendamento_id, cliente_id, barbeiro_id, nota, comentario } = req.body;
+router.post('/avaliar', verificarTokenCliente, validate(avaliarSchema), async (req, res) => {
+  const { agendamento_id, barbeiro_id, nota, comentario } = req.body;
+  const cliente_id = req.usuarioId;
 
   const { data: agendamento, error: selError } = await supabase
     .from('agendamentos')
-    .select('status')
+    .select('status, usuario_id')
     .eq('id', agendamento_id)
     .maybeSingle();
 
   if (selError) return res.status(500).json({ error: 'Erro ao verificar agendamento.' });
   if (!agendamento) return res.status(404).json({ error: 'Agendamento não encontrado.' });
+  if (String(agendamento.usuario_id) !== cliente_id) return res.status(403).json({ error: 'Acesso negado.' });
 
-  // Nota: o ENUM real de status no Postgres só tem pendente/confirmado/concluido/cancelado —
+  // O ENUM real de status no Postgres só tem pendente/confirmado/concluido/cancelado.
   // 'finalizado' nunca existiu como valor válido (ver database-schema.md), então checamos só 'concluido'.
   if (agendamento.status !== 'concluido') {
     return res.status(403).json({ error: 'Aguarde a finalização do seu corte pelo barbeiro para enviar a avaliação.' });
@@ -136,8 +159,9 @@ router.post('/avaliar', async (req, res) => {
 });
 
 // --- FIDELIDADE (DINÂMICA) ---
-router.get('/fidelidade/:userId', async (req, res) => {
+router.get('/fidelidade/:userId', verificarTokenCliente, async (req, res) => {
   const { userId } = req.params;
+  if (userId !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
 
   const { data: usuario, error: userErr } = await supabase
     .from('usuarios')
@@ -190,7 +214,9 @@ router.get('/fidelidade/:userId', async (req, res) => {
 });
 
 // Verificar assinante e retornar servicos do plano (para o app do cliente)
-router.get('/usuario/:id/assinante', async (req, res) => {
+router.get('/usuario/:id/assinante', verificarTokenCliente, async (req, res) => {
+  if (req.params.id !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
+
   const { data: usuario, error } = await supabase
     .from('usuarios')
     .select('assinante, plano_id')

@@ -1,10 +1,29 @@
 const supabase = require('../../config/supabase');
 const { enviarMensagem } = require('./provider');
 const { limiteAgendamentosMesAtingido } = require('../../utils/limitesPlano');
+const { variantesTelefoneBR } = require('../../utils/telefone');
+
+// Encontra o cliente cadastrado dono deste número, tolerando os formatos diferentes em que
+// `usuarios.telefone` pode estar salvo (com máscara, sem DDI, com/sem o 9º dígito; ver
+// utils/telefone.js). Sem isso, clientes já cadastrados pelo site quase nunca eram
+// reconhecidos vindo do WhatsApp, caindo sempre no fluxo de "não te encontrei no cadastro".
+async function encontrarClientePorTelefone(empresaId, waId) {
+  const variantes = variantesTelefoneBR(waId);
+  const sufixo = variantes[0].slice(-8);
+  if (!sufixo) return null;
+
+  const { data } = await supabase
+    .from('usuarios')
+    .select('id, nome_completo, telefone')
+    .eq('empresa_id', empresaId)
+    .ilike('telefone', `%${sufixo}%`);
+
+  return (data || []).find((u) => variantesTelefoneBR(u.telefone).some((v) => variantes.includes(v))) || null;
+}
 
 // Máquina de estados simples do bot de agendamento via WhatsApp (ver §8/§10 do plano de
 // plataforma). Reaproveita as mesmas tabelas/regras da agenda web (agendamentos, barbeiros,
-// servicos) em vez de manter uma lógica de disponibilidade paralela — o bot é só mais um
+// servicos) em vez de manter uma lógica de disponibilidade paralela: o bot é só mais um
 // "cliente" dessas regras, igual o plano recomenda.
 //
 // Fluxo: inicio -> menu -> aguardando_barbeiro -> aguardando_data -> aguardando_horario ->
@@ -167,12 +186,7 @@ async function processarMensagem({ empresaId, telefone, texto }) {
     const servicoEscolhido = (dados.servicos || [])[idx];
     if (!servicoEscolhido) return responder('Escolha um número válido da lista de serviços.', 'aguardando_servico');
 
-    const { data: usuarioExistente } = await supabase
-      .from('usuarios')
-      .select('id, nome_completo')
-      .eq('telefone', telefone)
-      .eq('empresa_id', empresaId)
-      .maybeSingle();
+    const usuarioExistente = await encontrarClientePorTelefone(empresaId, telefone);
 
     const novosDados = { ...dados, servico_id: servicoEscolhido.id, servico_nome: servicoEscolhido.nome, servico_valor: servicoEscolhido.valor, servico_duracao: servicoEscolhido.duracao, usuario_id: usuarioExistente?.id || null };
 
@@ -214,7 +228,7 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, sessao, dados, 
 
   await enviarMensagem(
     telefone,
-    `✅ Agendamento confirmado!\n${dados.barbeiro_nome} — ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}\n\nDigite *MENU* para agendar outro horário.`
+    `✅ Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}\n\nDigite *MENU* para agendar outro horário.`
   );
   await salvarSessao(sessao, 'inicio', {});
 }

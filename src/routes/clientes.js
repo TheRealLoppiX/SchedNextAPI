@@ -4,17 +4,15 @@ const bcrypt = require('bcrypt');
 const supabase = require('../config/supabase');
 const transporter = require('../config/mailer');
 const validate = require('../middleware/validate');
-const { clienteRapidoSchema } = require('../schemas');
+const { clienteRapidoSchema, clienteAtualizarSchema, clienteAssinanteSchema, clienteFollowupSchema } = require('../schemas');
 
 const router = express.Router();
 
 router.get('/admin/clientes/:empresaId', async (req, res) => {
-  const { empresaId } = req.params;
-
   const { data: clientes, error } = await supabase
     .from('usuarios')
     .select('id, nome_completo, email, telefone, data_nascimento, assinante, assinante_desde, notas, data_cadastro')
-    .eq('empresa_id', empresaId)
+    .eq('empresa_id', req.empresaId)
     .eq('tipo', 'cliente')
     .order('nome_completo', { ascending: true });
 
@@ -24,8 +22,8 @@ router.get('/admin/clientes/:empresaId', async (req, res) => {
   let agendamentosPorCliente = {};
 
   if (ids.length > 0) {
-    // Nota: o SQL original filtrava status IN ('concluido', 'finalizado'), mas 'finalizado'
-    // nunca foi um valor válido do ENUM real (ver database-schema.md) — mantemos só 'concluido'.
+    // O SQL original filtrava status IN ('concluido', 'finalizado'), mas 'finalizado'
+    // nunca foi um valor válido do ENUM real (ver database-schema.md); mantemos só 'concluido'.
     const { data: agendamentos, error: errAg } = await supabase
       .from('agendamentos')
       .select('usuario_id, data_hora')
@@ -64,30 +62,38 @@ router.get('/admin/clientes/:empresaId', async (req, res) => {
   res.json(formatado);
 });
 
-router.put('/admin/clientes/:id', async (req, res) => {
+router.put('/admin/clientes/:id', validate(clienteAtualizarSchema), async (req, res) => {
   const { id } = req.params;
   const { nome_completo, telefone, email, data_nascimento, notas } = req.body;
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('usuarios')
     .update({ nome_completo, telefone, email, data_nascimento: data_nascimento || null, notas: notas || null })
-    .eq('id', id);
+    .eq('id', id)
+    .eq('empresa_id', req.empresaId)
+    .eq('tipo', 'cliente')
+    .select('id');
 
   if (error) { console.error('Erro update cliente:', error); return res.status(500).json({ error: error.message }); }
+  if (!data || data.length === 0) return res.status(404).json({ error: 'Cliente não encontrado.' });
   res.json({ success: true });
 });
 
-router.put('/admin/clientes/:id/assinante', async (req, res) => {
+router.put('/admin/clientes/:id/assinante', validate(clienteAssinanteSchema), async (req, res) => {
   const { id } = req.params;
   const { assinante } = req.body;
   const dataAssinante = assinante ? new Date().toISOString().split('T')[0] : null;
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('usuarios')
     .update({ assinante: !!assinante, assinante_desde: dataAssinante })
-    .eq('id', id);
+    .eq('id', id)
+    .eq('empresa_id', req.empresaId)
+    .eq('tipo', 'cliente')
+    .select('id');
 
   if (error) { console.error('Erro assinante:', error); return res.status(500).json({ error: error.message }); }
+  if (!data || data.length === 0) return res.status(404).json({ error: 'Cliente não encontrado.' });
   res.json({ success: true });
 });
 
@@ -98,6 +104,7 @@ router.delete('/admin/clientes/:id', async (req, res) => {
     .from('usuarios')
     .delete()
     .eq('id', id)
+    .eq('empresa_id', req.empresaId)
     .eq('tipo', 'cliente')
     .select('id');
 
@@ -106,13 +113,15 @@ router.delete('/admin/clientes/:id', async (req, res) => {
   res.json({ success: true });
 });
 
-router.post('/admin/clientes/followup', async (req, res) => {
-  const { cliente_id, tipo, empresa_id } = req.body;
+router.post('/admin/clientes/followup', validate(clienteFollowupSchema), async (req, res) => {
+  const { cliente_id, tipo } = req.body;
+  const empresa_id = req.empresaId;
   try {
     const { data: cliente } = await supabase
       .from('usuarios')
       .select('nome_completo, email')
       .eq('id', cliente_id)
+      .eq('empresa_id', empresa_id)
       .maybeSingle();
 
     if (!cliente) return res.status(404).json({ error: 'Cliente nao encontrado.' });
@@ -144,7 +153,8 @@ router.post('/admin/clientes/followup', async (req, res) => {
 });
 
 router.post('/admin/clientes/rapido', validate(clienteRapidoSchema), async (req, res) => {
-  const { nome, email, senha, tel, nasc, empresa_id } = req.body;
+  const { nome, email, senha, tel, nasc } = req.body;
+  const empresa_id = req.empresaId;
 
   try {
     const salt = await bcrypt.genSalt(10);
@@ -186,7 +196,7 @@ router.post('/admin/clientes/rapido', validate(clienteRapidoSchema), async (req,
     console.log(`Cliente criado: ID ${novoCliente.id} | ${nome} | empresa ${empresa_id}`);
     res.json({ id: novoCliente.id, nome: nome.trim() });
   } catch (err) {
-    console.error('❌ Erro em clientes/rapido:', err.code, err.message);
+    console.error('Erro em clientes/rapido:', err.code, err.message);
     if (err.code === '23505') {
       return res.status(400).json({ error: 'Já existe um cliente com este e-mail ou telefone.' });
     }

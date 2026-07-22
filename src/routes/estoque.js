@@ -4,24 +4,37 @@ const bcrypt = require('bcrypt');
 const supabase = require('../config/supabase');
 const { loginLimiter } = require('../middleware/rateLimiters');
 const validarSenhaComMigracao = require('../utils/senha');
+const validate = require('../middleware/validate');
+const {
+  estoqueProdutoSchema,
+  ativoSchema,
+  estoqueLoginSchema,
+  estoqueCriarSubloginSchema,
+  estoqueMovimentarSchema
+} = require('../schemas');
 
 const router = express.Router();
+
+// Toda esta rota vive sob /admin/*, então verificarTokenAdmin (server.js) já garantiu que
+// req.empresaId é o tenant do dono autenticado. Usamos sempre esse valor, nunca um
+// empresa_id/:empresaId vindo do cliente, senão um admin autenticado de uma empresa
+// conseguiria ler/escrever o estoque (e as credenciais de sublogin) de outra.
 
 router.get('/admin/estoque/:empresaId', async (req, res) => {
   const { data, error } = await supabase
     .from('produtos')
     .select('*')
-    .eq('empresa_id', req.params.empresaId)
+    .eq('empresa_id', req.empresaId)
     .order('nome', { ascending: true });
 
   if (error) return res.status(500).json({ error: 'Erro ao buscar estoque' });
   res.json(data);
 });
 
-router.post('/admin/estoque', async (req, res) => {
-  const { empresa_id, nome, valor, quantidade } = req.body;
+router.post('/admin/estoque', validate(estoqueProdutoSchema), async (req, res) => {
+  const { nome, valor, quantidade } = req.body;
 
-  const { error } = await supabase.from('produtos').insert({ empresa_id, nome, valor, quantidade });
+  const { error } = await supabase.from('produtos').insert({ empresa_id: req.empresaId, nome, valor, quantidade });
   if (error) {
     console.error('Erro no BD:', error);
     return res.status(500).json({ error: 'Erro ao cadastrar produto' });
@@ -29,36 +42,58 @@ router.post('/admin/estoque', async (req, res) => {
   res.json({ message: 'Produto cadastrado com sucesso!' });
 });
 
-router.put('/admin/estoque/:id', async (req, res) => {
+router.put('/admin/estoque/:id', validate(estoqueProdutoSchema), async (req, res) => {
   const { nome, valor, quantidade } = req.body;
-  const { error } = await supabase.from('produtos').update({ nome, valor, quantidade }).eq('id', req.params.id);
+  const { data, error } = await supabase
+    .from('produtos')
+    .update({ nome, valor, quantidade })
+    .eq('id', req.params.id)
+    .eq('empresa_id', req.empresaId)
+    .select('id');
+
   if (error) return res.status(500).json({ error: 'Erro ao atualizar produto' });
+  if (!data || data.length === 0) return res.status(404).json({ error: 'Produto não encontrado.' });
   res.json({ message: 'Produto atualizado!' });
 });
 
-router.put('/admin/estoque/:id/status', async (req, res) => {
+router.put('/admin/estoque/:id/status', validate(ativoSchema), async (req, res) => {
   const { ativo } = req.body;
-  const { error } = await supabase.from('produtos').update({ ativo: !!ativo }).eq('id', req.params.id);
+  const { data, error } = await supabase
+    .from('produtos')
+    .update({ ativo: !!ativo })
+    .eq('id', req.params.id)
+    .eq('empresa_id', req.empresaId)
+    .select('id');
+
   if (error) return res.status(500).json({ error: 'Erro ao atualizar status' });
+  if (!data || data.length === 0) return res.status(404).json({ error: 'Produto não encontrado.' });
   res.json({ message: 'Status atualizado!' });
 });
 
 router.delete('/admin/estoque/:id', async (req, res) => {
-  const { error } = await supabase.from('produtos').delete().eq('id', req.params.id);
+  const { data, error } = await supabase
+    .from('produtos')
+    .delete()
+    .eq('id', req.params.id)
+    .eq('empresa_id', req.empresaId)
+    .select('id');
+
   if (error) return res.status(500).json({ error: 'Não é possível excluir. Recomendamos inativar.' });
+  if (!data || data.length === 0) return res.status(404).json({ error: 'Produto não encontrado.' });
   res.json({ message: 'Produto excluído!' });
 });
 
 // 1. LISTAR USUÁRIOS PARA O DROPDOWN DE LOGIN
 router.get('/admin/estoque/usuarios/:empresaId', async (req, res) => {
-  const { data, error } = await supabase.from('estoque_usuarios').select('id, nome').eq('empresa_id', req.params.empresaId);
+  const { data, error } = await supabase.from('estoque_usuarios').select('id, nome').eq('empresa_id', req.empresaId);
   if (error) return res.status(500).json({ error: 'Erro ao buscar usuários.' });
   res.json(data);
 });
 
 // 2. LOGIN DO ESTOQUE (blindado contra acessos cruzados)
-router.post('/admin/estoque/login', loginLimiter, async (req, res) => {
-  const { empresa_id, usuario, senha } = req.body;
+router.post('/admin/estoque/login', loginLimiter, validate(estoqueLoginSchema), async (req, res) => {
+  const { usuario, senha } = req.body;
+  const empresa_id = req.empresaId;
 
   if (usuario === 'admin') {
     const { data: empresa, error } = await supabase.from('empresas').select('id, senha').eq('id', empresa_id).maybeSingle();
@@ -88,8 +123,9 @@ router.post('/admin/estoque/login', loginLimiter, async (req, res) => {
 });
 
 // 2. Criar sublogin (Somente via senha do admin)
-router.post('/admin/estoque/criar-sublogin', async (req, res) => {
-  const { empresa_id, senha_admin, novo_nome, nova_senha } = req.body;
+router.post('/admin/estoque/criar-sublogin', validate(estoqueCriarSubloginSchema), async (req, res) => {
+  const { senha_admin, novo_nome, nova_senha } = req.body;
+  const empresa_id = req.empresaId;
 
   const { data: empresa, error } = await supabase.from('empresas').select('id, senha').eq('id', empresa_id).maybeSingle();
   if (error || !empresa) return res.status(403).json({ error: 'Senha administrativa incorreta.' });
@@ -109,15 +145,24 @@ router.post('/admin/estoque/criar-sublogin', async (req, res) => {
 });
 
 // 3. Movimentar Estoque (Com justificativa)
-router.post('/admin/estoque/movimentar', async (req, res) => {
+router.post('/admin/estoque/movimentar', validate(estoqueMovimentarSchema), async (req, res) => {
   const { produto_id, usuario_nome, quantidade, tipo, justificativa } = req.body;
 
-  const { data: produto, error: selError } = await supabase.from('produtos').select('quantidade').eq('id', produto_id).maybeSingle();
-  if (selError || !produto) return res.status(500).json({ error: 'Erro ao atualizar estoque.' });
+  const { data: produto, error: selError } = await supabase
+    .from('produtos')
+    .select('quantidade')
+    .eq('id', produto_id)
+    .eq('empresa_id', req.empresaId)
+    .maybeSingle();
+  if (selError || !produto) return res.status(404).json({ error: 'Produto não encontrado.' });
 
   const novaQuantidade = tipo === 'ADICIONAR' ? produto.quantidade + quantidade : produto.quantidade - quantidade;
 
-  const { error: updError } = await supabase.from('produtos').update({ quantidade: novaQuantidade }).eq('id', produto_id);
+  const { error: updError } = await supabase
+    .from('produtos')
+    .update({ quantidade: novaQuantidade })
+    .eq('id', produto_id)
+    .eq('empresa_id', req.empresaId);
   if (updError) return res.status(500).json({ error: 'Erro ao atualizar estoque.' });
 
   await supabase.from('estoque_movimentacoes').insert({ produto_id, usuario_nome, quantidade, tipo, justificativa });
@@ -126,13 +171,12 @@ router.post('/admin/estoque/movimentar', async (req, res) => {
 
 // 4. RELATÓRIO DE ESTOQUE (Auditoria por data)
 router.get('/admin/estoque/relatorio/:empresaId', async (req, res) => {
-  const { empresaId } = req.params;
   const { inicio, fim } = req.query;
 
-  // Nota: estoque_movimentacoes.produto_id não tem FK real no banco (igual no MySQL original),
-  // então o PostgREST não consegue fazer o embed automático — buscamos os produtos da empresa
+  // estoque_movimentacoes.produto_id não tem FK real no banco (igual no MySQL original),
+  // então o PostgREST não consegue fazer o embed automático. Buscamos os produtos da empresa
   // primeiro e juntamos em JS.
-  const { data: produtos, error: prodErr } = await supabase.from('produtos').select('id, nome').eq('empresa_id', empresaId);
+  const { data: produtos, error: prodErr } = await supabase.from('produtos').select('id, nome').eq('empresa_id', req.empresaId);
   if (prodErr) return res.status(500).json({ error: 'Erro ao buscar relatório.' });
 
   const produtoIds = produtos.map((p) => p.id);
