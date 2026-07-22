@@ -18,8 +18,25 @@ app.use(helmet({
 }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ limit: '1mb', extended: true }));
+// Além do FRONTEND_URL exato (cobre dev local e o valor configurado em produção),
+// libera qualquer subdomínio de tenant (ex: barbearia.schednext.com.br) sobre HTTPS,
+// já que cada empresa agora pode ter seu próprio subdomínio na plataforma.
+const DOMINIO_RAIZ = 'schednext.com.br';
+function origemPermitida(origin, callback) {
+  if (!origin) return callback(null, true);
+  if (origin === process.env.FRONTEND_URL) return callback(null, true);
+  try {
+    const { hostname, protocol } = new URL(origin);
+    if (protocol === 'https:' && (hostname === DOMINIO_RAIZ || hostname.endsWith(`.${DOMINIO_RAIZ}`))) {
+      return callback(null, true);
+    }
+  } catch (_) {
+    // origin malformado, cai no reject abaixo
+  }
+  return callback(new Error('Origem não permitida pelo CORS'));
+}
 app.use(cors({
-  origin: process.env.FRONTEND_URL,
+  origin: origemPermitida,
 }));
 
 // Protege toda a área /admin/*. O único endpoint sob /admin que fica de fora é o próprio

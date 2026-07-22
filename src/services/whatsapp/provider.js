@@ -1,14 +1,13 @@
-// Adapter de envio de WhatsApp via Meta Cloud API oficial (decisão final em 2026-07-21, ver
-// handoff.md; chegou a ser tentado o Twilio como BSP, mas o Sender de produção lá é pago, e a
-// Meta Cloud API direta é gratuita até ~1000 conversas/mês). Usa a Graph API direto via fetch,
-// sem SDK. Até WHATSAPP_PROVIDER_TOKEN/WHATSAPP_PHONE_NUMBER_ID estarem configurados, o
-// provider só loga a mensagem que teria sido enviada, o que dá pra testar a máquina de estados
-// inteira sem depender de credenciais externas.
-
-const GRAPH_API_VERSION = 'v21.0';
+// Adapter de envio de WhatsApp via Evolution API (self-hosted, protocolo não-oficial do
+// WhatsApp Web/Baileys). Trocado da Meta Cloud API em 2026-07-22: a Business Verification da
+// Meta exige CNPJ ativo, que o usuário não tem, e não existe caminho oficial pra pessoa física
+// (ver handoff.md). Ainda é um único número pra toda a plataforma, igual era com a Meta — virar
+// uma instância por empresa fica pra quando o bot for oferecido pra outros clientes de verdade.
+// Até EVOLUTION_API_URL/EVOLUTION_API_KEY/EVOLUTION_INSTANCE estarem configurados, só loga a
+// mensagem que teria sido enviada, o que dá pra testar a máquina de estados sem depender do VPS.
 
 function estaConfigurado() {
-  return Boolean(process.env.WHATSAPP_PROVIDER_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID);
+  return Boolean(process.env.EVOLUTION_API_URL && process.env.EVOLUTION_API_KEY && process.env.EVOLUTION_INSTANCE);
 }
 
 async function enviarMensagem(telefone, texto) {
@@ -18,18 +17,16 @@ async function enviarMensagem(telefone, texto) {
   }
 
   const resposta = await fetch(
-    `https://graph.facebook.com/${GRAPH_API_VERSION}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+    `${process.env.EVOLUTION_API_URL}/message/sendText/${process.env.EVOLUTION_INSTANCE}`,
     {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${process.env.WHATSAPP_PROVIDER_TOKEN}`,
+        apikey: process.env.EVOLUTION_API_KEY,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to: telefone.replace(/\D/g, ''), // Meta espera número sem "+"/formatação, só dígitos
-        type: 'text',
-        text: { body: texto },
+        number: telefone.replace(/\D/g, ''), // Evolution espera só dígitos, com DDI
+        text: texto,
       }),
     }
   );
@@ -37,11 +34,11 @@ async function enviarMensagem(telefone, texto) {
   const dados = await resposta.json();
 
   if (!resposta.ok) {
-    console.error('Erro ao enviar WhatsApp via Meta Cloud API:', dados);
+    console.error('Erro ao enviar WhatsApp via Evolution API:', dados);
     return { enviado: false, erro: dados };
   }
 
-  return { enviado: true, id: dados.messages?.[0]?.id };
+  return { enviado: true, id: dados.key?.id };
 }
 
 module.exports = { estaConfigurado, enviarMensagem };
