@@ -11,6 +11,15 @@ const iniciarProcessamentoCancelamentos = require('./src/cron/assinaturas');
 
 const app = express();
 
+// O Render coloca a API atrás de um proxy reverso, que sempre define X-Forwarded-For.
+// Sem isso, o Express ignora esse header (padrão de segurança) e o keyGenerator do
+// express-rate-limit lança ERR_ERL_UNEXPECTED_X_FORWARDED_FOR ao tentar ler o IP —
+// a exceção derruba a requisição antes de chegar na rota, então nenhuma rota protegida
+// por rate limit (cadastro, login, código de verificação) funcionava em produção.
+// "1" confia só no primeiro hop (o proxy do Render), não na cadeia inteira, pra não
+// abrir brecha de spoofing de IP via header em quem chama a API diretamente.
+app.set('trust proxy', 1);
+
 // crossOriginResourcePolicy precisa ser "cross-origin": o front (porta 3000) e a API (porta 4000)
 // são origens diferentes de propósito. Com o padrão do helmet ("same-origin"), o navegador
 // bloqueia a leitura da resposta mesmo com os headers de CORS corretos.

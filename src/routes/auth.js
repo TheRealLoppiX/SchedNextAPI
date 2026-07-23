@@ -131,7 +131,7 @@ router.post('/recuperar-senha', codigoLimiter, validate(recuperarSenhaSchema), a
     to: email,
     subject: 'Recuperação de Senha',
     text: `Seu código para nova senha: ${codigo}`
-  });
+  }).catch((mailErr) => console.error('Erro ao enviar e-mail de recuperação de senha:', mailErr));
   res.json({ message: 'Código enviado!' });
 });
 
@@ -175,7 +175,7 @@ router.post('/seguranca-codigo', codigoLimiter, validate(segurancaCodigoSchema),
     to: user.email,
     subject: 'Código de Segurança - Barbearia',
     text: `Seu código para alteração de dados sensíveis: ${codigo}`
-  });
+  }).catch((mailErr) => console.error('Erro ao enviar e-mail de código de segurança:', mailErr));
   res.json({ message: 'Código enviado com sucesso!' });
 });
 

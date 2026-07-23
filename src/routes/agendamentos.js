@@ -104,7 +104,7 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
       to: usuario.email,
       subject: 'Agendamento Confirmado!',
       text: `Olá ${usuario.nome_completo}, seu agendamento na ${emp.nome} foi realizado!\n\nData: ${dataFormatada}\nValor: R$ ${valorTotal}`
-    });
+    }).catch((mailErr) => console.error('Erro ao enviar e-mail de confirmação de agendamento:', mailErr));
   }
 
   res.json({ message: 'Agendamento criado!' });

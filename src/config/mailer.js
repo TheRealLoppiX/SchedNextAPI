@@ -6,6 +6,10 @@ const nodemailer = require('nodemailer');
 // Enviando direto pela infraestrutura do Google (com senha de app), o remetente é genuíno.
 const transporter = nodemailer.createTransport({
   service: 'gmail',
+  // No Render, smtp.gmail.com às vezes resolve pra um endereço IPv6 que o container não
+  // consegue rotear (ENETUNREACH), enquanto IPv4 sempre funciona. Forçar a família evita
+  // depender de qual endereço o DNS devolve primeiro.
+  family: 4,
   auth: {
     user: process.env.GMAIL_USER,
     pass: process.env.GMAIL_PASS
