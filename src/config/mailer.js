@@ -1,46 +1,50 @@
-const nodemailer = require('nodemailer');
-const dns = require('dns');
-const net = require('net');
+// O Render bloqueia saída SMTP nas portas 465 e 587 (confirmado: conexão trava até
+// ETIMEDOUT em ambas, mesmo forçando IPv4), então SMTP direto pro Gmail nunca funciona
+// em produção — não é bug de configuração, é a rede do provedor. A saída é enviar por
+// API HTTP (porta 443, nunca bloqueada). Usamos a API do Brevo com um remetente
+// verificado em schednext.com.br (domínio já autenticado lá, com SPF/DKIM corretos) —
+// diferente da tentativa anterior com Brevo, que tentava forjar um remetente @gmail.com
+// e caía em spam por falha de SPF/DKIM (só o Google pode autenticar esse domínio).
+const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
+const SENDER_EMAIL = process.env.BREVO_SENDER_EMAIL;
+const SENDER_NAME = process.env.BREVO_SENDER_NAME || 'SchedNext';
 
-const SMTP_HOST = 'smtp.gmail.com';
-const SMTP_PORT = 587;
+async function enviarViaBrevo(mailOptions) {
+  const corpo = {
+    sender: { email: SENDER_EMAIL, name: SENDER_NAME },
+    to: [{ email: mailOptions.to }],
+    subject: mailOptions.subject
+  };
+  if (mailOptions.html) corpo.htmlContent = mailOptions.html;
+  else corpo.textContent = mailOptions.text;
 
-// O resolver de DNS interno do nodemailer 9.x (lib/shared/index.js) busca A e AAAA e
-// sorteia um endereço aleatório entre os dois, ignorando a opção `family` — não dá pra
-// forçar IPv4 pela config normal. No Render isso alterna entre cair num IPv6 sem rota
-// (ENETUNREACH) e num IPv4 cuja porta é bloqueada de forma diferente por tentativa. Pra
-// contornar, resolvemos o IPv4 nós mesmos e entregamos a conexão já aberta via `getSocket`
-// (hook do nodemailer pensado originalmente pra sockets de proxy), pulando o resolver dele.
-function getSocket(options, callback) {
-  dns.lookup(SMTP_HOST, { family: 4 }, (err, address) => {
-    if (err) return callback(err);
-
-    const socket = net.connect({ host: address, port: SMTP_PORT });
-    const onError = (connErr) => {
-      socket.destroy();
-      callback(connErr);
-    };
-    socket.once('error', onError);
-    socket.once('connect', () => {
-      socket.removeListener('error', onError);
-      callback(null, { connection: socket });
-    });
+  const resposta = await fetch(BREVO_API_URL, {
+    method: 'POST',
+    headers: {
+      'api-key': process.env.BREVO_API_KEY,
+      'Content-Type': 'application/json',
+      Accept: 'application/json'
+    },
+    body: JSON.stringify(corpo)
   });
+
+  if (!resposta.ok) {
+    const detalhe = await resposta.text().catch(() => '');
+    throw new Error(`Brevo respondeu ${resposta.status}: ${detalhe}`);
+  }
+  return resposta.json();
 }
 
-// Voltamos para o Gmail via SMTP: sem domínio próprio, um serviço terceiro (Brevo) nunca
-// consegue autenticar de verdade um remetente @gmail.com (SPF/DKIM só o Google controla),
-// então o e-mail saía rejeitado ou era marcado como suspeito pelo próprio Gmail do destinatário.
-// Enviando direto pela infraestrutura do Google (com senha de app), o remetente é genuíno.
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: SMTP_PORT,
-  secure: false,
-  getSocket,
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_PASS
+// Mantém a mesma interface do nodemailer (transporter.sendMail), nos dois estilos de
+// chamada já usados no código: com callback (err) => {} e sem callback (retorna Promise,
+// pra usar com await ou .catch()) — assim nenhuma rota que já usa o mailer precisa mudar.
+function sendMail(mailOptions, callback) {
+  const promessa = enviarViaBrevo(mailOptions);
+  if (typeof callback === 'function') {
+    promessa.then((info) => callback(null, info)).catch((err) => callback(err));
+    return;
   }
-});
+  return promessa;
+}
 
-module.exports = transporter;
+module.exports = { sendMail };
