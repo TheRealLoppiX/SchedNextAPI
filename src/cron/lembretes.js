@@ -1,6 +1,7 @@
 const cron = require('node-cron');
 const supabase = require('../config/supabase');
 const transporter = require('../config/mailer');
+const { emailHtml } = require('../utils/emailTemplate');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 
 // América/São_Paulo é sempre UTC-3 (sem horário de verão desde 2019). O banco guarda data_hora
@@ -58,10 +59,9 @@ function iniciarLembretes() {
 
         // ENVIAR EMAIL
         await transporter.sendMail({
-          from: '"Barbearia" <barberariateste@gmail.com>',
           to: ag.usuarios.email,
-          subject: `Seu horário é daqui a ${tempoTexto}!`,
-          text: msg
+          subject: `Seu horário é daqui a ${tempoTexto}! - SchedNext`,
+          html: emailHtml({ titulo: `Olá, ${ag.usuarios.nome_completo}!`, mensagemHtml: `<p style="margin: 0;">${msg}</p>` })
         });
 
         // ENVIAR WHATSAPP (só para empresas no plano com o bot habilitado, ver planos_plataforma)

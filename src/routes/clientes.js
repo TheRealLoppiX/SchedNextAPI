@@ -140,7 +140,6 @@ router.post('/admin/clientes/followup', validate(clienteFollowupSchema), async (
     }
 
     await transporter.sendMail({
-      from: '"Barbearia" <barberariateste@gmail.com>',
       to: cliente.email,
       subject: assunto,
       html: corpo

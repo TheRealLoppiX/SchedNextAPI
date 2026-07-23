@@ -17,6 +17,8 @@ const {
   segurancaValidarSchema
 } = require('../schemas');
 const validarSenhaComMigracao = require('../utils/senha');
+const { emailHtml, blocoCodigo } = require('../utils/emailTemplate');
+const { criarPendente, buscarPendenteValido, removerPendente } = require('../services/cadastroPendente');
 
 const router = express.Router();
 
@@ -32,40 +34,43 @@ router.post('/registrar', validate(registrarSchema), async (req, res) => {
 
   if (empErr || !empresa) return res.status(404).json({ error: 'Empresa não encontrada' });
 
+  const { data: usuarioExistente } = await supabase.from('usuarios').select('id').eq('email', email).maybeSingle();
+  if (usuarioExistente) return res.status(400).json({ error: 'Este e-mail já está cadastrado.' });
+
   const senhaHash = await bcrypt.hash(senha, 12);
 
-  const { error } = await supabase.from('usuarios').insert({
-    nome_completo: nome,
-    data_nascimento: nascimento,
+  // Nada vai pra tabela `usuarios` ainda — fica em espera em `cadastros_pendentes` até o
+  // código ser confirmado (ver services/cadastroPendente.js). Antes, a conta já era criada
+  // aqui (com ativo:false) mas o /login nunca chegava a checar esse campo, então uma conta
+  // não confirmada já conseguia logar normalmente.
+  const { error } = await criarPendente({
+    tipo: 'cliente',
     email,
-    telefone,
-    senha: senhaHash,
-    empresa_id: empresa.id,
-    codigo_verificacao: codigoVerificacao,
-    // Sem isso, um cliente que se auto-cadastra pelo site nunca aparece em Admin > Clientes
-    // (routes/clientes.js filtra por tipo = 'cliente'). Só o cadastro rápido pelo admin
-    // (routes/clientes.js /rapido) setava esse campo.
-    tipo: 'cliente'
+    codigo: codigoVerificacao,
+    dados: { nome, nascimento, telefone, senha: senhaHash, empresa_id: empresa.id }
   });
 
   if (error) {
     console.error('ERRO NO BANCO DE DADOS:', error);
-    if (error.code === '23505') return res.status(400).json({ error: 'Este e-mail já está cadastrado.' });
     return res.status(500).json({ error: `Erro técnico: ${error.message}` });
   }
 
-  const mailOptions = {
-    from: '"Barbearia" <barberariateste@gmail.com>',
+  transporter.sendMail({
     to: email,
-    subject: 'Código de Verificação - Barbearia',
-    text: `Olá ${nome}, seu código de verificação é: ${codigoVerificacao}`
-  };
-
-  transporter.sendMail(mailOptions, (mailErr) => {
+    subject: 'Confirme seu cadastro - SchedNext',
+    html: emailHtml({
+      titulo: `Olá, ${nome}!`,
+      mensagemHtml: `
+        <p style="margin: 0 0 4px;">Use o código abaixo para confirmar seu cadastro:</p>
+        ${blocoCodigo(codigoVerificacao)}
+        <p style="margin: 0; color: #666; font-size: 13px;">Esse código expira em 30 minutos.</p>
+      `
+    })
+  }, (mailErr) => {
     if (mailErr) console.error('Erro ao enviar e-mail:', mailErr);
   });
 
-  res.status(201).json({ message: 'Cadastrado com sucesso! Verifique seu e-mail.' });
+  res.status(201).json({ message: 'Enviamos um código de confirmação pro seu e-mail.' });
 });
 
 router.post('/login', loginLimiter, validate(loginSchema), async (req, res) => {
@@ -103,14 +108,32 @@ router.post('/login', loginLimiter, validate(loginSchema), async (req, res) => {
 router.post('/confirmar-codigo', codigoLimiter, validate(confirmarCodigoSchema), async (req, res) => {
   const { email, codigo } = req.body;
 
-  const { data, error } = await supabase
-    .from('usuarios')
-    .update({ ativo: true, codigo_verificacao: null })
-    .eq('email', email)
-    .eq('codigo_verificacao', codigo)
-    .select('id');
+  const pendente = await buscarPendenteValido({ tipo: 'cliente', email, codigo });
+  if (!pendente) return res.status(400).json({ error: 'Código inválido ou expirado.' });
 
-  if (error || !data || data.length === 0) return res.status(400).json({ error: 'Código incorreto.' });
+  const { nome, nascimento, telefone, senha, empresa_id } = pendente.dados;
+
+  const { error } = await supabase.from('usuarios').insert({
+    nome_completo: nome,
+    data_nascimento: nascimento,
+    email,
+    telefone,
+    senha,
+    empresa_id,
+    ativo: true,
+    // Sem isso, um cliente que se auto-cadastra pelo site nunca aparece em Admin > Clientes
+    // (routes/clientes.js filtra por tipo = 'cliente'). Só o cadastro rápido pelo admin
+    // (routes/clientes.js /rapido) setava esse campo.
+    tipo: 'cliente'
+  });
+
+  if (error) {
+    if (error.code === '23505') return res.status(400).json({ error: 'Este e-mail já está cadastrado.' });
+    console.error('Erro ao ativar conta:', error);
+    return res.status(500).json({ error: 'Erro ao ativar conta.' });
+  }
+
+  await removerPendente(pendente.id);
   res.json({ message: 'Conta ativada!' });
 });
 
@@ -127,10 +150,16 @@ router.post('/recuperar-senha', codigoLimiter, validate(recuperarSenhaSchema), a
   if (error || !data || data.length === 0) return res.status(404).json({ error: 'E-mail não encontrado.' });
 
   transporter.sendMail({
-    from: '"Barbearia" <barberariateste@gmail.com>',
     to: email,
-    subject: 'Recuperação de Senha',
-    text: `Seu código para nova senha: ${codigo}`
+    subject: 'Recuperação de senha - SchedNext',
+    html: emailHtml({
+      titulo: 'Recuperação de senha',
+      mensagemHtml: `
+        <p style="margin: 0 0 4px;">Use o código abaixo para criar uma nova senha:</p>
+        ${blocoCodigo(codigo)}
+        <p style="margin: 0; color: #666; font-size: 13px;">Se você não pediu isso, pode ignorar este e-mail.</p>
+      `
+    })
   }).catch((mailErr) => console.error('Erro ao enviar e-mail de recuperação de senha:', mailErr));
   res.json({ message: 'Código enviado!' });
 });
@@ -171,10 +200,16 @@ router.post('/seguranca-codigo', codigoLimiter, validate(segurancaCodigoSchema),
   if (selError || !user) return res.status(404).json({ error: 'Usuário não existe' });
 
   transporter.sendMail({
-    from: '"Barbearia" <barberariateste@gmail.com>',
     to: user.email,
-    subject: 'Código de Segurança - Barbearia',
-    text: `Seu código para alteração de dados sensíveis: ${codigo}`
+    subject: 'Código de segurança - SchedNext',
+    html: emailHtml({
+      titulo: 'Código de segurança',
+      mensagemHtml: `
+        <p style="margin: 0 0 4px;">Use o código abaixo para confirmar a alteração dos seus dados:</p>
+        ${blocoCodigo(codigo)}
+        <p style="margin: 0; color: #666; font-size: 13px;">Se você não pediu isso, pode ignorar este e-mail.</p>
+      `
+    })
   }).catch((mailErr) => console.error('Erro ao enviar e-mail de código de segurança:', mailErr));
   res.json({ message: 'Código enviado com sucesso!' });
 });

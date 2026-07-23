@@ -1,11 +1,15 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 
 const supabase = require('../config/supabase');
+const transporter = require('../config/mailer');
 const validate = require('../middleware/validate');
-const { cadastroEmpresaLimiter } = require('../middleware/rateLimiters');
-const { registrarEmpresaSchema, contatoEnterpriseSchema } = require('../schemas');
+const { cadastroEmpresaLimiter, codigoLimiter } = require('../middleware/rateLimiters');
+const { registrarEmpresaSchema, contatoEnterpriseSchema, confirmarCodigoSchema } = require('../schemas');
 const { registrarLead } = require('../services/leadsEnterprise');
+const { emailHtml, blocoCodigo } = require('../utils/emailTemplate');
+const { criarPendente, buscarPendenteValido, removerPendente } = require('../services/cadastroPendente');
 
 const router = express.Router();
 
@@ -63,16 +67,22 @@ router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmp
   // bloqueado esperando uma integração que ainda não existe.
   const statusInicial = plano.nome === 'Grátis' ? 'ativa' : 'trial';
   const senhaHash = await bcrypt.hash(senha, 12);
+  const codigoVerificacao = Math.floor(100000 + Math.random() * 900000).toString();
 
-  const { data: empresa, error } = await supabase
-    .from('empresas')
-    .insert({
+  // Nada vai pra tabela `empresas` ainda — fica em espera em `cadastros_pendentes` até o
+  // código ser confirmado em /empresas/confirmar-codigo (mesmo padrão do cadastro de
+  // cliente, ver routes/auth.js e services/cadastroPendente.js).
+  const { error } = await criarPendente({
+    tipo: 'empresa',
+    email,
+    codigo: codigoVerificacao,
+    dados: {
       nome,
       slug,
-      email,
       senha: senhaHash,
       vertical,
       plano_plataforma_id: plano.id,
+      plano_nome: plano.nome,
       status_assinatura: statusInicial,
       horarios_funcionamento: JSON.stringify({
         0: { aberto: false, abre: '08:00', fecha: '18:00', label: 'Domingo' },
@@ -83,21 +93,72 @@ router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmp
         5: { aberto: true, abre: '08:00', fecha: '20:00', label: 'Sexta-feira' },
         6: { aberto: true, abre: '08:00', fecha: '18:00', label: 'Sábado' }
       })
-    })
-    .select('id, slug')
-    .single();
+    }
+  });
 
   if (error) {
-    console.error('Erro ao registrar empresa:', error);
+    console.error('Erro ao registrar cadastro pendente de empresa:', error);
     return res.status(500).json({ error: 'Erro interno ao criar a conta.' });
   }
 
+  transporter.sendMail({
+    to: email,
+    subject: 'Confirme seu cadastro - SchedNext',
+    html: emailHtml({
+      titulo: `Bem-vindo(a) à SchedNext, ${nome}!`,
+      mensagemHtml: `
+        <p style="margin: 0 0 4px;">Use o código abaixo para confirmar o cadastro do seu negócio:</p>
+        ${blocoCodigo(codigoVerificacao)}
+        <p style="margin: 0; color: #666; font-size: 13px;">Esse código expira em 30 minutos.</p>
+      `
+    })
+  }, (mailErr) => {
+    if (mailErr) console.error('Erro ao enviar e-mail de cadastro de empresa:', mailErr);
+  });
+
+  res.status(201).json({ message: 'Enviamos um código de confirmação pro seu e-mail.' });
+});
+
+router.post('/empresas/confirmar-codigo', codigoLimiter, validate(confirmarCodigoSchema), async (req, res) => {
+  const { email, codigo } = req.body;
+
+  const pendente = await buscarPendenteValido({ tipo: 'empresa', email, codigo });
+  if (!pendente) return res.status(400).json({ error: 'Código inválido ou expirado.' });
+
+  const { nome, slug, senha, vertical, plano_plataforma_id, plano_nome, status_assinatura, horarios_funcionamento } = pendente.dados;
+
+  // Rechecagem: o slug/e-mail pode ter sido tomado por outra empresa enquanto este
+  // cadastro ficava pendente de confirmação.
+  const { data: slugExistente } = await supabase.from('empresas').select('id').eq('slug', slug).maybeSingle();
+  if (slugExistente) return res.status(400).json({ error: 'Esse endereço foi registrado por outra conta enquanto você confirmava. Cadastre-se de novo com outro endereço.' });
+
+  const { data: emailExistente } = await supabase.from('empresas').select('id').eq('email', email).maybeSingle();
+  if (emailExistente) return res.status(400).json({ error: 'Já existe uma empresa cadastrada com esse e-mail.' });
+
+  const { data: empresa, error } = await supabase
+    .from('empresas')
+    .insert({ nome, slug, email, senha, vertical, plano_plataforma_id, status_assinatura, horarios_funcionamento })
+    .select('id, nome, slug')
+    .single();
+
+  if (error) {
+    console.error('Erro ao ativar empresa:', error);
+    return res.status(500).json({ error: 'Erro ao ativar a conta.' });
+  }
+
+  await removerPendente(pendente.id);
+
+  const token = jwt.sign({ empresa_id: empresa.id, tipo: 'admin' }, process.env.JWT_SECRET, { expiresIn: '8h' });
+
   res.status(201).json({
-    message: 'Conta criada com sucesso!',
+    message: 'Conta ativada com sucesso!',
+    success: true,
+    token,
+    admin: { id: empresa.id, empresa_id: empresa.id, nome: empresa.nome, slug: empresa.slug },
     empresa_id: empresa.id,
     slug: empresa.slug,
-    status_assinatura: statusInicial,
-    plano_nome: plano.nome
+    status_assinatura,
+    plano_nome
   });
 });
 

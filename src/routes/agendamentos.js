@@ -3,6 +3,7 @@ const bcrypt = require('bcrypt');
 
 const supabase = require('../config/supabase');
 const transporter = require('../config/mailer');
+const { emailHtml } = require('../utils/emailTemplate');
 const validate = require('../middleware/validate');
 const verificarTokenCliente = require('../middleware/clienteAuth');
 const {
@@ -100,10 +101,15 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
   if (usuario) {
     const dataFormatada = new Date(data_hora).toLocaleString('pt-BR');
     transporter.sendMail({
-      from: '"Barbearia" <barberariateste@gmail.com>',
       to: usuario.email,
-      subject: 'Agendamento Confirmado!',
-      text: `Olá ${usuario.nome_completo}, seu agendamento na ${emp.nome} foi realizado!\n\nData: ${dataFormatada}\nValor: R$ ${valorTotal}`
+      subject: 'Agendamento confirmado! - SchedNext',
+      html: emailHtml({
+        titulo: `Olá, ${usuario.nome_completo}!`,
+        mensagemHtml: `
+          <p style="margin: 0 0 4px;">Seu agendamento na <strong>${emp.nome}</strong> foi confirmado:</p>
+          <p style="margin: 12px 0; font-size: 15px;"><strong>Data:</strong> ${dataFormatada}<br><strong>Valor:</strong> R$ ${valorTotal}</p>
+        `
+      })
     }).catch((mailErr) => console.error('Erro ao enviar e-mail de confirmação de agendamento:', mailErr));
   }
 
@@ -390,18 +396,16 @@ router.post('/admin/cancelar-agendamento', validate(cancelarAgendamentoSchema), 
   const dataHora = `${String(dhAg.getUTCDate()).padStart(2, '0')}/${String(dhAg.getUTCMonth() + 1).padStart(2, '0')}/${dhAg.getUTCFullYear()} ${String(dhAg.getUTCHours()).padStart(2, '0')}:${String(dhAg.getUTCMinutes()).padStart(2, '0')}`;
 
   const mailOptions = {
-    from: '"Barbearia" <barberariateste@gmail.com>',
     to: agendamento.usuarios.email,
-    subject: 'Seu agendamento foi cancelado',
-    html: `
-        <div style="font-family: sans-serif; color: #333;">
-            <h2 style="color: #d32f2f;">Olá, ${agendamento.usuarios.nome_completo}!</h2>
-            <p>Infelizmente, seu agendamento para <b>${dataHora}</b> foi cancelado.</p>
-            <p><strong>Motivo:</strong> ${justificativa}</p>
-            <hr>
-            <p>Pedimos desculpas pelo transtorno. Você pode realizar uma nova reserva pelo aplicativo.</p>
-        </div>
-    `
+    subject: 'Seu agendamento foi cancelado - SchedNext',
+    html: emailHtml({
+      titulo: `Olá, ${agendamento.usuarios.nome_completo}!`,
+      mensagemHtml: `
+        <p style="margin: 0 0 4px;">Infelizmente, seu agendamento para <strong>${dataHora}</strong> foi cancelado.</p>
+        <p style="margin: 12px 0;"><strong>Motivo:</strong> ${justificativa}</p>
+        <p style="margin: 0; color: #666; font-size: 13px;">Pedimos desculpas pelo transtorno. Você pode fazer uma nova reserva pelo aplicativo.</p>
+      `
+    })
   };
 
   transporter.sendMail(mailOptions, (error) => {
