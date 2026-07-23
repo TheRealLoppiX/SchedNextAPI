@@ -35,7 +35,8 @@ async function autenticarApiKey(req, res, next) {
   }
 
   req.empresaId = apiKey.empresa_id;
-  supabase.from('api_keys').update({ ultimo_uso_em: new Date().toISOString() }).eq('id', apiKey.id).then(() => {});
+  supabase.from('api_keys').update({ ultimo_uso_em: new Date().toISOString() }).eq('id', apiKey.id)
+    .then(({ error }) => { if (error) console.error('Erro ao atualizar ultimo_uso_em da API key:', error); });
 
   next();
 }

@@ -270,7 +270,7 @@ router.post('/admin/login', loginLimiter, validate(loginSchema), async (req, res
   }
 
   if (!empresa) {
-    return res.status(401).json({ success: false, error: 'E-mail ou senha da barbearia incorretos.' });
+    return res.status(401).json({ success: false, error: 'E-mail ou senha incorretos.' });
   }
 
   try {
@@ -279,7 +279,7 @@ router.post('/admin/login', loginLimiter, validate(loginSchema), async (req, res
     );
 
     if (!senhaValida) {
-      return res.status(401).json({ success: false, error: 'E-mail ou senha da barbearia incorretos.' });
+      return res.status(401).json({ success: false, error: 'E-mail ou senha incorretos.' });
     }
 
     // O ID da empresa será usado como empresa_id no Dashboard

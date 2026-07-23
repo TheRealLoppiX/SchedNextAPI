@@ -7,7 +7,7 @@ const idLike = z.union([z.string(), z.number()]);
 const idLikeNullable = idLike.optional().nullable();
 const textoOpcionalNullable = z.string().trim().optional().nullable();
 // Reaproveitado por toda rota "liga/desliga" genérica (produto, serviço, plano de assinatura
-// da barbearia etc.) que só recebe { ativo: boolean }.
+// da empresa etc.) que só recebe { ativo: boolean }.
 const ativoSchema = z.object({ ativo: z.boolean() });
 
 const registrarSchema = z.object({
@@ -131,7 +131,7 @@ const estoqueLoginSchema = z.object({
 const estoqueCriarSubloginSchema = z.object({
   senha_admin: z.string().min(1, 'Senha administrativa é obrigatória'),
   novo_nome: z.string().trim().min(1, 'Nome do colaborador é obrigatório').max(150),
-  nova_senha: z.string().min(3, 'Senha deve ter ao menos 3 caracteres').max(100)
+  nova_senha: z.string().regex(/^\d{4}$/, 'PIN deve ter exatamente 4 dígitos numéricos')
 });
 
 const estoqueMovimentarSchema = z.object({

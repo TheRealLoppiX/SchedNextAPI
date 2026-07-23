@@ -147,25 +147,26 @@ router.post('/admin/estoque/criar-sublogin', validate(estoqueCriarSubloginSchema
 // 3. Movimentar Estoque (Com justificativa)
 router.post('/admin/estoque/movimentar', validate(estoqueMovimentarSchema), async (req, res) => {
   const { produto_id, usuario_nome, quantidade, tipo, justificativa } = req.body;
+  const delta = tipo === 'ADICIONAR' ? quantidade : -quantidade;
 
-  const { data: produto, error: selError } = await supabase
-    .from('produtos')
-    .select('quantidade')
-    .eq('id', produto_id)
-    .eq('empresa_id', req.empresaId)
-    .maybeSingle();
-  if (selError || !produto) return res.status(404).json({ error: 'Produto não encontrado.' });
+  // Incremento atômico via function no Postgres (ver movimentar_estoque no banco) em vez de
+  // ler a quantidade, calcular em JS e gravar depois: duas movimentações concorrentes no
+  // mesmo produto podiam ler o mesmo valor inicial e a segunda gravação sobrescrever a
+  // primeira (lost update). A function também recusa deixar a quantidade negativa.
+  const { data, error } = await supabase.rpc('movimentar_estoque', {
+    p_produto_id: produto_id,
+    p_empresa_id: req.empresaId,
+    p_delta: delta
+  });
 
-  const novaQuantidade = tipo === 'ADICIONAR' ? produto.quantidade + quantidade : produto.quantidade - quantidade;
+  if (error) return res.status(500).json({ error: 'Erro ao atualizar estoque.' });
+  if (!data || data.length === 0) {
+    return res.status(400).json({ error: 'Produto não encontrado ou estoque insuficiente para essa remoção.' });
+  }
 
-  const { error: updError } = await supabase
-    .from('produtos')
-    .update({ quantidade: novaQuantidade })
-    .eq('id', produto_id)
-    .eq('empresa_id', req.empresaId);
-  if (updError) return res.status(500).json({ error: 'Erro ao atualizar estoque.' });
+  const { error: movError } = await supabase.from('estoque_movimentacoes').insert({ produto_id, usuario_nome, quantidade, tipo, justificativa });
+  if (movError) console.error('Erro ao registrar movimentação de estoque (quantidade já foi atualizada):', movError);
 
-  await supabase.from('estoque_movimentacoes').insert({ produto_id, usuario_nome, quantidade, tipo, justificativa });
   res.json({ message: 'Movimentação registrada!' });
 });
 

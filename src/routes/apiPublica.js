@@ -45,21 +45,38 @@ router.get('/api/v1/disponibilidade', async (req, res) => {
     .maybeSingle();
   if (!profissional) return res.status(404).json({ error: 'Profissional não encontrado nesta conta.' });
 
+  const { data: empresa } = await supabase.from('empresas').select('horarios_funcionamento').eq('id', req.empresaId).maybeSingle();
+  const diaSemana = new Date(`${data}T00:00:00Z`).getUTCDay();
+  const horarioDia = JSON.parse(empresa?.horarios_funcionamento || '{}')[diaSemana];
+  if (!horarioDia || !horarioDia.aberto) {
+    return res.json({ profissional_id: Number(profissional_id), data, horarios_disponiveis: [] });
+  }
+
   const { data: ocupados } = await supabase
     .from('agendamentos')
-    .select('data_hora')
+    .select('data_hora, duracao_total')
     .eq('barbeiro_id', profissional_id)
     .gte('data_hora', `${data}T00:00:00`)
     .lte('data_hora', `${data}T23:59:59`)
     .neq('status', 'cancelado');
 
-  const horasOcupadas = new Set((ocupados || []).map((a) => new Date(a.data_hora).toISOString().slice(11, 16)));
+  // Cada slot de 30min é considerado ocupado se cai dentro de [início, início + duração) de
+  // algum agendamento existente — antes só marcava o minuto exato de início, então um serviço
+  // de 45min ocupando 09:00-09:45 deixava 09:30 aparecer como livre.
+  const intervalosOcupados = (ocupados || []).map((a) => {
+    const inicio = new Date(a.data_hora);
+    const fim = new Date(inicio.getTime() + (a.duracao_total || 0) * 60000);
+    return { inicio, fim };
+  });
+
+  const [horaAbre, minAbre] = horarioDia.abre.split(':').map(Number);
+  const [horaFecha, minFecha] = horarioDia.fecha.split(':').map(Number);
   const slots = [];
-  for (let h = 8; h < 20; h++) {
-    for (const min of [0, 30]) {
-      const hStr = `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
-      if (!horasOcupadas.has(hStr)) slots.push(hStr);
-    }
+  for (let min = horaAbre * 60 + minAbre; min < horaFecha * 60 + minFecha; min += 30) {
+    const hStr = `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+    const inicioSlot = new Date(`${data}T${hStr}:00Z`);
+    const ocupado = intervalosOcupados.some((iv) => inicioSlot >= iv.inicio && inicioSlot < iv.fim);
+    if (!ocupado) slots.push(hStr);
   }
 
   res.json({ profissional_id: Number(profissional_id), data, horarios_disponiveis: slots });
@@ -89,6 +106,30 @@ router.post('/api/v1/agendamentos', async (req, res) => {
   const duracaoTotal = servicosInfo.reduce((acc, s) => acc + (s.duracao || 0), 0);
   const valorTotal = servicosInfo.reduce((acc, s) => acc + Number(s.valor || 0), 0);
 
+  // Sem isso, essa API pública permitia double-booking: dois agendamentos podiam ser criados
+  // pro mesmo profissional em horários que se sobrepõem, diferente do fluxo normal (frontend),
+  // que só oferece horários livres. Busca o dia inteiro do profissional e checa sobreposição
+  // de intervalo em JS, mesma lógica usada em /disponibilidade e /disponibilidade-filtro.
+  const inicioNovo = new Date(data_hora);
+  const fimNovo = new Date(inicioNovo.getTime() + duracaoTotal * 60000);
+  const diaISO = inicioNovo.toISOString().slice(0, 10);
+  const { data: existentes, error: existErr } = await supabase
+    .from('agendamentos')
+    .select('data_hora, duracao_total')
+    .eq('barbeiro_id', profissional_id)
+    .gte('data_hora', `${diaISO}T00:00:00`)
+    .lte('data_hora', `${diaISO}T23:59:59`)
+    .neq('status', 'cancelado');
+
+  if (existErr) return res.status(500).json({ error: 'Erro ao checar disponibilidade.' });
+
+  const conflito = (existentes || []).some((a) => {
+    const inicio = new Date(a.data_hora);
+    const fim = new Date(inicio.getTime() + (a.duracao_total || 0) * 60000);
+    return inicioNovo < fim && fimNovo > inicio;
+  });
+  if (conflito) return res.status(409).json({ error: 'Esse profissional já tem um agendamento nesse horário.' });
+
   const { data: novoAgendamento, error } = await supabase
     .from('agendamentos')
     .insert({
@@ -106,7 +147,8 @@ router.post('/api/v1/agendamentos', async (req, res) => {
   if (error) return res.status(500).json({ error: 'Erro ao criar agendamento.' });
 
   const vinculos = servicos_ids.map((servico_id) => ({ agendamento_id: novoAgendamento.id, servico_id }));
-  await supabase.from('agendamento_servicos').insert(vinculos);
+  const { error: vincError } = await supabase.from('agendamento_servicos').insert(vinculos);
+  if (vincError) console.error('Erro ao vincular serviços do agendamento (API pública):', vincError);
 
   res.status(201).json({ id: novoAgendamento.id, message: 'Agendamento criado com sucesso.' });
 });

@@ -2,7 +2,7 @@ const jwt = require('jsonwebtoken');
 
 // Protege toda a área /admin/*. O único endpoint sob /admin que fica de fora é o próprio
 // /admin/login (é ele quem emite o token). Todo o resto, incluindo /admin/estoque/*, só é
-// alcançado depois que o dono da barbearia já fez login, então exigir esse mesmo token aqui
+// alcançado depois que o dono da empresa já fez login, então exigir esse mesmo token aqui
 // também é o comportamento correto (o sub-login de colaborador de estoque continua existindo
 // como uma segunda checagem por cima desta).
 function verificarTokenAdmin(req, res, next) {

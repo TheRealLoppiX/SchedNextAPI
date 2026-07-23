@@ -23,7 +23,7 @@ router.post('/empresas/contato-enterprise', cadastroEmpresaLimiter, validate(con
 });
 
 // Planos da plataforma (não confundir com planos_assinatura, que é o plano de
-// fidelidade que a barbearia vende pro cliente dela). Usado pela landing e pelo
+// fidelidade que o negócio vende pro cliente dele). Usado pela landing e pelo
 // passo de escolha de plano do cadastro self-service.
 router.get('/planos-plataforma', async (req, res) => {
   const { data, error } = await supabase

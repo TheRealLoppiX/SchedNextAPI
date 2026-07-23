@@ -3,7 +3,7 @@ const supabase = require('../config/supabase');
 // O tenant (empresa) é identificado de duas formas: por slug na URL/query nas rotas
 // públicas do cliente final (?empresa=slug), ou pelo empresa_id já decodificado do JWT nas
 // rotas /admin/* (ver middleware/adminAuth.js). Com o domínio próprio (schednext.com.br) já
-// ativo, subdomínios de tenant (ex: barbearia.schednext.com.br) só existem na frente do
+// ativo, subdomínios de tenant (ex: minha-empresa.schednext.com.br) só existem na frente do
 // Static Site do frontend, não na frente desta API (que continua num único domínio fixo) —
 // então quem resolve o subdomínio pra slug é o frontend (ver App.js/utils/tenantSubdominio.js),
 // que sempre repassa o slug pra cá do mesmo jeito de antes (query/params). Por isso este

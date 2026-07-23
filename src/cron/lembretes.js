@@ -3,25 +3,7 @@ const supabase = require('../config/supabase');
 const transporter = require('../config/mailer');
 const { emailHtml } = require('../utils/emailTemplate');
 const { enviarMensagem } = require('../services/whatsapp/provider');
-
-// América/São_Paulo é sempre UTC-3 (sem horário de verão desde 2019). O banco guarda data_hora
-// como "horário de parede pretendido, rotulado como UTC": um agendamento às 09:00
-// (horário local) é gravado como "09:00:00+00", sem conversão real de fuso (mesma convenção do
-// MySQL original, que usava DATETIME ingênuo). Isso significa que comparar esse valor direto
-// contra um Date() de verdade (que representa o instante real) fica errado por 3h. É preciso
-// converter explicitamente nos dois sentidos.
-const OFFSET_BRASILIA_MS = 3 * 60 * 60 * 1000;
-
-// Converte o instante real (ex: "agora") para a mesma convenção "ingênua" usada no banco,
-// para poder comparar direto nas queries.
-function paraConvencaoDoBanco(instanteReal) {
-  return new Date(instanteReal.getTime() - OFFSET_BRASILIA_MS);
-}
-
-// Converte um data_hora do banco (convenção ingênua) para o instante real correspondente.
-function paraInstanteReal(dataHoraDoBanco) {
-  return new Date(new Date(dataHoraDoBanco).getTime() + OFFSET_BRASILIA_MS);
-}
+const { paraConvencaoDoBanco, paraInstanteReal } = require('../utils/horarioBrasilia');
 
 function iniciarLembretes() {
   cron.schedule('*/1 * * * *', async () => {
@@ -66,7 +48,11 @@ function iniciarLembretes() {
 
         // ENVIAR WHATSAPP (só para empresas no plano com o bot habilitado, ver planos_plataforma)
         if (ag.empresas?.plano_plataforma?.permite_whatsapp_bot && ag.usuarios.telefone) {
-          await enviarMensagem(ag.usuarios.telefone, msg);
+          // usuarios.telefone é salvo sem DDI (ver utils/telefone.js) — diferente do fluxo do
+          // bot (services/whatsapp/bot.js), onde o telefone já vem com DDI direto do WhatsApp.
+          // Sem prefixar o 55 aqui, o Evolution API recebia um número de 10-11 dígitos e a
+          // mensagem nunca era entregue.
+          await enviarMensagem(`55${ag.usuarios.telefone.replace(/\D/g, '')}`, msg);
         }
 
         // ATUALIZAR STATUS PARA NÃO REPETIR

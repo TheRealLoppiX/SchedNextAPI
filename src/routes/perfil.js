@@ -3,6 +3,7 @@ const supabase = require('../config/supabase');
 const verificarTokenCliente = require('../middleware/clienteAuth');
 const validate = require('../middleware/validate');
 const { perfilAtualizarSchema, avaliarSchema } = require('../schemas');
+const { paraInstanteReal } = require('../utils/horarioBrasilia');
 
 const router = express.Router();
 
@@ -65,7 +66,7 @@ router.get('/meus-agendamentos/:id', verificarTokenCliente, async (req, res) => 
     barbeiro_id: a.barbeiro_id,
     barbeiro: a.barbeiros ? a.barbeiros.nome : null,
     servicos: (a.agendamento_servicos || []).map((as) => as.servicos && as.servicos.nome).filter(Boolean).join(', '),
-    status: new Date(a.data_hora) < agora && a.status === 'pendente' ? 'expirado' : a.status,
+    status: paraInstanteReal(a.data_hora) < agora && a.status === 'pendente' ? 'expirado' : a.status,
     ja_avaliado: avaliados.has(a.id) ? 1 : 0
   }));
 
@@ -116,7 +117,7 @@ router.put('/cancelar-agendamento/:id', verificarTokenCliente, async (req, res) 
   if (!agendamento) return res.status(404).json({ error: 'Agendamento não encontrado' });
   if (String(agendamento.usuario_id) !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
 
-  if (new Date(agendamento.data_hora) < new Date()) {
+  if (paraInstanteReal(agendamento.data_hora) < new Date()) {
     return res.status(400).json({ error: 'Não é possível cancelar horários passados.' });
   }
 
@@ -142,7 +143,7 @@ router.post('/avaliar', verificarTokenCliente, validate(avaliarSchema), async (r
   // O ENUM real de status no Postgres só tem pendente/confirmado/concluido/cancelado.
   // 'finalizado' nunca existiu como valor válido (ver database-schema.md), então checamos só 'concluido'.
   if (agendamento.status !== 'concluido') {
-    return res.status(403).json({ error: 'Aguarde a finalização do seu corte pelo barbeiro para enviar a avaliação.' });
+    return res.status(403).json({ error: 'Aguarde a finalização do seu atendimento para enviar a avaliação.' });
   }
 
   const { error } = await supabase

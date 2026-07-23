@@ -29,7 +29,7 @@ app.use(helmet({
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ limit: '1mb', extended: true }));
 // Além do FRONTEND_URL exato (cobre dev local e o valor configurado em produção),
-// libera qualquer subdomínio de tenant (ex: barbearia.schednext.com.br) sobre HTTPS,
+// libera qualquer subdomínio de tenant (ex: minha-empresa.schednext.com.br) sobre HTTPS,
 // já que cada empresa agora pode ter seu próprio subdomínio na plataforma.
 const DOMINIO_RAIZ = 'schednext.com.br';
 function origemPermitida(origin, callback) {
