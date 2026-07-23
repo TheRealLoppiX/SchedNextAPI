@@ -177,11 +177,27 @@ router.get('/servicos-por-barbeiro/:barbeiro_id', async (req, res) => {
 
 // FILTRAGEM DE DISPONIBILIDADE (agendamentos + bloqueios)
 router.get('/disponibilidade-filtro', async (req, res) => {
-  const { data, hora } = req.query;
+  const { data, hora, empresa } = req.query;
 
   if (!data || !hora) {
     return res.status(400).json({ error: 'Data e hora são necessários' });
   }
+
+  // Mesma validação/resolução de slug-ou-id usada em GET /servicos acima. Sem isso, a query
+  // de agendamentos abaixo varria TODOS os agendamentos da plataforma inteira a cada consulta
+  // de disponibilidade, não só os da empresa em questão — um full table scan crescente junto
+  // com a base, embora sem vazar dado sensível (só devolvia barbeiro_ids ocupados).
+  if (!empresa || !/^[a-zA-Z0-9_-]+$/.test(String(empresa))) {
+    return res.status(400).json({ error: 'O slug da empresa é obrigatório' });
+  }
+  const porId = /^\d+$/.test(String(empresa));
+  const { data: emp, error: empErr } = await supabase
+    .from('empresas')
+    .select('id')
+    .or(`slug.eq.${empresa},id.eq.${porId ? empresa : 0}`)
+    .maybeSingle();
+
+  if (empErr || !emp) return res.status(404).json({ error: 'Empresa não encontrada' });
 
   // Z explícito: os data_hora armazenados são tratados como UTC (é como o Postgres/Supabase
   // interpretou os DATETIME "ingênuos" que vieram do MySQL); sem o Z, o Node.js interpretaria
@@ -194,6 +210,7 @@ router.get('/disponibilidade-filtro', async (req, res) => {
   const { data: agendamentos, error: errAg } = await supabase
     .from('agendamentos')
     .select('barbeiro_id, data_hora, agendamento_servicos(servicos(duracao))')
+    .eq('empresa_id', emp.id)
     .neq('status', 'cancelado');
 
   if (errAg) {
