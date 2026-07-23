@@ -5,6 +5,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 
 const verificarTokenAdmin = require('./src/middleware/adminAuth');
+const verificarTokenSuperAdmin = require('./src/middleware/superAdminAuth');
 const iniciarLembretes = require('./src/cron/lembretes');
 const iniciarProcessamentoCancelamentos = require('./src/cron/assinaturas');
 
@@ -42,8 +43,12 @@ app.use(cors({
 // Protege toda a área /admin/*. O único endpoint sob /admin que fica de fora é o próprio
 // /admin/login (é ele quem emite o token). Ver src/middleware/adminAuth.js.
 app.use('/admin', verificarTokenAdmin);
+// Conta separada do dono da plataforma (ver src/middleware/superAdminAuth.js) — nunca aceita
+// token de admin de empresa, e vice-versa.
+app.use('/super-admin', verificarTokenSuperAdmin);
 
 app.use(require('./src/routes/auth'));
+app.use(require('./src/routes/superAdmin'));
 app.use(require('./src/routes/perfil'));
 app.use(require('./src/routes/barbeiros'));
 app.use(require('./src/routes/servicos'));

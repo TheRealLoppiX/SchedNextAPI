@@ -4,9 +4,19 @@ const bcrypt = require('bcrypt');
 const supabase = require('../config/supabase');
 const validate = require('../middleware/validate');
 const { cadastroEmpresaLimiter } = require('../middleware/rateLimiters');
-const { registrarEmpresaSchema } = require('../schemas');
+const { registrarEmpresaSchema, contatoEnterpriseSchema } = require('../schemas');
+const { registrarLead } = require('../services/leadsEnterprise');
 
 const router = express.Router();
+
+// Versão pública do contato Enterprise (ver também /admin/empresa/contato-enterprise em
+// routes/empresa.js), pra quem ainda não tem conta e clica em Enterprise direto no cadastro.
+// Reaproveita o limiter de cadastro só pra não virar vetor de spam do formulário.
+router.post('/empresas/contato-enterprise', cadastroEmpresaLimiter, validate(contatoEnterpriseSchema), async (req, res) => {
+  const { error } = await registrarLead({ empresaId: null, dados: req.body });
+  if (error) return res.status(500).json({ error: 'Erro ao registrar seu contato. Tente novamente.' });
+  res.json({ success: true, message: 'Recebemos seu contato! Nosso time entra em contato em breve.' });
+});
 
 // Planos da plataforma (não confundir com planos_assinatura, que é o plano de
 // fidelidade que a barbearia vende pro cliente dela). Usado pela landing e pelo

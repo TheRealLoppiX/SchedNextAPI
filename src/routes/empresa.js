@@ -2,9 +2,19 @@ const express = require('express');
 const supabase = require('../config/supabase');
 const { obterSlugTenant, resolverEmpresaPorSlug } = require('../utils/tenantContext');
 const validate = require('../middleware/validate');
-const { empresaAtualizarSchema, configEmpresaSchema } = require('../schemas');
+const { empresaAtualizarSchema, configEmpresaSchema, contatoEnterpriseSchema } = require('../schemas');
+const { registrarLead } = require('../services/leadsEnterprise');
 
 const router = express.Router();
+
+// Enterprise não tem preço fixo (ver routes/pagamentos.js) — em vez de cobrança automática,
+// o admin da empresa preenche esse formulário e o time comercial entra em contato. Sob /admin,
+// então req.empresaId já vem verificado pelo token (ver server.js).
+router.post('/admin/empresa/contato-enterprise', validate(contatoEnterpriseSchema), async (req, res) => {
+  const { error } = await registrarLead({ empresaId: req.empresaId, dados: req.body });
+  if (error) return res.status(500).json({ error: 'Erro ao registrar seu contato. Tente novamente.' });
+  res.json({ success: true, message: 'Recebemos seu contato! Nosso time entra em contato em breve.' });
+});
 
 // :id no path é ignorado de propósito. Usar req.empresaId (vindo do token verificado)
 // evita que um admin autenticado leia dados de outro tenant só trocando o ID na URL.

@@ -312,6 +312,32 @@ const apiKeyCriarSchema = z.object({
   nome: z.string().trim().min(1, 'Dê um nome pra essa chave').max(150)
 });
 
+// --- empresa.js / empresasPublico.js (contato Enterprise) ---
+
+const contatoEnterpriseSchema = z.object({
+  nome_empresa: z.string().trim().min(2, 'Nome muito curto').max(150),
+  cnpj: z.preprocess(
+    (v) => (typeof v === 'string' ? v.replace(/\D/g, '') : v),
+    z.string().regex(/^\d{14}$/, 'Informe um CNPJ válido.')
+  ),
+  localizacao: z.string().trim().min(2, 'Informe a localização').max(150),
+  clientes_esperados: z.string().trim().min(1, 'Informe uma estimativa').max(100),
+  observacoes: textoOpcionalNullable,
+  email_contato: z.string().trim().toLowerCase().email('E-mail inválido'),
+  telefone_contato: z.string().trim().max(20).optional().nullable()
+});
+
+// --- superAdmin.js ---
+
+const superAdminLoginSchema = z.object({
+  email: z.string().trim().toLowerCase().email('E-mail inválido'),
+  senha: z.string().min(1, 'Senha é obrigatória')
+});
+
+const leadStatusSchema = z.object({
+  status: z.enum(['novo', 'contatado', 'fechado'])
+});
+
 module.exports = {
   registrarSchema,
   loginSchema,
@@ -355,5 +381,8 @@ module.exports = {
   assinaturaPlanoSchema,
   clientePlanoSchema,
   iniciarUpgradeSchema,
-  apiKeyCriarSchema
+  apiKeyCriarSchema,
+  contatoEnterpriseSchema,
+  superAdminLoginSchema,
+  leadStatusSchema
 };

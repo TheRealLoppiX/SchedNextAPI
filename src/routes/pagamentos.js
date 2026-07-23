@@ -23,6 +23,18 @@ router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgr
 
   if (error || !plano) return res.status(400).json({ error: 'Plano inválido.' });
 
+  // Enterprise (e qualquer plano futuro "sob consulta") não tem preço fixo — preco_mensal vem
+  // null do banco. Sem essa checagem, `null <= 0` é true em JS e cairia no branch de downgrade
+  // pro Grátis logo abaixo, ativando o plano de graça e pra sempre sem nenhuma cobrança real.
+  // Esses planos passam pelo formulário de contato (POST /admin/empresa/contato-enterprise),
+  // não por aqui.
+  if (plano.preco_mensal === null) {
+    return res.status(400).json({
+      error: 'O plano Enterprise não tem valor fixo. Preencha o formulário de contato para negociar com nosso time.',
+      requerContatoEnterprise: true
+    });
+  }
+
   const { data: empresa } = await supabase
     .from('empresas')
     .select('nome, email, cpf_cnpj, gateway_customer_id, gateway_subscription_id')
