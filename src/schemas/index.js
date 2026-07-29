@@ -312,6 +312,13 @@ const apiKeyCriarSchema = z.object({
   nome: z.string().trim().min(1, 'Dê um nome pra essa chave').max(150)
 });
 
+// --- dominioCustomizado.js ---
+
+const dominioCustomizadoSchema = z.object({
+  dominio: z.string().trim().toLowerCase().max(253)
+    .regex(/^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/, 'Informe um domínio válido, ex: agenda.suaempresa.com.br')
+});
+
 // --- empresa.js / empresasPublico.js (contato Enterprise) ---
 
 const contatoEnterpriseSchema = z.object({
@@ -382,6 +389,7 @@ module.exports = {
   clientePlanoSchema,
   iniciarUpgradeSchema,
   apiKeyCriarSchema,
+  dominioCustomizadoSchema,
   contatoEnterpriseSchema,
   superAdminLoginSchema,
   leadStatusSchema

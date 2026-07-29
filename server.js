@@ -74,6 +74,8 @@ app.use(require('./src/routes/apiKeys'));
 app.use(require('./src/routes/apiPublica'));
 app.use(require('./src/routes/ia'));
 app.use(require('./src/routes/clientes'));
+app.use(require('./src/routes/relatorios'));
+app.use(require('./src/routes/dominioCustomizado'));
 
 iniciarLembretes();
 iniciarProcessamentoCancelamentos();

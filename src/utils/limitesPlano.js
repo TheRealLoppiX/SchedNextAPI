@@ -3,11 +3,11 @@ const supabase = require('../config/supabase');
 async function obterLimitesEmpresa(empresaId) {
   const { data } = await supabase
     .from('empresas')
-    .select('plano_plataforma:plano_plataforma_id(limite_profissionais, limite_agendamentos_mes, permite_multi_unidade, permite_api_publica, permite_ia)')
+    .select('plano_plataforma:plano_plataforma_id(limite_profissionais, limite_agendamentos_mes, permite_multi_unidade, permite_api_publica, permite_ia, permite_relatorios_avancados, permite_dominio_customizado)')
     .eq('id', empresaId)
     .maybeSingle();
 
-  return data?.plano_plataforma || { limite_profissionais: null, limite_agendamentos_mes: null, permite_multi_unidade: false, permite_api_publica: false, permite_ia: false };
+  return data?.plano_plataforma || { limite_profissionais: null, limite_agendamentos_mes: null, permite_multi_unidade: false, permite_api_publica: false, permite_ia: false, permite_relatorios_avancados: false, permite_dominio_customizado: false };
 }
 
 // Multi-unidade e API pública são recursos do plano Enterprise (ver §3 do plano de plataforma).
@@ -19,6 +19,17 @@ async function permiteMultiUnidade(empresaId) {
 async function permiteApiPublica(empresaId) {
   const { permite_api_publica } = await obterLimitesEmpresa(empresaId);
   return !!permite_api_publica;
+}
+
+// Relatórios avançados e domínio próprio também são exclusivos do plano Enterprise.
+async function permiteRelatoriosAvancados(empresaId) {
+  const { permite_relatorios_avancados } = await obterLimitesEmpresa(empresaId);
+  return !!permite_relatorios_avancados;
+}
+
+async function permiteDominioCustomizado(empresaId) {
+  const { permite_dominio_customizado } = await obterLimitesEmpresa(empresaId);
+  return !!permite_dominio_customizado;
 }
 
 // Recursos de IA: planos acima de R$100/mês (Profissional/Enterprise, ver planos_plataforma).
@@ -111,5 +122,7 @@ module.exports = {
   confirmarLimiteProfissionaisOuDesfazer,
   permiteMultiUnidade,
   permiteApiPublica,
-  permiteIA
+  permiteIA,
+  permiteRelatoriosAvancados,
+  permiteDominioCustomizado
 };
