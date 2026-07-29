@@ -36,9 +36,12 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
   const dataFim = req.query.dataFim || hoje;
 
   try {
+    const { data: empresaRow } = await supabase.from('empresas').select('taxas_pagamento').eq('id', empresaId).maybeSingle();
+    const taxas = { dinheiro: 0, credito: 0, debito: 0, pix: 0, ...(empresaRow?.taxas_pagamento || {}) };
+
     const { data: agendamentos, error } = await supabase
       .from('agendamentos')
-      .select('id, status, data_hora, valor_total, usuario_id, barbeiro_id, barbeiros(nome)')
+      .select('id, status, data_hora, valor_total, usuario_id, barbeiro_id, forma_pagamento, barbeiros(nome)')
       .eq('empresa_id', empresaId)
       .gte('data_hora', `${dataInicio}T00:00:00`)
       .lte('data_hora', `${dataFim}T23:59:59`);
@@ -50,6 +53,13 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
     const total = (agendamentos || []).length;
 
     const faturamentoTotal = concluidos.reduce((acc, a) => acc + Number(a.valor_total || 0), 0);
+    // Receita líquida: desconta a taxa de maquineta cadastrada (ver routes/financeiro.js) pra
+    // cada agendamento, de acordo com a forma de pagamento usada. Agendamentos sem
+    // forma_pagamento registrada (histórico antigo, ou fechado sem informar) entram sem desconto.
+    const receitaLiquidaTotal = concluidos.reduce((acc, a) => {
+      const taxaPct = taxas[a.forma_pagamento] || 0;
+      return acc + Number(a.valor_total || 0) * (1 - taxaPct / 100);
+    }, 0);
     const ticketMedio = concluidos.length > 0 ? faturamentoTotal / concluidos.length : 0;
     const taxaCancelamento = total > 0 ? (cancelados.length / total) * 100 : 0;
 
@@ -134,6 +144,7 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
       periodo: { inicio: dataInicio, fim: dataFim },
       resumo: {
         faturamento_total: faturamentoTotal,
+        receita_liquida: Number(receitaLiquidaTotal.toFixed(2)),
         ticket_medio: ticketMedio,
         quantidade_concluidos: concluidos.length,
         taxa_cancelamento: Number(taxaCancelamento.toFixed(1)),
@@ -152,6 +163,113 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
   } catch (err) {
     console.error('Erro ao gerar relatório avançado:', err);
     res.status(500).json({ error: 'Erro ao gerar o relatório.' });
+  }
+});
+
+// Relatório de comissionamento por profissional. Diferente do relatório geral acima, este NÃO
+// é exclusivo do plano Enterprise — comissionamento é uma necessidade operacional básica de
+// qualquer negócio com equipe, não um recurso premium.
+router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
+  const empresaId = req.empresaId;
+  const hoje = formatarDataLocal(new Date());
+  const dataInicio = req.query.dataInicio || `${hoje.slice(0, 7)}-01`;
+  const dataFim = req.query.dataFim || hoje;
+
+  try {
+    const { data: empresaRow } = await supabase.from('empresas').select('taxas_pagamento').eq('id', empresaId).maybeSingle();
+    const taxas = { dinheiro: 0, credito: 0, debito: 0, pix: 0, ...(empresaRow?.taxas_pagamento || {}) };
+
+    const { data: profissionais, error: erroProf } = await supabase
+      .from('barbeiros')
+      .select('id, nome, percentual_comissao')
+      .eq('empresa_id', empresaId);
+    if (erroProf) throw erroProf;
+
+    const nomePorProfissional = Object.fromEntries(profissionais.map((p) => [p.id, p.nome]));
+    const percentualPorProfissional = Object.fromEntries(profissionais.map((p) => [p.id, Number(p.percentual_comissao) || 0]));
+
+    const { data: agendamentos, error } = await supabase
+      .from('agendamentos')
+      .select('id, barbeiro_id, usuario_id, valor_total, forma_pagamento, data_hora')
+      .eq('empresa_id', empresaId)
+      .eq('status', 'concluido')
+      .gte('data_hora', `${dataInicio}T00:00:00`)
+      .lte('data_hora', `${dataFim}T23:59:59`);
+    if (error) throw error;
+
+    // Rateio de cliente assinante: o atendimento em si custa R$0 pro assinante (serviço incluso
+    // no plano, ver PENDENCIAS.md/bug corrigido), mas ele PAGOU pela mensalidade — então, só
+    // pra fins de comissão, atribuímos ao profissional a fatia proporcional do valor do plano
+    // (preço mensal ÷ quantidade de visitas concluídas naquele mês-calendário do cliente).
+    const idsClientes = [...new Set(agendamentos.map((a) => a.usuario_id).filter(Boolean))];
+    const precoAssinaturaPorCliente = {};
+    if (idsClientes.length > 0) {
+      const { data: usuarios } = await supabase.from('usuarios').select('id, assinante, plano_id').in('id', idsClientes);
+      const planoIds = [...new Set((usuarios || []).filter((u) => u.assinante && u.plano_id).map((u) => u.plano_id))];
+      let precoPorPlano = {};
+      if (planoIds.length > 0) {
+        const { data: planos } = await supabase.from('planos_assinatura').select('id, preco').in('id', planoIds);
+        precoPorPlano = Object.fromEntries((planos || []).map((p) => [p.id, Number(p.preco) || 0]));
+      }
+      for (const u of usuarios || []) {
+        if (u.assinante && u.plano_id && precoPorPlano[u.plano_id] != null) {
+          precoAssinaturaPorCliente[u.id] = precoPorPlano[u.plano_id];
+        }
+      }
+    }
+
+    const visitasPorClienteMes = {};
+    for (const a of agendamentos) {
+      if (!a.usuario_id || precoAssinaturaPorCliente[a.usuario_id] == null) continue;
+      const chave = `${a.usuario_id}-${a.data_hora.slice(0, 7)}`;
+      visitasPorClienteMes[chave] = (visitasPorClienteMes[chave] || 0) + 1;
+    }
+
+    const porProfissional = {};
+    for (const a of agendamentos) {
+      if (!a.barbeiro_id) continue;
+
+      let receita = Number(a.valor_total || 0);
+      if (a.usuario_id && precoAssinaturaPorCliente[a.usuario_id] != null) {
+        const chave = `${a.usuario_id}-${a.data_hora.slice(0, 7)}`;
+        const visitas = visitasPorClienteMes[chave] || 1;
+        receita = precoAssinaturaPorCliente[a.usuario_id] / visitas;
+      }
+
+      const taxaPct = taxas[a.forma_pagamento] || 0;
+      const receitaLiquida = receita * (1 - taxaPct / 100);
+      const percentual = percentualPorProfissional[a.barbeiro_id] || 0;
+      const comissao = receitaLiquida * (percentual / 100);
+
+      if (!porProfissional[a.barbeiro_id]) {
+        porProfissional[a.barbeiro_id] = {
+          nome: nomePorProfissional[a.barbeiro_id] || 'Sem nome',
+          percentual_comissao: percentual,
+          quantidade: 0,
+          receita_bruta: 0,
+          receita_liquida: 0,
+          comissao: 0
+        };
+      }
+      porProfissional[a.barbeiro_id].quantidade += 1;
+      porProfissional[a.barbeiro_id].receita_bruta += Number(a.valor_total || 0);
+      porProfissional[a.barbeiro_id].receita_liquida += receitaLiquida;
+      porProfissional[a.barbeiro_id].comissao += comissao;
+    }
+
+    const profissionaisFormatado = Object.values(porProfissional)
+      .map((p) => ({
+        ...p,
+        receita_bruta: Number(p.receita_bruta.toFixed(2)),
+        receita_liquida: Number(p.receita_liquida.toFixed(2)),
+        comissao: Number(p.comissao.toFixed(2))
+      }))
+      .sort((a, b) => b.comissao - a.comissao);
+
+    res.json({ periodo: { inicio: dataInicio, fim: dataFim }, taxas_pagamento: taxas, profissionais: profissionaisFormatado });
+  } catch (err) {
+    console.error('Erro ao gerar relatório de comissionamento:', err);
+    res.status(500).json({ error: 'Erro ao gerar o relatório de comissionamento.' });
   }
 });
 

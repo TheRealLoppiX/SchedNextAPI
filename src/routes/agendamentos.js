@@ -17,8 +17,12 @@ const {
 } = require('../schemas');
 const {
   limiteAgendamentosMesAtingido,
-  confirmarLimiteAgendamentosOuDesfazer
+  confirmarLimiteAgendamentosOuDesfazer,
+  permiteWhatsappBot
 } = require('../utils/limitesPlano');
+const { calcularValorComDescontoAssinante } = require('../utils/valorAssinante');
+const { verificarEDispararPremioFidelidade } = require('../services/fidelidade');
+const { enviarMensagem } = require('../services/whatsapp/provider');
 
 const MENSAGEM_LIMITE_AGENDAMENTOS = 'Este estabelecimento atingiu o limite de agendamentos do mês. Peça para o administrador fazer upgrade de plano.';
 
@@ -61,14 +65,17 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
   }
 
   const ids = servicos.map((s) => s.id);
-  const { data: servicosInfo, error: servErr } = await supabase.from('servicos').select('duracao, valor').in('id', ids);
+  const { data: servicosInfo, error: servErr } = await supabase.from('servicos').select('id, duracao, valor').in('id', ids);
 
   if (servErr || !servicosInfo || servicosInfo.length === 0) {
     return res.status(400).json({ error: 'Serviços inválidos' });
   }
 
   const duracaoTotal = servicosInfo.reduce((acc, s) => acc + (s.duracao || 0), 0);
-  const valorTotal = servicosInfo.reduce((acc, s) => acc + Number(s.valor || 0), 0);
+  // Desconta os serviços que já estão inclusos no plano de assinatura do cliente (se ele for
+  // assinante) — antes isso somava o preço cheio de tudo, cobrando de novo o que já tinha sido
+  // pago na mensalidade.
+  const valorTotal = await calcularValorComDescontoAssinante(usuario_id, servicosInfo);
 
   const { data: novoAgendamento, error: insErr } = await supabase
     .from('agendamentos')
@@ -97,7 +104,7 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
   const { error: vincErr } = await supabase.from('agendamento_servicos').insert(vinculos);
   if (vincErr) return res.status(500).json({ error: 'Erro ao vincular serviços' });
 
-  const { data: usuario } = await supabase.from('usuarios').select('email, nome_completo').eq('id', usuario_id).maybeSingle();
+  const { data: usuario } = await supabase.from('usuarios').select('email, nome_completo, telefone').eq('id', usuario_id).maybeSingle();
   if (usuario) {
     const dataFormatada = new Date(data_hora).toLocaleString('pt-BR');
     transporter.sendMail({
@@ -111,6 +118,13 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
         `
       })
     }).catch((mailErr) => console.error('Erro ao enviar e-mail de confirmação de agendamento:', mailErr));
+
+    if (usuario.telefone && (await permiteWhatsappBot(emp.id))) {
+      enviarMensagem(
+        `55${usuario.telefone.replace(/\D/g, '')}`,
+        `✅ Agendamento confirmado! ${emp.nome}, ${dataFormatada}. Valor: R$ ${valorTotal}.`
+      ).catch((err) => console.error('Erro ao enviar WhatsApp de confirmação de agendamento:', err));
+    }
   }
 
   res.json({ message: 'Agendamento criado!' });
@@ -380,7 +394,7 @@ router.post('/admin/cancelar-agendamento', validate(cancelarAgendamentoSchema), 
   // 2. Buscamos os dados do USUÁRIO vinculado (se existir)
   const { data: agendamento } = await supabase
     .from('agendamentos')
-    .select('data_hora, usuarios(email, nome_completo)')
+    .select('data_hora, usuarios(email, nome_completo, telefone)')
     .eq('id', agendamento_id)
     .maybeSingle();
 
@@ -408,6 +422,13 @@ router.post('/admin/cancelar-agendamento', validate(cancelarAgendamentoSchema), 
     })
   };
 
+  if (agendamento.usuarios.telefone && (await permiteWhatsappBot(req.empresaId))) {
+    enviarMensagem(
+      `55${agendamento.usuarios.telefone.replace(/\D/g, '')}`,
+      `Seu agendamento para ${dataHora} foi cancelado. Motivo: ${justificativa}. Você pode fazer uma nova reserva quando quiser.`
+    ).catch((err) => console.error('Erro ao enviar WhatsApp de cancelamento:', err));
+  }
+
   transporter.sendMail(mailOptions, (error) => {
     if (error) {
       console.error('Erro ao enviar e-mail (Gmail):', error);
@@ -419,7 +440,7 @@ router.post('/admin/cancelar-agendamento', validate(cancelarAgendamentoSchema), 
 
 // ROTA DE CHECKOUT (Para finalizar o atendimento e receber o pagamento)
 router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchema), async (req, res) => {
-  const { agendamento_id, produtos_vendidos, servicos_adicionais } = req.body;
+  const { agendamento_id, produtos_vendidos, servicos_adicionais, forma_pagamento } = req.body;
 
   if (!agendamento_id) {
     return res.status(400).json({ error: 'ID do agendamento é obrigatório.' });
@@ -429,7 +450,7 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
     // 1. Busca o valor base e a empresa já salvos no agendamento
     const { data: agAtual, error: agErr } = await supabase
       .from('agendamentos')
-      .select('valor_total, empresa_id')
+      .select('valor_total, empresa_id, usuario_id')
       .eq('id', agendamento_id)
       .maybeSingle();
     if (agErr) throw agErr;
@@ -437,7 +458,27 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
       return res.status(404).json({ error: 'Agendamento não encontrado.' });
     }
 
-    const valorBase = parseFloat(agAtual?.valor_total || 0);
+    // Recalcula o valor base a partir dos serviços de fato vinculados ao agendamento e do
+    // status de assinatura ATUAL do cliente, em vez de confiar cegamente no valor_total gravado
+    // na criação (que já podia ter sido calculado sem considerar desconto de assinatura, ou
+    // ficar desatualizado se o cliente virou assinante — ou deixou de ser — depois de agendar).
+    // Ver bug documentado: estava cobrando o valor cheio de serviços já inclusos no plano.
+    const { data: servicosVinculados } = await supabase
+      .from('agendamento_servicos')
+      .select('servico_id, servicos(id, valor)')
+      .eq('agendamento_id', agendamento_id);
+
+    let valorBase;
+    if (servicosVinculados && servicosVinculados.length > 0) {
+      const servicosParaCalculo = servicosVinculados
+        .filter((v) => v.servicos)
+        .map((v) => ({ id: v.servico_id, valor: v.servicos.valor }));
+      valorBase = await calcularValorComDescontoAssinante(agAtual.usuario_id, servicosParaCalculo);
+    } else {
+      // Agendamentos sem serviço vinculado (ex: encaixe legado que só grava valor_total direto)
+      // caem no valor gravado, não tem como recalcular sem saber quais serviços foram feitos.
+      valorBase = parseFloat(agAtual?.valor_total || 0);
+    }
 
     // 2. Soma os serviços adicionais escolhidos no PDV. O preço vem do banco (tabela
     // `servicos`), nunca do valor que o cliente/admin mandou no body: senão uma requisição
@@ -473,10 +514,12 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
 
     const valorFinal = valorBase + valorAdicionais + valorProdutos;
 
-    // 4. Atualiza o agendamento para concluído com o valor total final
+    // 4. Atualiza o agendamento para concluído com o valor total final. forma_pagamento é só
+    // registro informativo (dinheiro/crédito/débito/pix) pro relatório de faturamento — não gera
+    // cobrança nenhuma de verdade, isso depende de gateway configurado por fora (ver PENDENCIAS.md).
     const { error: updError } = await supabase
       .from('agendamentos')
-      .update({ status: 'concluido', valor_total: valorFinal })
+      .update({ status: 'concluido', valor_total: valorFinal, forma_pagamento: forma_pagamento || null })
       .eq('id', agendamento_id)
       .eq('empresa_id', req.empresaId);
     if (updError) throw updError;
@@ -515,6 +558,10 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
     }
 
     res.json({ success: true, message: 'Atendimento finalizado!', valor_final: valorFinal });
+
+    // Disparado depois da resposta: checagem de fidelidade não deve atrasar nem quebrar o
+    // fechamento de caixa se o e-mail/WhatsApp falhar por qualquer motivo.
+    verificarEDispararPremioFidelidade(agAtual.usuario_id, req.empresaId);
   } catch (err) {
     console.error('Erro no checkout:', err);
     res.status(500).json({ error: err.message || 'Erro ao processar o fechamento do caixa.' });
@@ -571,8 +618,14 @@ router.post('/admin/agendar-encaixe', validate(agendarEncaixeSchema), async (req
       return res.status(403).json({ error: MENSAGEM_LIMITE_AGENDAMENTOS });
     }
 
+    // Desconta os serviços já inclusos no plano de assinatura do cliente, se ele for assinante
+    // (ver bug histórico documentado em PENDENCIAS.md — cobrava o valor cheio mesmo do que já
+    // estava pago na mensalidade).
     const valorTotal = servicos && servicos.length > 0
-      ? servicos.reduce((acc, s) => acc + parseFloat(String(s.preco || s.valor || '0').replace(',', '.')), 0)
+      ? await calcularValorComDescontoAssinante(
+          usuario_id,
+          servicos.map((s) => ({ id: s.id, valor: parseFloat(String(s.preco || s.valor || '0').replace(',', '.')) }))
+        )
       : 0;
 
     const duracaoTotal = servicos && servicos.length > 0

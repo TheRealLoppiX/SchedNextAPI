@@ -16,6 +16,16 @@ const cadastroEmpresaLimiter = rateLimit({
   message: { error: 'Muitas tentativas de cadastro. Tente novamente em algumas horas.' }
 });
 
+// POST /registrar (cliente final) não tinha nenhum limite — dava pra inundar
+// cadastros_pendentes e o crédito de e-mail da Brevo com tentativas sem fim.
+const cadastroClienteLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas tentativas de cadastro. Tente novamente em algumas horas.' }
+});
+
 const apiPublicaLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
@@ -35,4 +45,4 @@ const codigoLimiter = rateLimit({
   message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' }
 });
 
-module.exports = { loginLimiter, cadastroEmpresaLimiter, apiPublicaLimiter, codigoLimiter };
+module.exports = { loginLimiter, cadastroEmpresaLimiter, cadastroClienteLimiter, apiPublicaLimiter, codigoLimiter };

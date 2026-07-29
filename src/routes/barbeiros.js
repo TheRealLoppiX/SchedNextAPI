@@ -135,10 +135,13 @@ router.post('/admin/barbeiro', validate(barbeiroCriarSchema), async (req, res) =
 });
 
 router.put('/admin/barbeiro/editar', validate(barbeiroEditarSchema), async (req, res) => {
-  const { id, nome, foto_url } = req.body;
+  const { id, nome, foto_url, percentual_comissao } = req.body;
+  const atualizacao = { nome, foto_url };
+  if (percentual_comissao !== undefined) atualizacao.percentual_comissao = percentual_comissao;
+
   const { data, error } = await supabase
     .from('barbeiros')
-    .update({ nome, foto_url })
+    .update(atualizacao)
     .eq('id', id)
     .eq('empresa_id', req.empresaId)
     .select('id');

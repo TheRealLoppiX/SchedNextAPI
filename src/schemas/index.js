@@ -162,7 +162,8 @@ const barbeiroCriarSchema = z.object({
 const barbeiroEditarSchema = z.object({
   id: idLike,
   nome: z.string().trim().min(1, 'Nome é obrigatório').max(150),
-  foto_url: z.string().trim().optional().nullable()
+  foto_url: z.string().trim().optional().nullable(),
+  percentual_comissao: z.coerce.number().min(0, 'Comissão não pode ser negativa').max(100, 'Comissão não pode passar de 100%').nullable().optional()
 });
 
 const barbeiroStatusSchema = z.object({
@@ -214,7 +215,8 @@ const clienteAssinanteSchema = z.object({
 
 const clienteFollowupSchema = z.object({
   cliente_id: idLike,
-  tipo: z.enum(['saudade', 'aniversario'])
+  tipo: z.enum(['saudade', 'aniversario']),
+  canal: z.enum(['email', 'whatsapp', 'ambos']).optional()
 });
 
 // --- agendamentos.js (rotas administrativas) ---
@@ -254,7 +256,8 @@ const cancelarAgendamentoSchema = z.object({
 const finalizarCheckoutSchema = z.object({
   agendamento_id: idLike,
   produtos_vendidos: z.array(z.object({ id: idLike, quantidade: z.coerce.number().int().positive().optional() })).optional(),
-  servicos_adicionais: z.array(z.object({ id: idLike })).optional()
+  servicos_adicionais: z.array(z.object({ id: idLike })).optional(),
+  forma_pagamento: z.enum(['dinheiro', 'credito', 'debito', 'pix']).optional()
 });
 
 const agendarEncaixeSchema = z.object({
@@ -312,6 +315,19 @@ const apiKeyCriarSchema = z.object({
   nome: z.string().trim().min(1, 'Dê um nome pra essa chave').max(150)
 });
 
+// --- financeiro.js (taxas de maquineta) ---
+
+const percentualTaxa = z.coerce.number().min(0, 'Taxa não pode ser negativa').max(100, 'Taxa não pode passar de 100%');
+
+const taxasPagamentoSchema = z.object({
+  taxas_pagamento: z.object({
+    dinheiro: percentualTaxa.optional().default(0),
+    credito: percentualTaxa.optional().default(0),
+    debito: percentualTaxa.optional().default(0),
+    pix: percentualTaxa.optional().default(0)
+  })
+});
+
 // --- dominioCustomizado.js ---
 
 const dominioCustomizadoSchema = z.object({
@@ -334,7 +350,7 @@ const contatoEnterpriseSchema = z.object({
   telefone_contato: z.string().trim().max(20).optional().nullable()
 });
 
-// --- superAdmin.js ---
+// --- superAdmin.js / superAdminPlataforma.js ---
 
 const superAdminLoginSchema = z.object({
   email: z.string().trim().toLowerCase().email('E-mail inválido'),
@@ -343,6 +359,22 @@ const superAdminLoginSchema = z.object({
 
 const leadStatusSchema = z.object({
   status: z.enum(['novo', 'contatado', 'fechado'])
+});
+
+const planoPlataformaSchema = z.object({
+  nome: z.string().trim().min(1, 'Nome do plano é obrigatório').max(100),
+  preco_mensal: z.coerce.number().min(0).nullable(),
+  limite_profissionais: z.coerce.number().int().positive().nullable(),
+  limite_agendamentos_mes: z.coerce.number().int().positive().nullable(),
+  limite_admins: z.coerce.number().int().positive().nullable().optional(),
+  permite_paleta_customizada: z.boolean().optional().default(false),
+  permite_whatsapp_bot: z.boolean().optional().default(false),
+  permite_remover_marca: z.boolean().optional().default(false),
+  permite_ia: z.boolean().optional().default(false),
+  permite_multi_unidade: z.boolean().optional().default(false),
+  permite_api_publica: z.boolean().optional().default(false),
+  permite_relatorios_avancados: z.boolean().optional().default(false),
+  permite_dominio_customizado: z.boolean().optional().default(false)
 });
 
 module.exports = {
@@ -389,8 +421,10 @@ module.exports = {
   clientePlanoSchema,
   iniciarUpgradeSchema,
   apiKeyCriarSchema,
+  taxasPagamentoSchema,
   dominioCustomizadoSchema,
   contatoEnterpriseSchema,
   superAdminLoginSchema,
-  leadStatusSchema
+  leadStatusSchema,
+  planoPlataformaSchema
 };

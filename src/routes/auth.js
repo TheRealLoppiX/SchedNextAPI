@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const supabase = require('../config/supabase');
 const transporter = require('../config/mailer');
 const validate = require('../middleware/validate');
-const { loginLimiter, codigoLimiter } = require('../middleware/rateLimiters');
+const { loginLimiter, codigoLimiter, cadastroClienteLimiter } = require('../middleware/rateLimiters');
 const {
   registrarSchema,
   loginSchema,
@@ -22,7 +22,7 @@ const { criarPendente, buscarPendenteValido, removerPendente } = require('../ser
 
 const router = express.Router();
 
-router.post('/registrar', validate(registrarSchema), async (req, res) => {
+router.post('/registrar', cadastroClienteLimiter, validate(registrarSchema), async (req, res) => {
   const { nome, nascimento, email, telefone, senha, empresaSlug } = req.body;
   const codigoVerificacao = Math.floor(100000 + Math.random() * 900000).toString();
 
@@ -260,7 +260,7 @@ router.post('/admin/login', loginLimiter, validate(loginSchema), async (req, res
 
   const { data: empresa, error } = await supabase
     .from('empresas')
-    .select('id, nome, slug, senha')
+    .select('id, nome, slug, senha, status_assinatura')
     .eq('email', email)
     .maybeSingle();
 
@@ -271,6 +271,12 @@ router.post('/admin/login', loginLimiter, validate(loginSchema), async (req, res
 
   if (!empresa) {
     return res.status(401).json({ success: false, error: 'E-mail ou senha incorretos.' });
+  }
+
+  // Conta suspensa pelo admin absoluto (ver routes/superAdminPlataforma.js) não consegue mais
+  // logar, mesmo com a senha certa — checado antes da senha valer a pena calcular.
+  if (empresa.status_assinatura === 'suspensa') {
+    return res.status(403).json({ success: false, error: 'Esta conta foi suspensa. Entre em contato com o suporte da SchedNext.' });
   }
 
   try {

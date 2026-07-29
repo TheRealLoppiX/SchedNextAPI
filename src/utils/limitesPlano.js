@@ -3,11 +3,11 @@ const supabase = require('../config/supabase');
 async function obterLimitesEmpresa(empresaId) {
   const { data } = await supabase
     .from('empresas')
-    .select('plano_plataforma:plano_plataforma_id(limite_profissionais, limite_agendamentos_mes, permite_multi_unidade, permite_api_publica, permite_ia, permite_relatorios_avancados, permite_dominio_customizado)')
+    .select('plano_plataforma:plano_plataforma_id(limite_profissionais, limite_agendamentos_mes, permite_multi_unidade, permite_api_publica, permite_ia, permite_relatorios_avancados, permite_dominio_customizado, permite_whatsapp_bot)')
     .eq('id', empresaId)
     .maybeSingle();
 
-  return data?.plano_plataforma || { limite_profissionais: null, limite_agendamentos_mes: null, permite_multi_unidade: false, permite_api_publica: false, permite_ia: false, permite_relatorios_avancados: false, permite_dominio_customizado: false };
+  return data?.plano_plataforma || { limite_profissionais: null, limite_agendamentos_mes: null, permite_multi_unidade: false, permite_api_publica: false, permite_ia: false, permite_relatorios_avancados: false, permite_dominio_customizado: false, permite_whatsapp_bot: false };
 }
 
 // Multi-unidade e API pública são recursos do plano Enterprise (ver §3 do plano de plataforma).
@@ -30,6 +30,11 @@ async function permiteRelatoriosAvancados(empresaId) {
 async function permiteDominioCustomizado(empresaId) {
   const { permite_dominio_customizado } = await obterLimitesEmpresa(empresaId);
   return !!permite_dominio_customizado;
+}
+
+async function permiteWhatsappBot(empresaId) {
+  const { permite_whatsapp_bot } = await obterLimitesEmpresa(empresaId);
+  return !!permite_whatsapp_bot;
 }
 
 // Recursos de IA: planos acima de R$100/mês (Profissional/Enterprise, ver planos_plataforma).
@@ -124,5 +129,6 @@ module.exports = {
   permiteApiPublica,
   permiteIA,
   permiteRelatoriosAvancados,
-  permiteDominioCustomizado
+  permiteDominioCustomizado,
+  permiteWhatsappBot
 };

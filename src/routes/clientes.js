@@ -2,9 +2,10 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 
 const supabase = require('../config/supabase');
-const transporter = require('../config/mailer');
 const validate = require('../middleware/validate');
 const { clienteRapidoSchema, clienteAtualizarSchema, clienteAssinanteSchema, clienteFollowupSchema } = require('../schemas');
+const { enviarMensagemCliente } = require('../services/mensagensCliente');
+const { permiteWhatsappBot } = require('../utils/limitesPlano');
 
 const router = express.Router();
 
@@ -114,12 +115,12 @@ router.delete('/admin/clientes/:id', async (req, res) => {
 });
 
 router.post('/admin/clientes/followup', validate(clienteFollowupSchema), async (req, res) => {
-  const { cliente_id, tipo } = req.body;
+  const { cliente_id, tipo, canal } = req.body;
   const empresa_id = req.empresaId;
   try {
     const { data: cliente } = await supabase
       .from('usuarios')
-      .select('nome_completo, email')
+      .select('nome_completo, email, telefone')
       .eq('id', cliente_id)
       .eq('empresa_id', empresa_id)
       .maybeSingle();
@@ -128,23 +129,20 @@ router.post('/admin/clientes/followup', validate(clienteFollowupSchema), async (
 
     const { data: empresa } = await supabase.from('empresas').select('nome').eq('id', empresa_id).maybeSingle();
     const nomeEmpresa = empresa?.nome || 'Seu estabelecimento';
-    const primeiroNome = (cliente.nome_completo || '').split(' ')[0];
 
-    let assunto, corpo;
-    if (tipo === 'saudade') {
-      assunto = nomeEmpresa + ' sente sua falta, ' + primeiroNome + '!';
-      corpo = '<div style="font-family:sans-serif;max-width:500px;margin:0 auto;color:#333"><h2>Ola, ' + primeiroNome + '!</h2><p>Faz um tempo que voce nao aparece por aqui e sentimos a sua falta!</p><p>Que tal agendar um horario? Estamos te esperando.</p><p style="margin-top:30px;color:#666">Com carinho,<br><strong>' + nomeEmpresa + '</strong></p></div>';
-    } else {
-      assunto = 'Feliz Aniversario, ' + primeiroNome + '!';
-      corpo = '<div style="font-family:sans-serif;max-width:500px;margin:0 auto;color:#333"><h2>Feliz Aniversario, ' + primeiroNome + '!</h2><p>Hoje e o seu dia especial e a equipe da <strong>' + nomeEmpresa + '</strong> veio te desejar tudo de melhor!</p><p>Voce merece se sentir incrivel hoje. Que tal comemorar com um visual novo?</p><p style="margin-top:30px;color:#666">Com muito carinho,<br><strong>' + nomeEmpresa + '</strong></p></div>';
+    // WhatsApp só é oferecido de verdade se o plano da empresa permitir (mesmo gate usado no
+    // bot e nos lembretes automáticos) — ignorado silenciosamente se pedido sem o plano certo.
+    const whatsappDisponivel = (canal === 'whatsapp' || canal === 'ambos') && (await permiteWhatsappBot(empresa_id));
+    const canais = {
+      email: canal !== 'whatsapp',
+      whatsapp: whatsappDisponivel
+    };
+
+    const resultado = await enviarMensagemCliente({ tipo, cliente, nomeEmpresa, canais });
+    if (!resultado.email && !resultado.whatsapp) {
+      return res.status(400).json({ error: 'Não foi possível enviar: cliente sem e-mail/telefone válido para o canal escolhido.' });
     }
-
-    await transporter.sendMail({
-      to: cliente.email,
-      subject: assunto,
-      html: corpo
-    });
-    res.json({ success: true });
+    res.json({ success: true, ...resultado });
   } catch (err) {
     console.error('Erro followup:', err);
     res.status(500).json({ error: err.message });
