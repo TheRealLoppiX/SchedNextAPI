@@ -357,6 +357,15 @@ const superAdminLoginSchema = z.object({
   senha: z.string().min(1, 'Senha é obrigatória')
 });
 
+// Novos super admins só podem ser criados por quem já é super admin (ver
+// routes/superAdmin.js), e só com e-mail @schednext.com.br — evita que alguém crie um
+// acesso de dono da plataforma com um e-mail pessoal qualquer.
+const superAdminCriarSchema = z.object({
+  email: z.string().trim().toLowerCase().email('E-mail inválido')
+    .refine((v) => v.endsWith('@schednext.com.br'), 'O e-mail precisa ser do domínio @schednext.com.br'),
+  senha: z.string().min(8, 'A senha precisa ter pelo menos 8 caracteres')
+});
+
 const leadStatusSchema = z.object({
   status: z.enum(['novo', 'contatado', 'fechado'])
 });
@@ -425,6 +434,7 @@ module.exports = {
   dominioCustomizadoSchema,
   contatoEnterpriseSchema,
   superAdminLoginSchema,
+  superAdminCriarSchema,
   leadStatusSchema,
   planoPlataformaSchema
 };

@@ -1,10 +1,10 @@
 const jwt = require('jsonwebtoken');
 
 // Protege toda a área /super-admin/*. Totalmente separado do admin de empresa
-// (src/middleware/adminAuth.js): não carrega empresa_id nenhum, é uma conta única do dono da
-// plataforma (credenciais em SUPER_ADMIN_EMAIL/SUPER_ADMIN_SENHA_HASH no .env, não numa
-// tabela — só existe uma). O token exige tipo === 'super_admin', então um token de admin de
-// empresa (tipo === 'admin') nunca passa aqui, e vice-versa.
+// (src/middleware/adminAuth.js): não carrega empresa_id nenhum, são contas de dono(s) da
+// plataforma guardadas na tabela `super_admins` (ver routes/superAdmin.js). O token exige
+// tipo === 'super_admin', então um token de admin de empresa (tipo === 'admin') nunca passa
+// aqui, e vice-versa.
 function verificarTokenSuperAdmin(req, res, next) {
   if (req.originalUrl === '/super-admin/login' || req.originalUrl.startsWith('/super-admin/login?')) {
     return next();
@@ -21,6 +21,7 @@ function verificarTokenSuperAdmin(req, res, next) {
     if (payload.tipo !== 'super_admin') {
       return res.status(403).json({ error: 'Acesso negado.' });
     }
+    req.superAdmin = payload;
     next();
   } catch (e) {
     return res.status(401).json({ error: 'Token inválido ou expirado.' });

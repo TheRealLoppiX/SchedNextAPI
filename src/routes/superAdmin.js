@@ -5,35 +5,82 @@ const jwt = require('jsonwebtoken');
 const supabase = require('../config/supabase');
 const validate = require('../middleware/validate');
 const { loginLimiter } = require('../middleware/rateLimiters');
-const { superAdminLoginSchema, leadStatusSchema } = require('../schemas');
+const { superAdminLoginSchema, superAdminCriarSchema, leadStatusSchema } = require('../schemas');
 
 const router = express.Router();
 
-// Conta única do dono da plataforma, sem tabela própria — credenciais vêm do .env
-// (SUPER_ADMIN_EMAIL + SUPER_ADMIN_SENHA_HASH, um hash bcrypt gerado localmente, nunca a
-// senha em texto puro). Ver src/middleware/superAdminAuth.js pra como o token é checado.
+// Super admins (donos da plataforma) vivem na tabela `super_admins`, não mais em variável
+// de .env: isso permite ter mais de um (ex: arthur@schednext.com.br, rafael@schednext.com.br),
+// cada um só pode ser criado por quem já é super admin (ver POST /super-admin/super-admins
+// abaixo) e só com e-mail @schednext.com.br. RLS está ativado na tabela sem nenhuma policy,
+// então só o backend (service_role, que ignora RLS) consegue ler/escrever nela.
 router.post('/super-admin/login', loginLimiter, validate(superAdminLoginSchema), async (req, res) => {
   const { email, senha } = req.body;
 
-  const emailEsperado = process.env.SUPER_ADMIN_EMAIL;
-  const hashEsperado = process.env.SUPER_ADMIN_SENHA_HASH;
+  const { data: superAdmin, error } = await supabase
+    .from('super_admins')
+    .select('id, email, senha_hash, ativo')
+    .eq('email', email)
+    .maybeSingle();
 
-  if (!emailEsperado || !hashEsperado) {
-    console.error('SUPER_ADMIN_EMAIL/SUPER_ADMIN_SENHA_HASH não configurados.');
-    return res.status(503).json({ error: 'Login do admin absoluto não está configurado.' });
-  }
-
-  if (email !== emailEsperado.toLowerCase()) {
+  if (error) return res.status(500).json({ error: 'Erro ao verificar credenciais.' });
+  if (!superAdmin || !superAdmin.ativo) {
     return res.status(401).json({ error: 'E-mail ou senha incorretos.' });
   }
 
-  const senhaValida = await bcrypt.compare(senha, hashEsperado);
+  const senhaValida = await bcrypt.compare(senha, superAdmin.senha_hash);
   if (!senhaValida) {
     return res.status(401).json({ error: 'E-mail ou senha incorretos.' });
   }
 
-  const token = jwt.sign({ tipo: 'super_admin' }, process.env.JWT_SECRET, { expiresIn: '8h' });
+  const token = jwt.sign(
+    { tipo: 'super_admin', id: superAdmin.id, email: superAdmin.email },
+    process.env.JWT_SECRET,
+    { expiresIn: '8h' }
+  );
   res.json({ success: true, token });
+});
+
+// Lista os super admins existentes (sem o hash da senha) pra tela de gestão.
+router.get('/super-admin/super-admins', async (req, res) => {
+  const { data, error } = await supabase
+    .from('super_admins')
+    .select('id, email, ativo, criado_em, criado_por')
+    .order('criado_em', { ascending: true });
+
+  if (error) return res.status(500).json({ error: 'Erro ao listar super admins.' });
+  res.json(data);
+});
+
+// Só um super admin autenticado pode criar outro (o middleware verificarTokenSuperAdmin já
+// garante isso pra tudo sob /super-admin). Restrito ao domínio @schednext.com.br pelo schema.
+router.post('/super-admin/super-admins', validate(superAdminCriarSchema), async (req, res) => {
+  const { email, senha } = req.body;
+
+  const { data: existente } = await supabase.from('super_admins').select('id').eq('email', email).maybeSingle();
+  if (existente) return res.status(409).json({ error: 'Já existe um super admin com esse e-mail.' });
+
+  const senhaHash = await bcrypt.hash(senha, 12);
+  const { data, error } = await supabase
+    .from('super_admins')
+    .insert({ email, senha_hash: senhaHash, criado_por: req.superAdmin?.id || null })
+    .select('id, email, ativo, criado_em')
+    .single();
+
+  if (error) return res.status(500).json({ error: 'Erro ao criar super admin.' });
+  res.status(201).json(data);
+});
+
+// Desativa (não apaga) um super admin — mantém o histórico de quem criou quem.
+// Ninguém pode desativar a própria conta, pra nunca ficar sem nenhum super admin ativo.
+router.delete('/super-admin/super-admins/:id', async (req, res) => {
+  if (req.params.id === req.superAdmin?.id) {
+    return res.status(400).json({ error: 'Você não pode remover a sua própria conta.' });
+  }
+
+  const { error } = await supabase.from('super_admins').update({ ativo: false }).eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: 'Erro ao remover super admin.' });
+  res.json({ success: true });
 });
 
 // Leads do formulário de contato do plano Enterprise (preenchido de dentro do admin de
