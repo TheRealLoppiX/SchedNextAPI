@@ -8,8 +8,6 @@ const { iniciarUpgradeSchema } = require('../schemas');
 
 const router = express.Router();
 
-const UM_MES_MS = 30 * 24 * 60 * 60 * 1000;
-
 // Protegida pelo mesmo verificarTokenAdmin de toda a área /admin/* (ver server.js).
 router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgradeSchema), async (req, res) => {
   const empresaId = req.empresaId;
@@ -43,20 +41,10 @@ router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgr
 
   if (!empresa) return res.status(404).json({ error: 'Empresa não encontrada.' });
 
-  // Trocar de plano sempre limpa qualquer cancelamento agendado anterior. O cliente está
-  // ativamente escolhendo continuar (ou mudar), não faz sentido manter um downgrade pendente.
-  const proximaCobranca = plano.preco_mensal > 0 ? new Date(Date.now() + UM_MES_MS).toISOString() : null;
-
+  // Sem gateway configurado (ASAAS_API_KEY ausente): não há como cobrar de verdade, então não
+  // faz sentido fingir uma assinatura — recusa em vez de liberar o plano pago de graça.
   if (!estaConfigurado()) {
-    // Sem gateway configurado ainda: já deixa a empresa marcada nesse plano em modo trial,
-    // em vez de travar o upgrade esperando uma integração que não existe.
-    await supabase.from('empresas').update({
-      plano_plataforma_id: plano.id,
-      status_assinatura: plano.preco_mensal > 0 ? 'trial' : 'ativa',
-      proxima_cobranca_em: proximaCobranca,
-      cancelamento_agendado: false
-    }).eq('id', empresaId);
-    return res.json({ configurado: false, message: 'Cobrança automática ainda não está disponível. Seu plano foi atualizado em modo de teste.' });
+    return res.status(503).json({ error: 'Cobrança automática não está disponível no momento. Fale com o suporte.' });
   }
 
   // Se já existe uma assinatura ativa no gateway (troca de plano pago pra outro plano, ou pro
@@ -71,9 +59,12 @@ router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgr
   }
 
   if (plano.preco_mensal <= 0) {
-    // Downgrade pro Grátis: só cancela a cobrança recorrente, sem criar nada novo.
+    // Downgrade pro Grátis: não depende de pagamento nenhum, então aplica na hora. Limpa
+    // qualquer plano pendente de pagamento anterior — se havia uma cobrança em aberto, ela
+    // acabou de ser cancelada no gateway acima, então não deve mais valer.
     await supabase.from('empresas').update({
       plano_plataforma_id: plano.id,
+      plano_plataforma_pendente_id: null,
       status_assinatura: 'ativa',
       proxima_cobranca_em: null,
       cancelamento_agendado: false,
@@ -98,17 +89,21 @@ router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgr
       gatewayCustomerIdExistente: empresa.gateway_customer_id
     });
 
+    // IMPORTANTE: plano_plataforma_id (o plano de verdade em uso, que libera os recursos
+    // gated — ver utils/limitesPlano.js) só é trocado pelo webhook quando o Asaas confirmar o
+    // pagamento (PAYMENT_CONFIRMED/RECEIVED, ver POST /pagamentos/webhook abaixo). Até lá, a
+    // empresa continua com todos os recursos do plano ATUAL, e o plano escolhido fica só
+    // registrado como pendente — sem isso, qualquer um conseguia liberar um plano pago só
+    // clicando em "trocar", sem nunca pagar.
     await supabase.from('empresas').update({
-      plano_plataforma_id: plano.id,
+      plano_plataforma_pendente_id: plano.id,
       cpf_cnpj: documento,
       gateway_customer_id: checkout.gatewayCustomerId,
       gateway_subscription_id: checkout.gatewaySubscriptionId,
-      status_assinatura: 'trial', // vira 'ativa' quando o webhook confirmar o primeiro pagamento
-      proxima_cobranca_em: proximaCobranca,
       cancelamento_agendado: false
     }).eq('id', empresaId);
 
-    res.json(checkout);
+    res.json({ ...checkout, planoPendenteId: plano.id });
   } catch (e) {
     console.error('Erro ao iniciar checkout:', e);
     res.status(500).json({ error: 'Não foi possível iniciar a cobrança agora. Tente novamente mais tarde.' });
@@ -199,6 +194,7 @@ router.post('/admin/assinatura-plataforma/cancelar-plano', async (req, res) => {
     .from('empresas')
     .update({
       plano_plataforma_id: planoGratis.id,
+      plano_plataforma_pendente_id: null,
       status_assinatura: 'ativa',
       proxima_cobranca_em: null,
       cancelamento_agendado: false,
@@ -243,7 +239,7 @@ router.post('/pagamentos/webhook', async (req, res) => {
 
   const { data: empresa } = await supabase
     .from('empresas')
-    .select('id')
+    .select('id, plano_plataforma_pendente_id')
     .eq('gateway_customer_id', payment.customer)
     .maybeSingle();
 
@@ -251,15 +247,24 @@ router.post('/pagamentos/webhook', async (req, res) => {
 
   const atualizacao = { status_assinatura: EVENTOS_ATIVA.includes(event) ? 'ativa' : 'inadimplente' };
 
-  // No pagamento confirmado, busca a data real da próxima cobrança na assinatura (o Asaas já
-  // avançou o ciclo) em vez de recalcular localmente — evita desalinhar com o que o Asaas vai
-  // efetivamente cobrar.
-  if (EVENTOS_ATIVA.includes(event) && payment.subscription) {
-    try {
-      const assinatura = await asaas.buscarAssinatura(payment.subscription);
-      if (assinatura?.nextDueDate) atualizacao.proxima_cobranca_em = new Date(assinatura.nextDueDate).toISOString();
-    } catch (e) {
-      console.error('Erro ao buscar próxima cobrança no Asaas:', e);
+  if (EVENTOS_ATIVA.includes(event)) {
+    // É AQUI que o plano escolhido em "trocar de plano" (ou no cadastro) realmente passa a
+    // valer — só agora que o Asaas confirmou o pagamento. Ver routes/pagamentos.js
+    // POST /admin/assinatura-plataforma/iniciar-upgrade e routes/empresasPublico.js.
+    if (empresa.plano_plataforma_pendente_id) {
+      atualizacao.plano_plataforma_id = empresa.plano_plataforma_pendente_id;
+      atualizacao.plano_plataforma_pendente_id = null;
+    }
+
+    // Busca a data real da próxima cobrança na assinatura (o Asaas já avançou o ciclo) em vez
+    // de recalcular localmente — evita desalinhar com o que o Asaas vai efetivamente cobrar.
+    if (payment.subscription) {
+      try {
+        const assinatura = await asaas.buscarAssinatura(payment.subscription);
+        if (assinatura?.nextDueDate) atualizacao.proxima_cobranca_em = new Date(assinatura.nextDueDate).toISOString();
+      } catch (e) {
+        console.error('Erro ao buscar próxima cobrança no Asaas:', e);
+      }
     }
   }
 

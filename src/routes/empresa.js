@@ -21,7 +21,7 @@ router.post('/admin/empresa/contato-enterprise', validate(contatoEnterpriseSchem
 router.get('/admin/empresa/:id', async (req, res) => {
   const { data, error } = await supabase
     .from('empresas')
-    .select('id, nome, slug, logo_url, vertical, cor_principal, cor_destaque, status_assinatura, proxima_cobranca_em, cancelamento_agendado, cpf_cnpj, dominio_customizado, dominio_verificado, plano_plataforma_id, plano_plataforma:plano_plataforma_id(id, nome, preco_mensal, permite_paleta_customizada, permite_whatsapp_bot, permite_remover_marca, permite_ia, permite_multi_unidade, permite_api_publica, permite_relatorios_avancados, permite_dominio_customizado)')
+    .select('id, nome, slug, logo_url, vertical, cor_principal, cor_destaque, status_assinatura, proxima_cobranca_em, cancelamento_agendado, cpf_cnpj, dominio_customizado, dominio_verificado, plano_plataforma_id, plano_plataforma:plano_plataforma_id(id, nome, preco_mensal, permite_paleta_customizada, permite_whatsapp_bot, permite_remover_marca, permite_ia, permite_multi_unidade, permite_api_publica, permite_relatorios_avancados, permite_dominio_customizado), plano_plataforma_pendente_id, plano_plataforma_pendente:plano_plataforma_pendente_id(id, nome, preco_mensal)')
     .eq('id', req.empresaId)
     .maybeSingle();
 

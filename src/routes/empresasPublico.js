@@ -57,15 +57,26 @@ router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmp
   if (emailExistente) return res.status(400).json({ error: 'Já existe uma empresa cadastrada com esse e-mail.' });
 
   const { data: planoGratis } = await supabase.from('planos_plataforma').select('id').eq('nome', 'Grátis').maybeSingle();
-  let planoEscolhidoId = plano_plataforma_id || planoGratis?.id;
+  if (!planoGratis) return res.status(500).json({ error: 'Erro interno ao localizar o plano Grátis.' });
+  let planoEscolhidoId = plano_plataforma_id || planoGratis.id;
 
   const { data: plano } = await supabase.from('planos_plataforma').select('id, nome, preco_mensal').eq('id', planoEscolhidoId).maybeSingle();
   if (!plano) return res.status(400).json({ error: 'Plano inválido.' });
 
-  // Plano Grátis ativa na hora; planos pagos entram em trial até a cobrança real ser
-  // integrada (ver adapter de pagamento em src/services/pagamento.js). Ninguém fica
-  // bloqueado esperando uma integração que ainda não existe.
-  const statusInicial = plano.nome === 'Grátis' ? 'ativa' : 'trial';
+  // Enterprise (e qualquer plano futuro "sob consulta") não tem preço fixo — não dá pra
+  // assinar sozinho pelo cadastro, precisa passar pelo formulário de contato
+  // (POST /empresas/contato-enterprise), igual em iniciar-upgrade (routes/pagamentos.js).
+  if (plano.preco_mensal === null) {
+    return res.status(400).json({ error: 'O plano Enterprise não tem valor fixo. Preencha o formulário de contato para negociar com nosso time.' });
+  }
+
+  const ehPago = plano.preco_mensal > 0;
+  // A conta sempre nasce no Grátis, que é real e ativa na hora. Um plano pago escolhido aqui
+  // vira o "plano pendente" — só é aplicado de verdade (routes/pagamentos.js, webhook do Asaas)
+  // quando o pagamento for confirmado. Sem isso, dava pra criar conta nova e ganhar qualquer
+  // plano pago de graça, sem nunca pagar (ver handoff.md).
+  const planoAplicadoId = ehPago ? planoGratis.id : plano.id;
+  const planoPendenteId = ehPago ? plano.id : null;
   const senhaHash = await bcrypt.hash(senha, 12);
   const codigoVerificacao = Math.floor(100000 + Math.random() * 900000).toString();
 
@@ -81,9 +92,10 @@ router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmp
       slug,
       senha: senhaHash,
       vertical,
-      plano_plataforma_id: plano.id,
+      plano_plataforma_id: planoAplicadoId,
+      plano_plataforma_pendente_id: planoPendenteId,
       plano_nome: plano.nome,
-      status_assinatura: statusInicial,
+      status_assinatura: 'ativa',
       horarios_funcionamento: JSON.stringify({
         0: { aberto: false, abre: '08:00', fecha: '18:00', label: 'Domingo' },
         1: { aberto: true, abre: '08:00', fecha: '20:00', label: 'Segunda-feira' },
@@ -125,7 +137,7 @@ router.post('/empresas/confirmar-codigo', codigoLimiter, validate(confirmarCodig
   const pendente = await buscarPendenteValido({ tipo: 'empresa', email, codigo });
   if (!pendente) return res.status(400).json({ error: 'Código inválido ou expirado.' });
 
-  const { nome, slug, senha, vertical, plano_plataforma_id, plano_nome, status_assinatura, horarios_funcionamento } = pendente.dados;
+  const { nome, slug, senha, vertical, plano_plataforma_id, plano_plataforma_pendente_id, plano_nome, status_assinatura, horarios_funcionamento } = pendente.dados;
 
   // Rechecagem: o slug/e-mail pode ter sido tomado por outra empresa enquanto este
   // cadastro ficava pendente de confirmação.
@@ -137,7 +149,7 @@ router.post('/empresas/confirmar-codigo', codigoLimiter, validate(confirmarCodig
 
   const { data: empresa, error } = await supabase
     .from('empresas')
-    .insert({ nome, slug, email, senha, vertical, plano_plataforma_id, status_assinatura, horarios_funcionamento })
+    .insert({ nome, slug, email, senha, vertical, plano_plataforma_id, plano_plataforma_pendente_id, status_assinatura, horarios_funcionamento })
     .select('id, nome, slug')
     .single();
 
@@ -151,14 +163,17 @@ router.post('/empresas/confirmar-codigo', codigoLimiter, validate(confirmarCodig
   const token = jwt.sign({ empresa_id: empresa.id, tipo: 'admin' }, process.env.JWT_SECRET, { expiresIn: '8h' });
 
   res.status(201).json({
-    message: 'Conta ativada com sucesso!',
+    message: plano_plataforma_pendente_id
+      ? `Conta ativada no plano Grátis! Pra ativar o plano ${plano_nome}, finalize o pagamento na tela de Conta.`
+      : 'Conta ativada com sucesso!',
     success: true,
     token,
     admin: { id: empresa.id, empresa_id: empresa.id, nome: empresa.nome, slug: empresa.slug },
     empresa_id: empresa.id,
     slug: empresa.slug,
     status_assinatura,
-    plano_nome
+    plano_nome,
+    planoPendente: !!plano_plataforma_pendente_id
   });
 });
 
