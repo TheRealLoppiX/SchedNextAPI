@@ -3,3 +3,7 @@ node_modules/
 .env.local
 .env.*.local
 npm-debug.log*
+
+# chave SSH privada da VPS (Oracle Cloud) do Evolution API — nunca commitar
+*.pem
+*.key

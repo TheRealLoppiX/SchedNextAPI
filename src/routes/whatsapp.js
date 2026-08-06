@@ -34,7 +34,7 @@ router.post('/whatsapp/webhook', async (req, res) => {
 
     if (!empresa || !empresa.plano_plataforma?.permite_whatsapp_bot) return;
 
-    await processarMensagem({ empresaId: empresa.id, telefone, texto });
+    await processarMensagem({ empresaId: empresa.id, telefone, texto, instancia });
   } catch (err) {
     console.error('Erro ao processar mensagem do WhatsApp:', err);
   }

@@ -54,7 +54,7 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
 
   const { data: emp, error: empErr } = await supabase
     .from('empresas')
-    .select('id, nome')
+    .select('id, nome, whatsapp_phone_number_id')
     .eq('slug', empresa_slug)
     .maybeSingle();
 
@@ -121,6 +121,7 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
 
     if (usuario.telefone && (await permiteWhatsappBot(emp.id))) {
       enviarMensagem(
+        emp.whatsapp_phone_number_id,
         `55${usuario.telefone.replace(/\D/g, '')}`,
         `✅ Agendamento confirmado! ${emp.nome}, ${dataFormatada}. Valor: R$ ${valorTotal}.`
       ).catch((err) => console.error('Erro ao enviar WhatsApp de confirmação de agendamento:', err));
@@ -423,7 +424,9 @@ router.post('/admin/cancelar-agendamento', validate(cancelarAgendamentoSchema), 
   };
 
   if (agendamento.usuarios.telefone && (await permiteWhatsappBot(req.empresaId))) {
+    const { data: empresaWa } = await supabase.from('empresas').select('whatsapp_phone_number_id').eq('id', req.empresaId).maybeSingle();
     enviarMensagem(
+      empresaWa?.whatsapp_phone_number_id,
       `55${agendamento.usuarios.telefone.replace(/\D/g, '')}`,
       `Seu agendamento para ${dataHora} foi cancelado. Motivo: ${justificativa}. Você pode fazer uma nova reserva quando quiser.`
     ).catch((err) => console.error('Erro ao enviar WhatsApp de cancelamento:', err));

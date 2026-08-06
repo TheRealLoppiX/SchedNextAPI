@@ -120,14 +120,14 @@ async function horariosDisponiveis(barbeiroId, dataStr) {
   return slots;
 }
 
-async function processarMensagem({ empresaId, telefone, texto }) {
+async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   const sessao = await obterOuCriarSessao(empresaId, telefone);
   const dados = sessao.dados_temporarios || {};
   const msg = (texto || '').trim();
   const msgLower = msg.toLowerCase();
 
   const responder = async (resposta, novoEstado, novosDados) => {
-    await enviarMensagem(telefone, resposta);
+    await enviarMensagem(instancia, telefone, resposta);
     await salvarSessao(sessao, novoEstado, novosDados !== undefined ? novosDados : dados);
   };
 
@@ -191,7 +191,7 @@ async function processarMensagem({ empresaId, telefone, texto }) {
     const novosDados = { ...dados, servico_id: servicoEscolhido.id, servico_nome: servicoEscolhido.nome, servico_valor: servicoEscolhido.valor, servico_duracao: servicoEscolhido.duracao, usuario_id: usuarioExistente?.id || null };
 
     if (usuarioExistente) {
-      return criarAgendamentoEConfirmar({ empresaId, telefone, sessao, dados: novosDados, nomeCliente: usuarioExistente.nome_completo });
+      return criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados: novosDados, nomeCliente: usuarioExistente.nome_completo });
     }
 
     return responder('Não te encontrei no cadastro. Qual seu nome completo?', 'aguardando_nome', novosDados);
@@ -199,13 +199,13 @@ async function processarMensagem({ empresaId, telefone, texto }) {
 
   if (sessao.estado_atual === 'aguardando_nome') {
     if (msg.length < 2) return responder('Digite seu nome completo, por favor.', 'aguardando_nome');
-    return criarAgendamentoEConfirmar({ empresaId, telefone, sessao, dados, nomeCliente: msg });
+    return criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados, nomeCliente: msg });
   }
 
   return responder('Digite *MENU* para ver as opções.', 'inicio', {});
 }
 
-async function criarAgendamentoEConfirmar({ empresaId, telefone, sessao, dados, nomeCliente }) {
+async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados, nomeCliente }) {
   const dataHora = `${dados.data}T${dados.hora}:00`;
 
   const { error } = await supabase.from('agendamentos').insert({
@@ -221,12 +221,13 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, sessao, dados, 
 
   if (error) {
     console.error('Erro ao criar agendamento via WhatsApp:', error);
-    await enviarMensagem(telefone, 'Não consegui concluir o agendamento agora. Tente novamente em instantes.');
+    await enviarMensagem(instancia, telefone, 'Não consegui concluir o agendamento agora. Tente novamente em instantes.');
     await salvarSessao(sessao, 'inicio', {});
     return;
   }
 
   await enviarMensagem(
+    instancia,
     telefone,
     `✅ Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}\n\nDigite *MENU* para agendar outro horário.`
   );

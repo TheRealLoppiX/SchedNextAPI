@@ -127,7 +127,7 @@ router.post('/admin/clientes/followup', validate(clienteFollowupSchema), async (
 
     if (!cliente) return res.status(404).json({ error: 'Cliente nao encontrado.' });
 
-    const { data: empresa } = await supabase.from('empresas').select('nome').eq('id', empresa_id).maybeSingle();
+    const { data: empresa } = await supabase.from('empresas').select('nome, whatsapp_phone_number_id').eq('id', empresa_id).maybeSingle();
     const nomeEmpresa = empresa?.nome || 'Seu estabelecimento';
 
     // WhatsApp só é oferecido de verdade se o plano da empresa permitir (mesmo gate usado no
@@ -138,7 +138,7 @@ router.post('/admin/clientes/followup', validate(clienteFollowupSchema), async (
       whatsapp: whatsappDisponivel
     };
 
-    const resultado = await enviarMensagemCliente({ tipo, cliente, nomeEmpresa, canais });
+    const resultado = await enviarMensagemCliente({ tipo, cliente, nomeEmpresa, canais, instancia: empresa?.whatsapp_phone_number_id });
     if (!resultado.email && !resultado.whatsapp) {
       return res.status(400).json({ error: 'Não foi possível enviar: cliente sem e-mail/telefone válido para o canal escolhido.' });
     }

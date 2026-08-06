@@ -1,0 +1,61 @@
+services:
+  evolution-api:
+    image: evoapicloud/evolution-api:latest
+    container_name: evolution-api
+    restart: always
+    ports:
+      - "8080:8080"
+      - "80:8080"
+      # Porta 80 exposta também pra bater com o destino padrão que o Cloudflare usa
+      # em requisições HTTPS (443) proxeadas, já que o plano grátis não redireciona
+      # pra portas customizadas na origem sem uma Origin Rule/Configuration Rule.
+    environment:
+      - SERVER_TYPE=http
+      - SERVER_PORT=8080
+      - LANGUAGE=pt-BR
+      - AUTHENTICATION_API_KEY=${AUTHENTICATION_API_KEY}
+      - AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=true
+      - DATABASE_ENABLED=true
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evolution:${POSTGRES_PASSWORD}@postgres:5432/evolution
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=true
+      - DATABASE_SAVE_MESSAGE_UPDATE=true
+      - DATABASE_SAVE_DATA_CONTACTS=true
+      - DATABASE_SAVE_DATA_CHATS=true
+      - CACHE_REDIS_ENABLED=false
+      - CACHE_LOCAL_ENABLED=true
+    volumes:
+      - evolution_instances:/evolution/instances
+    depends_on:
+      - postgres
+    networks:
+      - evolution-net
+    # Limite de memória pra não deixar o Postgres sem RAM num host de 1GB total
+    # (shape VM.Standard.E2.1.Micro do Oracle Always Free).
+    mem_limit: 600m
+
+  postgres:
+    image: postgres:15
+    container_name: evolution-postgres
+    restart: always
+    command: postgres -c shared_buffers=64MB -c max_connections=20
+    environment:
+      - POSTGRES_USER=evolution
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=evolution
+    volumes:
+      - evolution_postgres_data:/var/lib/postgresql/data
+    networks:
+      - evolution-net
+    mem_limit: 250m
+    # Sem "ports:" de propósito — só acessível dentro da rede interna do compose,
+    # nunca exposto na internet.
+
+networks:
+  evolution-net:
+    driver: bridge
+
+volumes:
+  evolution_instances:
+  evolution_postgres_data:

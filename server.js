@@ -71,6 +71,7 @@ app.use(require('./src/routes/empresa'));
 app.use(require('./src/routes/empresasPublico'));
 app.use(require('./src/routes/pagamentos'));
 app.use(require('./src/routes/whatsapp'));
+app.use(require('./src/routes/whatsappInstancia'));
 app.use(require('./src/routes/unidades'));
 app.use(require('./src/routes/apiKeys'));
 app.use(require('./src/routes/apiPublica'));

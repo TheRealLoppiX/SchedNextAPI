@@ -36,7 +36,7 @@ function construirMensagemAniversario({ primeiroNome, nomeEmpresa }) {
 // `canais`: { email: bool, whatsapp: bool }. Cada canal só é usado se o dado necessário existir
 // (email/telefone do cliente) — pedir um canal sem o dado correspondente é simplesmente ignorado,
 // não vira erro (evita travar o disparo de um cliente só porque ele não tem telefone cadastrado).
-async function enviarMensagemCliente({ tipo, cliente, nomeEmpresa, canais }) {
+async function enviarMensagemCliente({ tipo, cliente, nomeEmpresa, canais, instancia }) {
   const primeiroNome = (cliente.nome_completo || '').split(' ')[0] || 'Cliente';
   const construtor = tipo === 'aniversario' ? construirMensagemAniversario : construirMensagemSaudade;
   const { assunto, textoWhats, html } = construtor({ primeiroNome, nomeEmpresa });
@@ -50,7 +50,7 @@ async function enviarMensagemCliente({ tipo, cliente, nomeEmpresa, canais }) {
 
   if (canais?.whatsapp && cliente.telefone) {
     // usuarios.telefone é salvo sem DDI (ver utils/telefone.js), Evolution API espera com 55.
-    await enviarMensagem(`55${cliente.telefone.replace(/\D/g, '')}`, textoWhats);
+    await enviarMensagem(instancia, `55${cliente.telefone.replace(/\D/g, '')}`, textoWhats);
     resultado.whatsapp = true;
   }
 

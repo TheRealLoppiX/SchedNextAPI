@@ -34,7 +34,7 @@ async function processarAniversariantes() {
 
   const { data: clientes, error } = await supabase
     .from('usuarios')
-    .select('id, nome_completo, email, telefone, data_nascimento, ultimo_aniversario_enviado_ano, empresas!inner(nome, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot))')
+    .select('id, nome_completo, email, telefone, data_nascimento, ultimo_aniversario_enviado_ano, empresas!inner(nome, whatsapp_phone_number_id, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot))')
     .eq('tipo', 'cliente')
     .eq('ativo', true)
     .not('data_nascimento', 'is', null);
@@ -50,7 +50,8 @@ async function processarAniversariantes() {
         tipo: 'aniversario',
         cliente,
         nomeEmpresa: cliente.empresas?.nome || 'Seu estabelecimento',
-        canais: { email: true, whatsapp: !!cliente.empresas?.plano_plataforma?.permite_whatsapp_bot }
+        canais: { email: true, whatsapp: !!cliente.empresas?.plano_plataforma?.permite_whatsapp_bot },
+        instancia: cliente.empresas?.whatsapp_phone_number_id
       });
       await supabase.from('usuarios').update({ ultimo_aniversario_enviado_ano: anoAtual }).eq('id', cliente.id);
       console.log(`Aniversário enviado pro cliente ${cliente.id}.`);
@@ -93,7 +94,7 @@ async function processarClientesInativos() {
 
   const { data: clientes, error: errClientes } = await supabase
     .from('usuarios')
-    .select('id, nome_completo, email, telefone, ultima_recuperacao_enviada_em, empresas!inner(nome, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot))')
+    .select('id, nome_completo, email, telefone, ultima_recuperacao_enviada_em, empresas!inner(nome, whatsapp_phone_number_id, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot))')
     .in('id', candidatosIds)
     .eq('tipo', 'cliente')
     .eq('ativo', true);
@@ -108,7 +109,8 @@ async function processarClientesInativos() {
         tipo: 'saudade',
         cliente,
         nomeEmpresa: cliente.empresas?.nome || 'Seu estabelecimento',
-        canais: { email: true, whatsapp: !!cliente.empresas?.plano_plataforma?.permite_whatsapp_bot }
+        canais: { email: true, whatsapp: !!cliente.empresas?.plano_plataforma?.permite_whatsapp_bot },
+        instancia: cliente.empresas?.whatsapp_phone_number_id
       });
       await supabase.from('usuarios').update({ ultima_recuperacao_enviada_em: new Date().toISOString() }).eq('id', cliente.id);
       console.log(`Recuperação de cliente inativo enviada pro cliente ${cliente.id}.`);

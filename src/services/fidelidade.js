@@ -60,7 +60,7 @@ async function verificarEDispararPremioFidelidade(usuarioId, empresaId) {
       .maybeSingle();
     if (!usuario) return;
 
-    const { data: empresa } = await supabase.from('empresas').select('nome').eq('id', empresaId).maybeSingle();
+    const { data: empresa } = await supabase.from('empresas').select('nome, whatsapp_phone_number_id').eq('id', empresaId).maybeSingle();
     const nomeEmpresa = empresa?.nome || 'Seu estabelecimento';
     const primeiroNome = (usuario.nome_completo || '').split(' ')[0] || 'Cliente';
     const textoPremio = campanha.premio_descritivo || 'seu prêmio';
@@ -81,6 +81,7 @@ async function verificarEDispararPremioFidelidade(usuarioId, empresaId) {
 
     if (usuario.telefone && (await permiteWhatsappBot(empresaId))) {
       await enviarMensagem(
+        empresa?.whatsapp_phone_number_id,
         `55${usuario.telefone.replace(/\D/g, '')}`,
         `Parabéns, ${primeiroNome}! Você completou a campanha "${campanha.nome}" da ${nomeEmpresa} e ganhou ${textoPremio}. Aproveite no seu próximo atendimento!`
       );

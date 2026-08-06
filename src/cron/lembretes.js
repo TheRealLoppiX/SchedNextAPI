@@ -14,7 +14,7 @@ function iniciarLembretes() {
 
     const { data: agendamentos, error } = await supabase
       .from('agendamentos')
-      .select('id, data_hora, usuario_id, usuarios!inner(email, nome_completo, telefone), barbeiros!inner(nome), empresas!inner(plano_plataforma:plano_plataforma_id(permite_whatsapp_bot))')
+      .select('id, data_hora, usuario_id, usuarios!inner(email, nome_completo, telefone), barbeiros!inner(nome), empresas!inner(whatsapp_phone_number_id, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot))')
       .gte('data_hora', paraConvencaoDoBanco(agora).toISOString())
       .lte('data_hora', paraConvencaoDoBanco(limite).toISOString())
       .neq('status', 'cancelado')
@@ -52,7 +52,7 @@ function iniciarLembretes() {
           // bot (services/whatsapp/bot.js), onde o telefone já vem com DDI direto do WhatsApp.
           // Sem prefixar o 55 aqui, o Evolution API recebia um número de 10-11 dígitos e a
           // mensagem nunca era entregue.
-          await enviarMensagem(`55${ag.usuarios.telefone.replace(/\D/g, '')}`, msg);
+          await enviarMensagem(ag.empresas.whatsapp_phone_number_id, `55${ag.usuarios.telefone.replace(/\D/g, '')}`, msg);
         }
 
         // ATUALIZAR STATUS PARA NÃO REPETIR
