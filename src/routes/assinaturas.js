@@ -11,7 +11,7 @@ router.get('/admin/assinaturas/:empresaId', async (req, res) => {
 
   const { data: planos, error } = await supabase
     .from('planos_assinatura')
-    .select('id, nome, preco, descricao, ativo, criado_em, plano_servicos(servicos(id, nome))')
+    .select('id, nome, preco, descricao, ativo, criado_em, plano_servicos(servicos(id, nome), limite_mensal)')
     .eq('empresa_id', empresaId)
     .order('criado_em', { ascending: false });
 
@@ -36,9 +36,10 @@ router.get('/admin/assinaturas/:empresaId', async (req, res) => {
   }
 
   const formatado = planos.map((p) => {
-    // Dedupe por id (plano_servicos não tem UNIQUE(plano_id, servico_id), igual no MySQL original)
     const servicosUnicos = [...new Map(
-      (p.plano_servicos || []).map((ps) => ps.servicos).filter(Boolean).map((s) => [s.id, s])
+      (p.plano_servicos || [])
+        .filter((ps) => ps.servicos)
+        .map((ps) => [ps.servicos.id, { ...ps.servicos, limite_mensal: ps.limite_mensal }])
     ).values()].sort((a, b) => a.nome.localeCompare(b.nome));
 
     return {
@@ -50,6 +51,7 @@ router.get('/admin/assinaturas/:empresaId', async (req, res) => {
       criado_em: p.criado_em,
       servicos_nomes: servicosUnicos.map((s) => s.nome).join(', ') || null,
       servicos_ids: servicosUnicos.map((s) => s.id),
+      servicos: servicosUnicos.map((s) => ({ id: s.id, nome: s.nome, limite_mensal: s.limite_mensal })),
       total_assinantes: contagemPorPlano[p.id] || 0
     };
   });
@@ -72,7 +74,7 @@ router.get('/assinaturas/plano/:id', async (req, res) => {
 
 // Criar plano
 router.post('/admin/assinaturas', validate(assinaturaPlanoSchema), async (req, res) => {
-  const { nome, preco, descricao, servicos_ids } = req.body;
+  const { nome, preco, descricao, servicos } = req.body;
   const empresa_id = req.empresaId;
 
   try {
@@ -84,8 +86,8 @@ router.post('/admin/assinaturas', validate(assinaturaPlanoSchema), async (req, r
 
     if (error) throw error;
 
-    if (servicos_ids && servicos_ids.length > 0) {
-      const rows = servicos_ids.map((sid) => ({ plano_id: plano.id, servico_id: sid }));
+    if (servicos && servicos.length > 0) {
+      const rows = servicos.map((s) => ({ plano_id: plano.id, servico_id: s.id, limite_mensal: s.limite_mensal ?? null }));
       const { error: errServicos } = await supabase.from('plano_servicos').insert(rows);
       if (errServicos) throw errServicos;
     }
@@ -100,7 +102,7 @@ router.post('/admin/assinaturas', validate(assinaturaPlanoSchema), async (req, r
 // Atualizar plano
 router.put('/admin/assinaturas/:id', validate(assinaturaPlanoSchema), async (req, res) => {
   const { id } = req.params;
-  const { nome, preco, descricao, servicos_ids } = req.body;
+  const { nome, preco, descricao, servicos } = req.body;
 
   try {
     const { data: planoAtual } = await supabase.from('planos_assinatura').select('empresa_id').eq('id', id).maybeSingle();
@@ -115,8 +117,8 @@ router.put('/admin/assinaturas/:id', validate(assinaturaPlanoSchema), async (req
     const { error: errDel } = await supabase.from('plano_servicos').delete().eq('plano_id', id);
     if (errDel) throw errDel;
 
-    if (servicos_ids && servicos_ids.length > 0) {
-      const rows = servicos_ids.map((sid) => ({ plano_id: Number(id), servico_id: sid }));
+    if (servicos && servicos.length > 0) {
+      const rows = servicos.map((s) => ({ plano_id: Number(id), servico_id: s.id, limite_mensal: s.limite_mensal ?? null }));
       const { error: errIns } = await supabase.from('plano_servicos').insert(rows);
       if (errIns) throw errIns;
     }
@@ -155,7 +157,7 @@ router.put('/admin/clientes/:id/plano', validate(clientePlanoSchema), async (req
   const { plano_id } = req.body;
   const empresa_id = req.empresaId;
 
-  const { data: cliente } = await supabase.from('usuarios').select('empresa_id').eq('id', req.params.id).maybeSingle();
+  const { data: cliente } = await supabase.from('usuarios').select('empresa_id, assinante, assinante_desde').eq('id', req.params.id).maybeSingle();
   if (!cliente || cliente.empresa_id !== empresa_id) return res.status(404).json({ error: 'Cliente não encontrado.' });
 
   if (plano_id) {
@@ -163,7 +165,12 @@ router.put('/admin/clientes/:id/plano', validate(clientePlanoSchema), async (req
     if (!plano || plano.empresa_id !== empresa_id) return res.status(404).json({ error: 'Plano não encontrado.' });
   }
 
-  const update = plano_id ? { plano_id, assinante: true } : { plano_id: null, assinante: false };
+  // assinante_desde ancora o ciclo rolante de uso mensal (ver utils/limitesAssinatura.js).
+  // Só seta na primeira ativação: trocar de plano com o cliente já assinante não deve
+  // resetar o ciclo/consumo em andamento.
+  const update = plano_id
+    ? { plano_id, assinante: true, ...((!cliente.assinante || !cliente.assinante_desde) && { assinante_desde: new Date().toISOString().split('T')[0] }) }
+    : { plano_id: null, assinante: false };
 
   const { error } = await supabase.from('usuarios').update(update).eq('id', req.params.id);
   if (error) return res.status(500).json({ error: error.message });

@@ -21,6 +21,11 @@ const {
   permiteWhatsappBot
 } = require('../utils/limitesPlano');
 const { calcularValorComDescontoAssinante } = require('../utils/valorAssinante');
+const {
+  calcularInicioCiclo,
+  obterUsoServicos,
+  calcularValorComLimiteAssinante
+} = require('../utils/limitesAssinatura');
 const { verificarEDispararPremioFidelidade } = require('../services/fidelidade');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 
@@ -453,12 +458,17 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
     // 1. Busca o valor base e a empresa já salvos no agendamento
     const { data: agAtual, error: agErr } = await supabase
       .from('agendamentos')
-      .select('valor_total, empresa_id, usuario_id')
+      .select('valor_total, empresa_id, usuario_id, status')
       .eq('id', agendamento_id)
       .maybeSingle();
     if (agErr) throw agErr;
     if (!agAtual || agAtual.empresa_id !== req.empresaId) {
       return res.status(404).json({ error: 'Agendamento não encontrado.' });
+    }
+    // Sem essa checagem, reenviar o checkout (duplo clique, retry de rede) descontaria a cota
+    // de assinatura do cliente duas vezes pro mesmo atendimento.
+    if (agAtual.status === 'concluido') {
+      return res.status(409).json({ error: 'Este atendimento já foi finalizado.' });
     }
 
     // Recalcula o valor base a partir dos serviços de fato vinculados ao agendamento e do
@@ -466,17 +476,28 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
     // na criação (que já podia ter sido calculado sem considerar desconto de assinatura, ou
     // ficar desatualizado se o cliente virou assinante — ou deixou de ser — depois de agendar).
     // Ver bug documentado: estava cobrando o valor cheio de serviços já inclusos no plano.
+    //
+    // calcularValorComLimiteAssinante (em vez de calcularValorComDescontoAssinante) também
+    // respeita o limite mensal por serviço do plano e debita a cota do ciclo atual do cliente
+    // (registrarConsumo: true) — este é o único ponto que efetivamente fecha a conta, então é o
+    // único lugar que deve consumir cota de verdade.
     const { data: servicosVinculados } = await supabase
       .from('agendamento_servicos')
       .select('servico_id, servicos(id, valor)')
       .eq('agendamento_id', agendamento_id);
 
     let valorBase;
+    let servicosCobertos = [];
+    let servicosCobrados = [];
     if (servicosVinculados && servicosVinculados.length > 0) {
       const servicosParaCalculo = servicosVinculados
         .filter((v) => v.servicos)
         .map((v) => ({ id: v.servico_id, valor: v.servicos.valor }));
-      valorBase = await calcularValorComDescontoAssinante(agAtual.usuario_id, servicosParaCalculo);
+      ({ valorBase, servicosCobertos, servicosCobrados } = await calcularValorComLimiteAssinante(
+        agAtual.usuario_id,
+        servicosParaCalculo,
+        { registrarConsumo: true }
+      ));
     } else {
       // Agendamentos sem serviço vinculado (ex: encaixe legado que só grava valor_total direto)
       // caem no valor gravado, não tem como recalcular sem saber quais serviços foram feitos.
@@ -560,7 +581,13 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
       if (vincError) throw vincError;
     }
 
-    res.json({ success: true, message: 'Atendimento finalizado!', valor_final: valorFinal });
+    res.json({
+      success: true,
+      message: 'Atendimento finalizado!',
+      valor_final: valorFinal,
+      servicos_cobertos: servicosCobertos,
+      servicos_cobrados: servicosCobrados
+    });
 
     // Disparado depois da resposta: checagem de fidelidade não deve atrasar nem quebrar o
     // fechamento de caixa se o e-mail/WhatsApp falhar por qualquer motivo.
@@ -683,17 +710,45 @@ router.post('/admin/agendar-encaixe', validate(agendarEncaixeSchema), async (req
   }
 });
 
+// Busca os limites do plano do usuário + quanto já foi usado no ciclo atual. `restantes` vem
+// com null pra serviço ilimitado, ou o saldo (pode ser 0 ou negativo se já estourou).
+async function obterServicosPlanoComRestante(usuario) {
+  const { data: psRows } = await supabase
+    .from('plano_servicos')
+    .select('servico_id, limite_mensal')
+    .eq('plano_id', usuario.plano_id);
+
+  const servicosPlano = [...new Map((psRows || []).map((r) => [r.servico_id, r])).values()];
+  const servicosPlanoIds = servicosPlano.map((r) => r.servico_id);
+
+  let restantes = {};
+  if (usuario.assinante_desde) {
+    const cicloRef = calcularInicioCiclo(usuario.assinante_desde);
+    const idsLimitados = servicosPlano.filter((r) => r.limite_mensal != null).map((r) => r.servico_id);
+    const uso = await obterUsoServicos(usuario.id, idsLimitados, cicloRef);
+    for (const r of servicosPlano) {
+      restantes[r.servico_id] = r.limite_mensal == null ? null : r.limite_mensal - (uso[r.servico_id] || 0);
+    }
+  } else {
+    // Assinante sem data de início (registro antigo) é tratado como sem limite até o próximo
+    // vínculo de plano corrigir isso (ver PUT /admin/clientes/:id/plano).
+    for (const r of servicosPlano) restantes[r.servico_id] = null;
+  }
+
+  return { servicosPlanoIds, restantes };
+}
+
 // Retorna usuario_id, servicos do agendamento e info de assinatura (queries separadas para evitar produto cartesiano)
 router.get('/admin/agendamento-usuario/:id', async (req, res) => {
   try {
     const { data: ag } = await supabase
       .from('agendamentos')
-      .select('usuario_id, valor_total, empresa_id, usuarios(assinante, plano_id)')
+      .select('usuario_id, valor_total, empresa_id, usuarios(id, assinante, plano_id, assinante_desde)')
       .eq('id', req.params.id)
       .maybeSingle();
 
     if (!ag || ag.empresa_id !== req.empresaId) {
-      return res.json({ usuario_id: null, assinante: false, servicos_ids: [], servicos_agendados_ids: [] });
+      return res.json({ usuario_id: null, assinante: false, servicos_ids: [], servicos_agendados_ids: [], restantes: {} });
     }
 
     const { data: asvRows } = await supabase
@@ -709,27 +764,24 @@ router.get('/admin/agendamento-usuario/:id', async (req, res) => {
         usuario_id: ag.usuario_id,
         assinante: false,
         servicos_ids: [],
-        servicos_agendados_ids: servicosAgendadosIds
+        servicos_agendados_ids: servicosAgendadosIds,
+        restantes: {}
       });
     }
 
-    const { data: psRows } = await supabase
-      .from('plano_servicos')
-      .select('servico_id')
-      .eq('plano_id', usuario.plano_id);
-
-    const servicosPlanoIds = [...new Set((psRows || []).map((r) => r.servico_id))];
+    const { servicosPlanoIds, restantes } = await obterServicosPlanoComRestante(usuario);
 
     res.json({
       usuario_id: ag.usuario_id,
       assinante: true,
       plano_id: usuario.plano_id,
       servicos_ids: servicosPlanoIds,
-      servicos_agendados_ids: servicosAgendadosIds
+      servicos_agendados_ids: servicosAgendadosIds,
+      restantes
     });
   } catch (err) {
     console.error('Erro agendamento-usuario:', err);
-    res.json({ usuario_id: null, assinante: false, servicos_ids: [], servicos_agendados_ids: [] });
+    res.json({ usuario_id: null, assinante: false, servicos_ids: [], servicos_agendados_ids: [], restantes: {} });
   }
 });
 

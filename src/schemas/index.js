@@ -290,7 +290,10 @@ const assinaturaPlanoSchema = z.object({
   nome: z.string().trim().min(1, 'Nome do plano é obrigatório').max(150),
   preco: z.coerce.number().min(0),
   descricao: textoOpcionalNullable,
-  servicos_ids: z.array(idLike).optional()
+  servicos: z.array(z.object({
+    id: idLike,
+    limite_mensal: z.coerce.number().int().positive().optional().nullable()
+  })).optional()
 });
 
 const clientePlanoSchema = z.object({

@@ -3,6 +3,7 @@ const supabase = require('../config/supabase');
 const verificarTokenCliente = require('../middleware/clienteAuth');
 const validate = require('../middleware/validate');
 const { perfilAtualizarSchema, avaliarSchema } = require('../schemas');
+const { calcularInicioCiclo, calcularFimCiclo, obterUsoServicos, obterAgendamentosPendentesPorServico } = require('../utils/limitesAssinatura');
 const { paraInstanteReal } = require('../utils/horarioBrasilia');
 
 const router = express.Router();
@@ -220,25 +221,45 @@ router.get('/usuario/:id/assinante', verificarTokenCliente, async (req, res) => 
 
   const { data: usuario, error } = await supabase
     .from('usuarios')
-    .select('assinante, plano_id')
+    .select('assinante, plano_id, assinante_desde')
     .eq('id', req.params.id)
     .maybeSingle();
 
-  if (error || !usuario) return res.json({ assinante: false, servicos_ids: [] });
+  if (error || !usuario) return res.json({ assinante: false, servicos_ids: [], restantes: {}, pendentes: {} });
 
   let servicosIds = [];
+  let restantes = {};
+  let pendentes = {};
   if (usuario.plano_id) {
     const { data: planoServicos } = await supabase
       .from('plano_servicos')
-      .select('servico_id')
+      .select('servico_id, limite_mensal')
       .eq('plano_id', usuario.plano_id);
-    servicosIds = (planoServicos || []).map((ps) => ps.servico_id);
+    const servicosPlano = [...new Map((planoServicos || []).map((r) => [r.servico_id, r])).values()];
+    servicosIds = servicosPlano.map((r) => r.servico_id);
+
+    if (usuario.assinante_desde) {
+      const cicloRef = calcularInicioCiclo(usuario.assinante_desde);
+      const idsLimitados = servicosPlano.filter((r) => r.limite_mensal != null).map((r) => r.servico_id);
+      const uso = await obterUsoServicos(req.params.id, idsLimitados, cicloRef);
+      if (idsLimitados.length > 0) {
+        const cicloFim = calcularFimCiclo(cicloRef, usuario.assinante_desde);
+        pendentes = await obterAgendamentosPendentesPorServico(req.params.id, idsLimitados, cicloRef, cicloFim);
+      }
+      for (const r of servicosPlano) {
+        restantes[r.servico_id] = r.limite_mensal == null ? null : r.limite_mensal - (uso[r.servico_id] || 0);
+      }
+    } else {
+      for (const r of servicosPlano) restantes[r.servico_id] = null;
+    }
   }
 
   res.json({
     assinante: !!usuario.assinante,
     plano_id: usuario.plano_id,
-    servicos_ids: servicosIds
+    servicos_ids: servicosIds,
+    pendentes,
+    restantes
   });
 });
 
