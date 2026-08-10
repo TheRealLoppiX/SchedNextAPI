@@ -88,20 +88,27 @@ async function obterUsoServicos(usuarioId, servicoIds, cicloRef) {
   return Object.fromEntries((data || []).map((r) => [r.servico_id, r.usados]));
 }
 
-async function registrarUsoServico(usuarioId, servicoId, cicloRef) {
-  const { data: existente } = await supabase
-    .from('assinatura_uso_mensal')
-    .select('id, usados')
-    .eq('usuario_id', usuarioId)
-    .eq('servico_id', servicoId)
-    .eq('ciclo_ref', cicloRef)
-    .maybeSingle();
+// Checa e debita a cota atomicamente via RPC (ver sql/2026_limite_assinatura_corrida.sql).
+// Precisa ser atômico porque ler "usados" e só depois escrever de volta (em passos separados)
+// deixa uma janela: dois fechamentos de caixa do mesmo cliente/serviço/ciclo em sequência
+// rápida podiam ler o mesmo valor antes de qualquer um escrever, e os dois liberavam como
+// "dentro do limite" ao mesmo tempo — cliente com limite de 1 corte conseguindo 2 de graça.
+// Retorna true se estava dentro do limite (e já debitou), false se estourou.
+async function registrarUsoServico(usuarioId, servicoId, cicloRef, limite) {
+  const { data, error } = await supabase.rpc('consumir_cota_assinatura', {
+    p_usuario_id: usuarioId,
+    p_servico_id: servicoId,
+    p_ciclo_ref: cicloRef,
+    p_limite: limite
+  });
 
-  if (existente) {
-    await supabase.from('assinatura_uso_mensal').update({ usados: existente.usados + 1, atualizado_em: new Date().toISOString() }).eq('id', existente.id);
-  } else {
-    await supabase.from('assinatura_uso_mensal').insert({ usuario_id: usuarioId, servico_id: servicoId, ciclo_ref: cicloRef, usados: 1 });
+  if (error) {
+    console.error('Erro registrarUsoServico:', error);
+    // Sem conseguir confirmar a cota, cobra por segurança em vez de liberar de graça.
+    return false;
   }
+
+  return !!data;
 }
 
 // Substitui calcularValorComDescontoAssinante() (utils/valorAssinante.js) no checkout: além de
@@ -147,14 +154,24 @@ async function calcularValorComLimiteAssinante(usuarioId, servicos, { registrarC
     if (!idsNoPlano.includes(s.id)) { servicosCobrados.push(s.id); continue; }
 
     const limite = limitePorServico[s.id];
-    const jaUsados = (uso[s.id] || 0) + (usadosNesteCheckout[s.id] || 0);
-    const dentroDoLimite = limite == null || jaUsados < limite;
+    let dentroDoLimite;
+
+    if (limite == null) {
+      dentroDoLimite = true;
+    } else if (registrarConsumo && cicloRef) {
+      // Fechamento de caixa de verdade: decide e debita atomicamente no banco, não a partir da
+      // leitura feita acima (que pode estar desatualizada por corrida com outro checkout).
+      dentroDoLimite = await registrarUsoServico(usuarioId, s.id, cicloRef, limite);
+    } else {
+      // Só estimativa (agendar, preview) — não debita nada, então a leitura já feita basta.
+      const jaUsados = (uso[s.id] || 0) + (usadosNesteCheckout[s.id] || 0);
+      dentroDoLimite = jaUsados < limite;
+    }
 
     if (dentroDoLimite) {
       valorBase -= Number(s.valor || 0);
       servicosCobertos.push(s.id);
       usadosNesteCheckout[s.id] = (usadosNesteCheckout[s.id] || 0) + 1;
-      if (registrarConsumo && cicloRef) await registrarUsoServico(usuarioId, s.id, cicloRef);
     } else {
       servicosCobrados.push(s.id);
     }

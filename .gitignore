@@ -7,3 +7,6 @@ npm-debug.log*
 # chave SSH privada da VPS (Oracle Cloud) do Evolution API — nunca commitar
 *.pem
 *.key
+
+# dumps locais do banco — contêm dados de clientes
+db.sql
