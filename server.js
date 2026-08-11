@@ -54,6 +54,30 @@ app.use(cors({
 // Protege toda a área /admin/*. O único endpoint sob /admin que fica de fora é o próprio
 // /admin/login (é ele quem emite o token). Ver src/middleware/adminAuth.js.
 app.use('/admin', verificarTokenAdmin);
+
+// Segunda camada, só pra admin de UMA unidade (req.unidadeId setado, ver adminAuth.js): por
+// padrão, bloqueia qualquer rota /admin/* que não esteja explicitamente liberada aqui. Assim,
+// uma rota nova de admin criada no futuro fica automaticamente fora do alcance de um admin de
+// unidade, a menos que alguém adicione ela nesta lista de propósito — comportamento seguro por
+// padrão em vez de precisar lembrar de checar req.unidadeId em cada rota nova.
+const ROTAS_PERMITIDAS_ADMIN_UNIDADE = [
+  '/admin/unidade/',
+  '/admin/encaixe',
+  '/admin/agendar-encaixe',
+  '/admin/finalizar-encaixe-completo',
+  '/admin/confirmar-agendamento',
+  '/admin/cancelar-agendamento',
+  '/admin/finalizar-servico-checkout',
+  '/admin/agendamento-usuario/',
+  '/admin/buscar-clientes'
+];
+app.use('/admin', (req, res, next) => {
+  if (req.unidadeId && !ROTAS_PERMITIDAS_ADMIN_UNIDADE.some((p) => req.originalUrl.startsWith(p))) {
+    return res.status(403).json({ error: 'Acesso restrito ao painel da sua unidade.' });
+  }
+  next();
+});
+
 // Conta separada do dono da plataforma (ver src/middleware/superAdminAuth.js) — nunca aceita
 // token de admin de empresa, e vice-versa.
 app.use('/super-admin', verificarTokenSuperAdmin);

@@ -127,6 +127,7 @@ router.post('/admin/mercadopago/pix/:agendamentoId', validate(mercadoPagoPixSche
     const resultado = await calcularValorFinalCheckout({
       agendamentoId: req.params.agendamentoId,
       empresaId: empresa_id,
+      unidadeId: req.unidadeId,
       produtosVendidos: produtos_vendidos,
       servicosAdicionais: servicos_adicionais
     });

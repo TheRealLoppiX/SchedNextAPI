@@ -22,6 +22,9 @@ function verificarTokenAdmin(req, res, next) {
       return res.status(403).json({ error: 'Acesso negado.' });
     }
     req.empresaId = payload.empresa_id;
+    // null = admin "dono" da empresa (acesso total); setado = admin de uma unidade só, restrito
+    // pelo gate de allowlist logo depois deste middleware (ver server.js).
+    req.unidadeId = payload.unidade_id || null;
     next();
   } catch (e) {
     return res.status(401).json({ error: 'Token inválido ou expirado.' });

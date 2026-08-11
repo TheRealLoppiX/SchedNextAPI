@@ -163,7 +163,8 @@ const barbeiroEditarSchema = z.object({
   id: idLike,
   nome: z.string().trim().min(1, 'Nome é obrigatório').max(150),
   foto_url: z.string().trim().optional().nullable(),
-  percentual_comissao: z.coerce.number().min(0, 'Comissão não pode ser negativa').max(100, 'Comissão não pode passar de 100%').nullable().optional()
+  percentual_comissao: z.coerce.number().min(0, 'Comissão não pode ser negativa').max(100, 'Comissão não pode passar de 100%').nullable().optional(),
+  unidade_id: idLikeNullable
 });
 
 const barbeiroStatusSchema = z.object({
@@ -197,6 +198,12 @@ const unidadeAtualizarSchema = z.object({
   endereco: textoOpcionalNullable,
   horarios_funcionamento: z.record(z.string(), z.any()).optional().nullable(),
   ativo: z.boolean().optional()
+});
+
+const unidadeAdminCriarSchema = z.object({
+  nome: z.string().trim().min(1, 'Nome é obrigatório').max(150),
+  email: z.string().trim().toLowerCase().email('E-mail inválido'),
+  senha: z.string().min(6, 'Senha deve ter ao menos 6 caracteres').max(100)
 });
 
 // --- clientes.js ---
@@ -422,6 +429,7 @@ module.exports = {
   barbeiroServicosSchema,
   unidadeCriarSchema,
   unidadeAtualizarSchema,
+  unidadeAdminCriarSchema,
   clienteAtualizarSchema,
   clienteAssinanteSchema,
   clienteFollowupSchema,

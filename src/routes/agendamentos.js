@@ -217,8 +217,11 @@ router.post('/admin/encaixe', validate(encaixeSchema), async (req, res) => {
   const { barbeiro_id, cliente_nome, data_hora, servicos_ids } = req.body;
   const empresa_id = req.empresaId;
 
-  const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', barbeiro_id).maybeSingle();
+  const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id, unidade_id').eq('id', barbeiro_id).maybeSingle();
   if (!barbeiro || barbeiro.empresa_id !== empresa_id) return res.status(404).json({ error: 'Profissional não encontrado.' });
+  // Admin de uma unidade só (req.unidadeId, ver middleware/adminAuth.js) não pode fazer encaixe
+  // pra profissional de outra unidade.
+  if (req.unidadeId && barbeiro.unidade_id !== req.unidadeId) return res.status(404).json({ error: 'Profissional não encontrado.' });
 
   const agora = new Date();
   const dataTentativa = new Date(data_hora);
@@ -253,7 +256,8 @@ router.post('/admin/encaixe', validate(encaixeSchema), async (req, res) => {
       duracao_total: duracaoTotal,
       valor_total: valorTotal,
       status: 'confirmado',
-      cliente_nome: cliente_nome
+      cliente_nome: cliente_nome,
+      unidade_id: req.unidadeId || null
     })
     .select('id')
     .single();
@@ -319,6 +323,10 @@ router.post('/admin/finalizar-encaixe-completo', validate(finalizarEncaixeComple
       return res.status(403).json({ error: MENSAGEM_LIMITE_AGENDAMENTOS });
     }
 
+    const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id, unidade_id').eq('id', barbeiro_id).maybeSingle();
+    if (!barbeiro || barbeiro.empresa_id !== empresa_id) return res.status(404).json({ error: 'Profissional não encontrado.' });
+    if (req.unidadeId && barbeiro.unidade_id !== req.unidadeId) return res.status(404).json({ error: 'Profissional não encontrado.' });
+
     let finalUserId;
 
     if (isNovoCliente) {
@@ -367,7 +375,8 @@ router.post('/admin/finalizar-encaixe-completo', validate(finalizarEncaixeComple
         empresa_id,
         data_hora,
         status: 'confirmado',
-        lembrete_1h_enviado: false
+        lembrete_1h_enviado: false,
+        unidade_id: req.unidadeId || null
       })
       .select('id')
       .single();
@@ -394,12 +403,15 @@ router.post('/admin/finalizar-encaixe-completo', validate(finalizarEncaixeComple
 // Rota para Confirmar Agendamento
 router.post('/admin/confirmar-agendamento', validate(confirmarAgendamentoSchema), async (req, res) => {
   const { agendamento_id } = req.body;
-  const { data, error } = await supabase
+  let query = supabase
     .from('agendamentos')
     .update({ status: 'confirmado' })
     .eq('id', agendamento_id)
-    .eq('empresa_id', req.empresaId)
-    .select('id');
+    .eq('empresa_id', req.empresaId);
+  // Admin de uma unidade só (ver middleware/adminAuth.js) só pode confirmar agendamento da
+  // própria unidade.
+  if (req.unidadeId) query = query.eq('unidade_id', req.unidadeId);
+  const { data, error } = await query.select('id');
   if (error) return res.status(500).json(error);
   if (!data || data.length === 0) return res.status(404).json({ error: 'Agendamento não encontrado.' });
   res.json({ success: true });
@@ -412,12 +424,15 @@ router.post('/admin/cancelar-agendamento', validate(cancelarAgendamentoSchema), 
 
   // 1. Primeiro cancelamos no banco para garantir que a agenda seja liberada. O filtro por
   // empresa_id evita que um admin de outra empresa cancele um agendamento que não é dele.
-  const { data: cancelado, error: updError } = await supabase
+  let queryCancelamento = supabase
     .from('agendamentos')
     .update({ status: 'cancelado', justificativa_cancelamento: justificativa, cancelado_por: enviadoPor })
     .eq('id', agendamento_id)
-    .eq('empresa_id', req.empresaId)
-    .select('id');
+    .eq('empresa_id', req.empresaId);
+  // Admin de uma unidade só (ver middleware/adminAuth.js) só pode cancelar agendamento da
+  // própria unidade.
+  if (req.unidadeId) queryCancelamento = queryCancelamento.eq('unidade_id', req.unidadeId);
+  const { data: cancelado, error: updError } = await queryCancelamento.select('id');
 
   if (!updError && (!cancelado || cancelado.length === 0)) {
     return res.status(404).json({ error: 'Agendamento não encontrado.' });
@@ -496,6 +511,7 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
     const resultado = await calcularValorFinalCheckout({
       agendamentoId: agendamento_id,
       empresaId: req.empresaId,
+      unidadeId: req.unidadeId,
       produtosVendidos: produtos_vendidos,
       servicosAdicionais: servicos_adicionais,
       registrarConsumo: true
@@ -709,11 +725,11 @@ router.get('/admin/agendamento-usuario/:id', async (req, res) => {
   try {
     const { data: ag } = await supabase
       .from('agendamentos')
-      .select('usuario_id, valor_total, empresa_id, usuarios(id, assinante, plano_id, assinante_desde)')
+      .select('usuario_id, valor_total, empresa_id, unidade_id, usuarios(id, assinante, plano_id, assinante_desde)')
       .eq('id', req.params.id)
       .maybeSingle();
 
-    if (!ag || ag.empresa_id !== req.empresaId) {
+    if (!ag || ag.empresa_id !== req.empresaId || (req.unidadeId && ag.unidade_id !== req.unidadeId)) {
       return res.json({ usuario_id: null, assinante: false, servicos_ids: [], servicos_agendados_ids: [], restantes: {} });
     }
 

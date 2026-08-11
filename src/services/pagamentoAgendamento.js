@@ -12,14 +12,17 @@ const { calcularValorComLimiteAssinante } = require('../utils/limitesAssinatura'
 // um Pix de prévia no PDV não pode debitar a cota de assinatura do cliente antes do atendimento
 // ser efetivamente confirmado (se o Pix nunca for pago, ou o admin trocar de forma de pagamento
 // depois de gerar o QR, a cota tem que continuar intacta).
-async function calcularValorFinalCheckout({ agendamentoId, empresaId, produtosVendidos, servicosAdicionais, registrarConsumo = false }) {
+async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId, produtosVendidos, servicosAdicionais, registrarConsumo = false }) {
   const { data: agAtual, error: agErr } = await supabase
     .from('agendamentos')
-    .select('valor_total, empresa_id, usuario_id, status')
+    .select('valor_total, empresa_id, usuario_id, status, unidade_id')
     .eq('id', agendamentoId)
     .maybeSingle();
   if (agErr) throw agErr;
   if (!agAtual || agAtual.empresa_id !== empresaId) return null;
+  // Admin de uma unidade só (ver middleware/adminAuth.js) só pode fechar caixa de agendamento
+  // da própria unidade.
+  if (unidadeId && agAtual.unidade_id !== unidadeId) return null;
 
   // Sem essa checagem, reenviar o checkout (duplo clique, retry de rede) descontaria a cota de
   // assinatura do cliente duas vezes pro mesmo atendimento — e gerar um Pix novo pra um

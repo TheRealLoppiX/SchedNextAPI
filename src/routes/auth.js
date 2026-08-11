@@ -269,40 +269,90 @@ router.post('/admin/login', loginLimiter, validate(loginSchema), async (req, res
     return res.status(500).json({ error: 'Erro interno no servidor' });
   }
 
-  if (!empresa) {
+  if (empresa) {
+    // Conta suspensa pelo admin absoluto (ver routes/superAdminPlataforma.js) não consegue mais
+    // logar, mesmo com a senha certa — checado antes da senha valer a pena calcular.
+    if (empresa.status_assinatura === 'suspensa') {
+      return res.status(403).json({ success: false, error: 'Esta conta foi suspensa. Entre em contato com o suporte da SchedNext.' });
+    }
+
+    try {
+      const senhaValida = await validarSenhaComMigracao(empresa.senha, senha, (novoHash) =>
+        supabase.from('empresas').update({ senha: novoHash }).eq('id', empresa.id)
+      );
+
+      if (!senhaValida) {
+        return res.status(401).json({ success: false, error: 'E-mail ou senha incorretos.' });
+      }
+
+      // O ID da empresa será usado como empresa_id no Dashboard. unidade_id null identifica o
+      // admin "dono" (acesso total), diferente do admin de uma unidade específica (ver abaixo).
+      const token = jwt.sign({ empresa_id: empresa.id, unidade_id: null, tipo: 'admin' }, process.env.JWT_SECRET, { expiresIn: '8h' });
+
+      return res.json({
+        success: true,
+        token,
+        admin: {
+          id: empresa.id,
+          empresa_id: empresa.id,
+          unidade_id: null,
+          nome: empresa.nome,
+          slug: empresa.slug
+        }
+      });
+    } catch (e) {
+      console.error('Erro no /admin/login:', e);
+      return res.status(500).json({ error: 'Erro interno no servidor' });
+    }
+  }
+
+  // Não achou por e-mail em `empresas` — tenta como admin de UMA unidade (criado pelo admin da
+  // empresa em routes/unidades.js). Login separado da tabela `empresas`, senha própria — nunca
+  // dá acesso à empresa inteira, só à própria unidade (ver o gate de allowlist em server.js).
+  const { data: adminUnidade, error: errUnidade } = await supabase
+    .from('unidade_admins')
+    .select('id, empresa_id, unidade_id, nome, senha, ativo, empresas(slug, status_assinatura)')
+    .eq('email', email)
+    .maybeSingle();
+
+  if (errUnidade) {
+    console.error(errUnidade);
+    return res.status(500).json({ error: 'Erro interno no servidor' });
+  }
+
+  if (!adminUnidade || !adminUnidade.ativo) {
     return res.status(401).json({ success: false, error: 'E-mail ou senha incorretos.' });
   }
 
-  // Conta suspensa pelo admin absoluto (ver routes/superAdminPlataforma.js) não consegue mais
-  // logar, mesmo com a senha certa — checado antes da senha valer a pena calcular.
-  if (empresa.status_assinatura === 'suspensa') {
+  if (adminUnidade.empresas?.status_assinatura === 'suspensa') {
     return res.status(403).json({ success: false, error: 'Esta conta foi suspensa. Entre em contato com o suporte da SchedNext.' });
   }
 
   try {
-    const senhaValida = await validarSenhaComMigracao(empresa.senha, senha, (novoHash) =>
-      supabase.from('empresas').update({ senha: novoHash }).eq('id', empresa.id)
-    );
-
+    const senhaValida = await bcrypt.compare(senha, adminUnidade.senha);
     if (!senhaValida) {
       return res.status(401).json({ success: false, error: 'E-mail ou senha incorretos.' });
     }
 
-    // O ID da empresa será usado como empresa_id no Dashboard
-    const token = jwt.sign({ empresa_id: empresa.id, tipo: 'admin' }, process.env.JWT_SECRET, { expiresIn: '8h' });
+    const token = jwt.sign(
+      { empresa_id: adminUnidade.empresa_id, unidade_id: adminUnidade.unidade_id, tipo: 'admin' },
+      process.env.JWT_SECRET,
+      { expiresIn: '8h' }
+    );
 
     res.json({
       success: true,
       token,
       admin: {
-        id: empresa.id,
-        empresa_id: empresa.id,
-        nome: empresa.nome,
-        slug: empresa.slug
+        id: adminUnidade.id,
+        empresa_id: adminUnidade.empresa_id,
+        unidade_id: adminUnidade.unidade_id,
+        nome: adminUnidade.nome,
+        slug: adminUnidade.empresas?.slug
       }
     });
   } catch (e) {
-    console.error('Erro no /admin/login:', e);
+    console.error('Erro no /admin/login (unidade):', e);
     res.status(500).json({ error: 'Erro interno no servidor' });
   }
 });
