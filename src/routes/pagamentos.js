@@ -1,8 +1,6 @@
 const express = require('express');
-const crypto = require('crypto');
 const supabase = require('../config/supabase');
 const { estaConfigurado, criarCheckout, cancelarAssinaturaNoGateway, reativarAssinaturaNoGateway } = require('../services/pagamento');
-const asaas = require('../services/asaas');
 const validate = require('../middleware/validate');
 const { iniciarUpgradeSchema } = require('../schemas');
 
@@ -11,7 +9,7 @@ const router = express.Router();
 // Protegida pelo mesmo verificarTokenAdmin de toda a área /admin/* (ver server.js).
 router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgradeSchema), async (req, res) => {
   const empresaId = req.empresaId;
-  const { plano_plataforma_id, cpf_cnpj } = req.body;
+  const { plano_plataforma_id } = req.body;
 
   const { data: plano, error } = await supabase
     .from('planos_plataforma')
@@ -35,14 +33,15 @@ router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgr
 
   const { data: empresa } = await supabase
     .from('empresas')
-    .select('nome, email, cpf_cnpj, gateway_customer_id, gateway_subscription_id')
+    .select('email, gateway_subscription_id')
     .eq('id', empresaId)
     .maybeSingle();
 
   if (!empresa) return res.status(404).json({ error: 'Empresa não encontrada.' });
 
-  // Sem gateway configurado (ASAAS_API_KEY ausente): não há como cobrar de verdade, então não
-  // faz sentido fingir uma assinatura — recusa em vez de liberar o plano pago de graça.
+  // Sem gateway configurado (MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN ausente): não há como cobrar
+  // de verdade, então não faz sentido fingir uma assinatura — recusa em vez de liberar o plano
+  // pago de graça.
   if (!estaConfigurado()) {
     return res.status(503).json({ error: 'Cobrança automática não está disponível no momento. Fale com o suporte.' });
   }
@@ -54,7 +53,7 @@ router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgr
     try {
       await cancelarAssinaturaNoGateway(empresa.gateway_subscription_id);
     } catch (e) {
-      console.error('Erro ao cancelar assinatura anterior no Asaas:', e);
+      console.error('Erro ao cancelar assinatura anterior no Mercado Pago:', e);
     }
   }
 
@@ -73,32 +72,22 @@ router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgr
     return res.json({ configurado: true, message: 'Plano atualizado para o Grátis.' });
   }
 
-  const documento = cpf_cnpj || empresa.cpf_cnpj;
-  if (!documento) {
-    return res.status(400).json({ error: 'Informe seu CPF ou CNPJ para assinar um plano pago.', requerDocumento: true });
-  }
-
   try {
     const checkout = await criarCheckout({
       empresaId,
       planoNome: plano.nome,
       precoMensal: plano.preco_mensal,
-      nomeEmpresa: empresa.nome,
-      email: empresa.email,
-      cpfCnpj: documento,
-      gatewayCustomerIdExistente: empresa.gateway_customer_id
+      email: empresa.email
     });
 
     // IMPORTANTE: plano_plataforma_id (o plano de verdade em uso, que libera os recursos
-    // gated — ver utils/limitesPlano.js) só é trocado pelo webhook quando o Asaas confirmar o
-    // pagamento (PAYMENT_CONFIRMED/RECEIVED, ver POST /pagamentos/webhook abaixo). Até lá, a
-    // empresa continua com todos os recursos do plano ATUAL, e o plano escolhido fica só
-    // registrado como pendente — sem isso, qualquer um conseguia liberar um plano pago só
+    // gated — ver utils/limitesPlano.js) só é trocado pelo webhook quando o Mercado Pago
+    // confirmar a autorização/pagamento (ver POST /webhooks/mercadopago em routes/mercadopago.js).
+    // Até lá, a empresa continua com todos os recursos do plano ATUAL, e o plano escolhido fica
+    // só registrado como pendente — sem isso, qualquer um conseguia liberar um plano pago só
     // clicando em "trocar", sem nunca pagar.
     await supabase.from('empresas').update({
       plano_plataforma_pendente_id: plano.id,
-      cpf_cnpj: documento,
-      gateway_customer_id: checkout.gatewayCustomerId,
       gateway_subscription_id: checkout.gatewaySubscriptionId,
       cancelamento_agendado: false
     }).eq('id', empresaId);
@@ -130,7 +119,7 @@ router.post('/admin/assinatura-plataforma/cancelar-cobranca', async (req, res) =
   try {
     await cancelarAssinaturaNoGateway(empresa.gateway_subscription_id);
   } catch (e) {
-    console.error('Erro ao cancelar assinatura no Asaas:', e);
+    console.error('Erro ao cancelar assinatura no Mercado Pago:', e);
     return res.status(500).json({ error: 'Não foi possível cancelar a cobrança agora. Tente novamente mais tarde.' });
   }
 
@@ -145,7 +134,7 @@ router.post('/admin/assinatura-plataforma/reativar-cobranca', async (req, res) =
 
   const { data: empresa } = await supabase
     .from('empresas')
-    .select('proxima_cobranca_em, gateway_customer_id, plano_plataforma:plano_plataforma_id(nome, preco_mensal)')
+    .select('email, proxima_cobranca_em, plano_plataforma:plano_plataforma_id(nome, preco_mensal)')
     .eq('id', empresaId)
     .maybeSingle();
 
@@ -154,7 +143,7 @@ router.post('/admin/assinatura-plataforma/reativar-cobranca', async (req, res) =
   try {
     const novoSubscriptionId = await reativarAssinaturaNoGateway({
       empresaId,
-      gatewayCustomerId: empresa.gateway_customer_id,
+      email: empresa.email,
       planoNome: empresa.plano_plataforma?.nome,
       precoMensal: empresa.plano_plataforma?.preco_mensal,
       proximaCobrancaEm: empresa.proxima_cobranca_em
@@ -165,7 +154,7 @@ router.post('/admin/assinatura-plataforma/reativar-cobranca', async (req, res) =
       ...(novoSubscriptionId ? { gateway_subscription_id: novoSubscriptionId } : {})
     }).eq('id', empresaId);
   } catch (e) {
-    console.error('Erro ao reativar assinatura no Asaas:', e);
+    console.error('Erro ao reativar assinatura no Mercado Pago:', e);
     return res.status(500).json({ error: 'Não foi possível reativar a cobrança agora. Tente novamente mais tarde.' });
   }
 
@@ -185,7 +174,7 @@ router.post('/admin/assinatura-plataforma/cancelar-plano', async (req, res) => {
   try {
     await cancelarAssinaturaNoGateway(empresaAtual?.gateway_subscription_id);
   } catch (e) {
-    console.error('Erro ao cancelar assinatura no Asaas:', e);
+    console.error('Erro ao cancelar assinatura no Mercado Pago:', e);
     // Não bloqueia o downgrade local por causa disso — pior cenário é uma cobrança a mais
     // que precisa ser estornada manualmente, melhor que travar o cliente no plano pago.
   }
@@ -206,72 +195,7 @@ router.post('/admin/assinatura-plataforma/cancelar-plano', async (req, res) => {
   res.json({ message: 'Plano cancelado imediatamente. Você já está no plano Grátis, sem reembolso do período restante.' });
 });
 
-// Webhook do Asaas. Autenticado pelo token que você configura no painel deles (Integrações →
-// Webhooks → "Token de autenticação"), reenviado em todo POST no header `asaas-access-token`.
-// Sem ASAAS_WEBHOOK_TOKEN definido, a rota recusa toda chamada (fail-closed) em vez de aceitar
-// sem validar nada.
-router.post('/pagamentos/webhook', async (req, res) => {
-  const segredoEsperado = process.env.ASAAS_WEBHOOK_TOKEN;
-  const segredoRecebido = req.headers['asaas-access-token'];
-
-  if (!segredoEsperado) {
-    console.error('ASAAS_WEBHOOK_TOKEN não configurado, recusando webhook de pagamento.');
-    return res.status(503).json({ error: 'Webhook de pagamento não configurado.' });
-  }
-
-  const bufEsperado = Buffer.from(segredoEsperado);
-  const bufRecebido = Buffer.from(String(segredoRecebido || ''));
-  const valido = bufEsperado.length === bufRecebido.length && crypto.timingSafeEqual(bufEsperado, bufRecebido);
-
-  if (!valido) {
-    return res.status(401).json({ error: 'Token inválido.' });
-  }
-
-  const { event, payment } = req.body || {};
-  if (!event || !payment?.customer) return res.status(400).json({ error: 'Payload inválido.' });
-
-  const EVENTOS_ATIVA = ['PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED'];
-  const EVENTOS_INADIMPLENTE = ['PAYMENT_OVERDUE'];
-
-  if (!EVENTOS_ATIVA.includes(event) && !EVENTOS_INADIMPLENTE.includes(event)) {
-    return res.json({ recebido: true, ignorado: true });
-  }
-
-  const { data: empresa } = await supabase
-    .from('empresas')
-    .select('id, plano_plataforma_pendente_id')
-    .eq('gateway_customer_id', payment.customer)
-    .maybeSingle();
-
-  if (!empresa) return res.json({ recebido: true, empresaNaoEncontrada: true });
-
-  const atualizacao = { status_assinatura: EVENTOS_ATIVA.includes(event) ? 'ativa' : 'inadimplente' };
-
-  if (EVENTOS_ATIVA.includes(event)) {
-    // É AQUI que o plano escolhido em "trocar de plano" (ou no cadastro) realmente passa a
-    // valer — só agora que o Asaas confirmou o pagamento. Ver routes/pagamentos.js
-    // POST /admin/assinatura-plataforma/iniciar-upgrade e routes/empresasPublico.js.
-    if (empresa.plano_plataforma_pendente_id) {
-      atualizacao.plano_plataforma_id = empresa.plano_plataforma_pendente_id;
-      atualizacao.plano_plataforma_pendente_id = null;
-    }
-
-    // Busca a data real da próxima cobrança na assinatura (o Asaas já avançou o ciclo) em vez
-    // de recalcular localmente — evita desalinhar com o que o Asaas vai efetivamente cobrar.
-    if (payment.subscription) {
-      try {
-        const assinatura = await asaas.buscarAssinatura(payment.subscription);
-        if (assinatura?.nextDueDate) atualizacao.proxima_cobranca_em = new Date(assinatura.nextDueDate).toISOString();
-      } catch (e) {
-        console.error('Erro ao buscar próxima cobrança no Asaas:', e);
-      }
-    }
-  }
-
-  const { error } = await supabase.from('empresas').update(atualizacao).eq('id', empresa.id);
-  if (error) return res.status(500).json({ error: 'Erro ao atualizar status da assinatura.' });
-
-  res.json({ recebido: true });
-});
+// O webhook de confirmação de pagamento/assinatura agora é o do Mercado Pago (unificado com o
+// do Pix avulso) — ver POST /webhooks/mercadopago em routes/mercadopago.js.
 
 module.exports = router;

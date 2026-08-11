@@ -12,7 +12,11 @@ const {
   montarUrlAutorizacao,
   trocarCodigoPorToken,
   criarPagamentoPix,
-  buscarPagamento
+  buscarPagamento,
+  criarPreapproval,
+  cancelarPreapproval,
+  buscarPreapproval,
+  buscarPagamentoAutorizado
 } = require('../services/mercadopago');
 
 const router = express.Router();
@@ -208,6 +212,110 @@ router.get('/pix/:agendamentoId/status', verificarTokenCliente, async (req, res)
   res.json({ pagamento_status: status });
 });
 
+// --- Assinatura do cliente final (mensalidade que o cliente paga pra própria barbearia) ---
+//
+// Usa o access_token DA EMPRESA (o mesmo do fluxo OAuth do Pix avulso, ver topo do arquivo) —
+// o dinheiro cai direto na conta da barbearia, com a fatia da SchedNext via application_fee
+// (obterTaxaMarketplace, mesma taxa do Pix). É aditivo: o admin continua podendo atribuir/tirar
+// plano na mão (PUT /admin/clientes/:id/plano, routes/assinaturas.js) sem cobrança nenhuma —
+// isso aqui só liga a cobrança automática por cima de um plano já atribuído.
+
+router.get('/usuario/:id/assinatura-cobranca', verificarTokenCliente, async (req, res) => {
+  if (req.params.id !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
+
+  const { data: usuario, error } = await supabase
+    .from('usuarios')
+    .select('empresa_id, plano_id, mercadopago_preapproval_id')
+    .eq('id', req.params.id)
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: 'Erro ao buscar assinatura.' });
+  if (!usuario?.mercadopago_preapproval_id) return res.json({ status: null });
+
+  const { data: empresa } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', usuario.empresa_id).maybeSingle();
+  if (!empresa?.mercadopago_access_token) return res.json({ status: null });
+
+  try {
+    const preapproval = await buscarPreapproval({
+      accessToken: empresa.mercadopago_access_token,
+      preapprovalId: usuario.mercadopago_preapproval_id
+    });
+    res.json({ status: preapproval.status });
+  } catch (err) {
+    console.error('Erro ao consultar assinatura do cliente:', err);
+    res.json({ status: null });
+  }
+});
+
+router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, async (req, res) => {
+  if (req.params.id !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
+
+  const { data: usuario, error } = await supabase
+    .from('usuarios')
+    .select('empresa_id, plano_id, email')
+    .eq('id', req.params.id)
+    .maybeSingle();
+  if (error) return res.status(500).json({ error: 'Erro ao buscar cliente.' });
+  if (!usuario?.plano_id) {
+    return res.status(400).json({ error: 'Você ainda não tem um plano atribuído. Fale com a barbearia.' });
+  }
+
+  const { data: plano } = await supabase.from('planos_assinatura').select('nome, preco').eq('id', usuario.plano_id).maybeSingle();
+  if (!plano) return res.status(404).json({ error: 'Plano não encontrado.' });
+
+  const { data: empresa } = await supabase.from('empresas').select('nome, mercadopago_access_token').eq('id', usuario.empresa_id).maybeSingle();
+  if (!empresa?.mercadopago_access_token) {
+    return res.status(400).json({ error: 'Esta barbearia ainda não conectou o Mercado Pago para cobrança automática.' });
+  }
+
+  try {
+    const taxaPercentual = await obterTaxaMarketplace(usuario.empresa_id);
+    const preapproval = await criarPreapproval({
+      accessToken: empresa.mercadopago_access_token,
+      reason: `${empresa.nome} — plano ${plano.nome}`,
+      valor: plano.preco,
+      payerEmail: usuario.email,
+      externalReference: req.params.id,
+      backUrl: `${process.env.FRONTEND_URL}/assinatura`,
+      startDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+      applicationFee: plano.preco * (taxaPercentual / 100)
+    });
+
+    await supabase.from('usuarios').update({ mercadopago_preapproval_id: preapproval.id }).eq('id', req.params.id);
+
+    res.json({ checkoutUrl: preapproval.init_point });
+  } catch (err) {
+    console.error('Erro ao criar assinatura do cliente:', err);
+    res.status(500).json({ error: 'Não foi possível iniciar a cobrança automática agora.' });
+  }
+});
+
+router.post('/usuario/:id/assinatura-cobranca/cancelar', verificarTokenCliente, async (req, res) => {
+  if (req.params.id !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
+
+  const { data: usuario } = await supabase
+    .from('usuarios')
+    .select('empresa_id, mercadopago_preapproval_id')
+    .eq('id', req.params.id)
+    .maybeSingle();
+  if (!usuario?.mercadopago_preapproval_id) return res.json({ success: true });
+
+  const { data: empresa } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', usuario.empresa_id).maybeSingle();
+
+  try {
+    if (empresa?.mercadopago_access_token) {
+      await cancelarPreapproval({ accessToken: empresa.mercadopago_access_token, preapprovalId: usuario.mercadopago_preapproval_id });
+    }
+  } catch (err) {
+    console.error('Erro ao cancelar assinatura do cliente no Mercado Pago:', err);
+  }
+
+  // Não mexe em `assinante`/`plano_id` — isso continua sob controle do admin (ver
+  // routes/assinaturas.js). Só desliga a cobrança automática.
+  await supabase.from('usuarios').update({ mercadopago_preapproval_id: null }).eq('id', req.params.id);
+  res.json({ success: true });
+});
+
 // Rota pública (fora de /admin, então fora do gate de JWT — ver server.js): o Mercado Pago
 // redireciona o navegador do admin pra cá depois que ele autoriza a conexão.
 router.get('/mercadopago/oauth/callback', async (req, res) => {
@@ -252,6 +360,50 @@ router.get('/mercadopago/oauth/callback', async (req, res) => {
 // Key configurada no painel de desenvolvedor (Aplicação → Webhooks). Sem
 // MERCADOPAGO_WEBHOOK_SECRET configurado, recusa toda chamada (fail-closed) — mesmo padrão já
 // usado no webhook do Asaas (ver routes/pagamentos.js).
+// Reconfirma e aplica o status de uma assinatura (preapproval) de verdade, direto na API —
+// nunca confia só no payload do webhook. Busca primeiro como assinatura DA PLATAFORMA
+// (empresas.gateway_subscription_id, cobrada com o access_token da própria SchedNext); se não
+// achar, busca como assinatura de CLIENTE FINAL (usuarios.mercadopago_preapproval_id, cobrada
+// com o access_token da empresa dona do cliente).
+async function processarNotificacaoAssinatura(preapprovalId) {
+  const { data: empresaPlataforma } = await supabase
+    .from('empresas')
+    .select('id, plano_plataforma_pendente_id')
+    .eq('gateway_subscription_id', preapprovalId)
+    .maybeSingle();
+
+  if (empresaPlataforma) {
+    const preapproval = await buscarPreapproval({
+      accessToken: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
+      preapprovalId
+    });
+
+    const ativa = preapproval.status === 'authorized';
+    const atualizacao = { status_assinatura: ativa ? 'ativa' : 'inadimplente' };
+    // Mesmo gatilho que o webhook do Asaas tinha: o plano escolhido em "trocar de plano" só
+    // passa a valer de verdade quando o Mercado Pago confirma a autorização.
+    if (ativa && empresaPlataforma.plano_plataforma_pendente_id) {
+      atualizacao.plano_plataforma_id = empresaPlataforma.plano_plataforma_pendente_id;
+      atualizacao.plano_plataforma_pendente_id = null;
+    }
+    await supabase.from('empresas').update(atualizacao).eq('id', empresaPlataforma.id);
+    return;
+  }
+
+  const { data: usuario } = await supabase
+    .from('usuarios')
+    .select('id, empresa_id')
+    .eq('mercadopago_preapproval_id', preapprovalId)
+    .maybeSingle();
+  if (!usuario) return;
+
+  const { data: empresaCliente } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', usuario.empresa_id).maybeSingle();
+  if (!empresaCliente?.mercadopago_access_token) return;
+
+  const preapproval = await buscarPreapproval({ accessToken: empresaCliente.mercadopago_access_token, preapprovalId });
+  await supabase.from('usuarios').update({ assinante: preapproval.status === 'authorized' }).eq('id', usuario.id);
+}
+
 router.post('/webhooks/mercadopago', async (req, res) => {
   const segredo = process.env.MERCADOPAGO_WEBHOOK_SECRET;
   if (!segredo) {
@@ -281,7 +433,43 @@ router.post('/webhooks/mercadopago', async (req, res) => {
 
   if (!valido) return res.status(401).json({ error: 'Assinatura inválida.' });
 
-  if (req.body?.type && req.body.type !== 'payment') {
+  const tipo = req.body?.type;
+
+  // Mudança de status da assinatura (autorizada/cancelada/pausada) — cobre tanto a assinatura
+  // da própria plataforma quanto a do cliente final (ver processarNotificacaoAssinatura acima).
+  if (tipo === 'subscription_preapproval') {
+    try {
+      await processarNotificacaoAssinatura(dataId);
+    } catch (err) {
+      console.error('Erro ao processar webhook de assinatura:', err);
+    }
+    return res.json({ recebido: true });
+  }
+
+  // Cobrança individual de um ciclo da assinatura (aprovada/rejeitada). dataId aqui é o id
+  // dessa cobrança pontual, não da assinatura — precisa resolver o preapproval_id primeiro.
+  // Só tenta com o token da PLATAFORMA por enquanto (cobre a assinatura da própria SchedNext,
+  // que é quem existe de verdade hoje) — resolver isso pra assinatura de cliente final exigiria
+  // varrer o token de cada empresa conectada, o que não escala; a transição de status do
+  // preapproval em si (acima) já cobre a maior parte dos casos práticos pro cliente final.
+  if (tipo === 'subscription_authorized_payment') {
+    if (process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN) {
+      try {
+        const pagamentoAutorizado = await buscarPagamentoAutorizado({
+          accessToken: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
+          id: dataId
+        });
+        if (pagamentoAutorizado?.preapproval_id) {
+          await processarNotificacaoAssinatura(pagamentoAutorizado.preapproval_id);
+        }
+      } catch (err) {
+        console.error('Erro ao processar webhook de cobrança de assinatura:', err);
+      }
+    }
+    return res.json({ recebido: true });
+  }
+
+  if (tipo && tipo !== 'payment') {
     return res.json({ recebido: true, ignorado: true });
   }
 

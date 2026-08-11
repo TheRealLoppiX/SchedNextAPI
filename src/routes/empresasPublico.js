@@ -72,8 +72,8 @@ router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmp
 
   const ehPago = plano.preco_mensal > 0;
   // A conta sempre nasce no Grátis, que é real e ativa na hora. Um plano pago escolhido aqui
-  // vira o "plano pendente" — só é aplicado de verdade (routes/pagamentos.js, webhook do Asaas)
-  // quando o pagamento for confirmado. Sem isso, dava pra criar conta nova e ganhar qualquer
+  // vira o "plano pendente" — só é aplicado de verdade (POST /webhooks/mercadopago, ver
+  // routes/mercadopago.js) quando o pagamento for confirmado. Sem isso, dava pra criar conta nova e ganhar qualquer
   // plano pago de graça, sem nunca pagar (ver handoff.md).
   const planoAplicadoId = ehPago ? planoGratis.id : plano.id;
   const planoPendenteId = ehPago ? plano.id : null;

@@ -98,10 +98,70 @@ async function buscarPagamento({ accessTokenVendedor, paymentId }) {
   return request(`/v1/payments/${paymentId}`, { accessToken: accessTokenVendedor });
 }
 
+// Cobrança recorrente (assinatura da plataforma OU do cliente final, ver services/pagamento.js
+// e routes/mercadopago.js). accessToken aqui pode ser o da própria SchedNext (cobrança da
+// plataforma) ou o de uma empresa conectada via OAuth (assinatura do cliente final dela) —
+// quem decide isso é o chamador. Só funciona com cartão (débito automático); Pix recorrente é
+// uma API separada, fora de escopo por enquanto.
+async function criarPreapproval({ accessToken, reason, valor, payerEmail, externalReference, backUrl, startDate, applicationFee }) {
+  return request('/preapproval', {
+    method: 'POST',
+    accessToken,
+    idempotencyKey: crypto.randomUUID(),
+    body: {
+      reason,
+      external_reference: String(externalReference),
+      payer_email: payerEmail,
+      back_url: backUrl,
+      auto_recurring: {
+        frequency: 1,
+        frequency_type: 'months',
+        transaction_amount: Number(valor),
+        currency_id: 'BRL',
+        start_date: `${startDate}T00:00:00.000-03:00`
+      },
+      ...(applicationFee > 0 ? { application_fee: Number(applicationFee.toFixed(2)) } : {})
+    }
+  });
+}
+
+// Preapproval cancelado no Mercado Pago é terminal — não dá pra "reativar", só criar um novo
+// (ver reativarAssinaturaNoGateway em services/pagamento.js). 404 tratado como sucesso, igual
+// asaas.cancelarAssinatura (já cancelado/inexistente já satisfaz o objetivo).
+async function cancelarPreapproval({ accessToken, preapprovalId }) {
+  try {
+    return await request(`/preapproval/${preapprovalId}`, {
+      method: 'PUT',
+      accessToken,
+      body: { status: 'cancelled' }
+    });
+  } catch (e) {
+    if (e.status === 404) return { id: preapprovalId, status: 'cancelled' };
+    throw e;
+  }
+}
+
+// Usado no webhook pra reconfirmar o status de verdade antes de ativar/desativar assinatura
+// (mesmo princípio de buscarPagamento acima — nunca confia só no payload da notificação).
+async function buscarPreapproval({ accessToken, preapprovalId }) {
+  return request(`/preapproval/${preapprovalId}`, { accessToken });
+}
+
+// Cada cobrança individual de um ciclo de assinatura (evento de webhook
+// "subscription_authorized_payment") — devolve entre outros o `preapproval_id` associado, já
+// que a notificação só traz o id dessa cobrança pontual, não da assinatura em si.
+async function buscarPagamentoAutorizado({ accessToken, id }) {
+  return request(`/authorized_payments/${id}`, { accessToken });
+}
+
 module.exports = {
   montarUrlAutorizacao,
   trocarCodigoPorToken,
   renovarToken,
   criarPagamentoPix,
-  buscarPagamento
+  buscarPagamento,
+  criarPreapproval,
+  cancelarPreapproval,
+  buscarPreapproval,
+  buscarPagamentoAutorizado
 };

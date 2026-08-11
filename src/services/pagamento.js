@@ -1,14 +1,17 @@
-// Adapter de cobrança. Gateway escolhido: Asaas (aceita CPF, sem mensalidade, cobra só por
-// transação — ver src/services/asaas.js pro cliente HTTP). Este arquivo é o único lugar que
-// conhece o formato de resposta do Asaas; routes/pagamentos.js só chama estas funções.
+// Adapter de cobrança da ASSINATURA DA PLATAFORMA (empresa paga a SchedNext pelo plano —
+// diferente do Pix avulso de agendamento/PDV, que usa o access_token de cada empresa via OAuth,
+// ver services/mercadopago.js). Aqui é a própria SchedNext vendendo, então usa o access_token
+// PRÓPRIO da SchedNext (MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN), sem intermediário nenhum. Este
+// arquivo é o único lugar que conhece esse detalhe; routes/pagamentos.js só chama estas funções
+// (mesma interface pública de quando o gateway era o Asaas — só o que acontece por dentro mudou).
 //
-// Enquanto ASAAS_API_KEY não estiver configurado, empresas em plano pago entram como
-// `status_assinatura = 'trial'` (ver routes/empresasPublico.js) e não são bloqueadas.
+// Enquanto MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN não estiver configurado, empresas em plano pago
+// entram como `status_assinatura = 'trial'` (ver routes/empresasPublico.js) e não são bloqueadas.
 
-const asaas = require('./asaas');
+const mercadopago = require('./mercadopago');
 
 function estaConfigurado() {
-  return Boolean(process.env.ASAAS_API_KEY);
+  return Boolean(process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN);
 }
 
 function amanha() {
@@ -16,10 +19,12 @@ function amanha() {
   return data.toISOString().slice(0, 10);
 }
 
-// Cria (ou reaproveita) o cliente no Asaas e abre uma assinatura mensal, devolvendo a URL de
-// checkout hospedada pelo Asaas (pagador escolhe Pix/boleto/cartão lá, nós nunca tocamos em
-// dado de cartão). `gatewayCustomerIdExistente` evita recriar o cliente a cada troca de plano.
-async function criarCheckout({ empresaId, planoNome, precoMensal, nomeEmpresa, email, cpfCnpj, gatewayCustomerIdExistente }) {
+// Cria um preapproval (assinatura recorrente por cartão) e devolve a URL de checkout hospedada
+// pelo Mercado Pago (pagador autoriza o cartão lá, nós nunca tocamos em dado de cartão).
+// gatewayCustomerIdExistente/cpfCnpj não são usados pelo Mercado Pago (ele não tem conceito de
+// "cliente" separado do preapproval, e não exige CPF/CNPJ pra criar a cobrança) — mantidos nos
+// parâmetros só pra não precisar mexer em routes/pagamentos.js.
+async function criarCheckout({ empresaId, planoNome, precoMensal, email }) {
   if (!estaConfigurado()) {
     return {
       configurado: false,
@@ -27,33 +32,22 @@ async function criarCheckout({ empresaId, planoNome, precoMensal, nomeEmpresa, e
     };
   }
 
-  let customerId = gatewayCustomerIdExistente;
-  if (!customerId) {
-    const cliente = await asaas.criarCliente({
-      nome: nomeEmpresa,
-      email,
-      cpfCnpj: String(cpfCnpj).replace(/\D/g, ''),
-      externalReference: String(empresaId)
-    });
-    customerId = cliente.id;
-  }
-
-  const assinatura = await asaas.criarAssinatura({
-    customerId,
+  const preapproval = await mercadopago.criarPreapproval({
+    accessToken: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
+    reason: `SchedNext — plano ${planoNome}`,
     valor: precoMensal,
-    nextDueDate: amanha(),
-    descricao: `SchedNext — plano ${planoNome}`,
-    externalReference: String(empresaId)
+    payerEmail: email,
+    externalReference: empresaId,
+    backUrl: `${process.env.FRONTEND_URL}/admin/conta`,
+    startDate: amanha()
   });
-
-  const primeiroPagamento = await asaas.buscarPrimeiroPagamento(assinatura.id);
 
   return {
     configurado: true,
-    checkoutUrl: primeiroPagamento?.invoiceUrl || null,
-    gatewayCustomerId: customerId,
-    gatewaySubscriptionId: assinatura.id,
-    message: 'Assinatura criada! Finalize o pagamento na página que abriu para ativar o plano.'
+    checkoutUrl: preapproval.init_point,
+    gatewayCustomerId: null,
+    gatewaySubscriptionId: preapproval.id,
+    message: 'Assinatura criada! Finalize a autorização na página que abriu para ativar o plano.'
   };
 }
 
@@ -63,27 +57,34 @@ async function criarCheckout({ empresaId, planoNome, precoMensal, nomeEmpresa, e
 // (routes/pagamentos.js decide se derruba o plano na hora ou deixa rodar até a data).
 async function cancelarAssinaturaNoGateway(gatewaySubscriptionId) {
   if (!estaConfigurado() || !gatewaySubscriptionId) return;
-  await asaas.cancelarAssinatura(gatewaySubscriptionId);
+  await mercadopago.cancelarPreapproval({
+    accessToken: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
+    preapprovalId: gatewaySubscriptionId
+  });
 }
 
-// Recria a assinatura no gateway (reativar cobrança depois de ter cancelado) mantendo a mesma
-// data de próxima cobrança já prometida ao cliente.
-async function reativarAssinaturaNoGateway({ empresaId, gatewayCustomerId, planoNome, precoMensal, proximaCobrancaEm }) {
-  if (!estaConfigurado() || !gatewayCustomerId) return null;
+// Preapproval cancelado no Mercado Pago é terminal (não dá pra "reabrir") — reativar cobrança
+// aqui sempre cria um preapproval NOVO, com a mesma data de próxima cobrança já prometida ao
+// cliente. Precisa do e-mail da empresa (o Mercado Pago exige payer_email em todo preapproval
+// novo — diferente do Asaas, que já tinha isso amarrado no gatewayCustomerId).
+async function reativarAssinaturaNoGateway({ empresaId, email, planoNome, precoMensal, proximaCobrancaEm }) {
+  if (!estaConfigurado()) return null;
 
-  const nextDueDate = proximaCobrancaEm
+  const startDate = proximaCobrancaEm
     ? new Date(proximaCobrancaEm).toISOString().slice(0, 10)
     : amanha();
 
-  const assinatura = await asaas.criarAssinatura({
-    customerId: gatewayCustomerId,
+  const preapproval = await mercadopago.criarPreapproval({
+    accessToken: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
+    reason: `SchedNext — plano ${planoNome}`,
     valor: precoMensal,
-    nextDueDate,
-    descricao: `SchedNext — plano ${planoNome}`,
-    externalReference: String(empresaId)
+    payerEmail: email,
+    externalReference: empresaId,
+    backUrl: `${process.env.FRONTEND_URL}/admin/conta`,
+    startDate
   });
 
-  return assinatura.id;
+  return preapproval.id;
 }
 
 module.exports = { estaConfigurado, criarCheckout, cancelarAssinaturaNoGateway, reativarAssinaturaNoGateway };
