@@ -3,11 +3,11 @@ const supabase = require('../config/supabase');
 async function obterLimitesEmpresa(empresaId) {
   const { data } = await supabase
     .from('empresas')
-    .select('plano_plataforma:plano_plataforma_id(limite_profissionais, limite_agendamentos_mes, permite_multi_unidade, permite_api_publica, permite_ia, permite_relatorios_avancados, permite_dominio_customizado, permite_whatsapp_bot)')
+    .select('plano_plataforma:plano_plataforma_id(limite_profissionais, limite_agendamentos_mes, permite_multi_unidade, permite_api_publica, permite_ia, permite_relatorios_avancados, permite_dominio_customizado, permite_whatsapp_bot, taxa_marketplace_percentual)')
     .eq('id', empresaId)
     .maybeSingle();
 
-  return data?.plano_plataforma || { limite_profissionais: null, limite_agendamentos_mes: null, permite_multi_unidade: false, permite_api_publica: false, permite_ia: false, permite_relatorios_avancados: false, permite_dominio_customizado: false, permite_whatsapp_bot: false };
+  return data?.plano_plataforma || { limite_profissionais: null, limite_agendamentos_mes: null, permite_multi_unidade: false, permite_api_publica: false, permite_ia: false, permite_relatorios_avancados: false, permite_dominio_customizado: false, permite_whatsapp_bot: false, taxa_marketplace_percentual: 0 };
 }
 
 // Multi-unidade e API pública são recursos do plano Enterprise (ver §3 do plano de plataforma).
@@ -35,6 +35,14 @@ async function permiteDominioCustomizado(empresaId) {
 async function permiteWhatsappBot(empresaId) {
   const { permite_whatsapp_bot } = await obterLimitesEmpresa(empresaId);
   return !!permite_whatsapp_bot;
+}
+
+// Fatia que a SchedNext fica de cada Pix cobrado via Mercado Pago (application_fee), definida
+// por plano — ex: 5% pro plano Grátis, incentivando upgrade pra planos pagos que não cobram essa
+// taxa. Ver routes/mercadopago.js e routes/superAdminPlataforma.js (onde o admin absoluto edita).
+async function obterTaxaMarketplace(empresaId) {
+  const { taxa_marketplace_percentual } = await obterLimitesEmpresa(empresaId);
+  return Number(taxa_marketplace_percentual) || 0;
 }
 
 // Recursos de IA: planos acima de R$100/mês (Profissional/Enterprise, ver planos_plataforma).
@@ -130,5 +138,6 @@ module.exports = {
   permiteIA,
   permiteRelatoriosAvancados,
   permiteDominioCustomizado,
-  permiteWhatsappBot
+  permiteWhatsappBot,
+  obterTaxaMarketplace
 };

@@ -1,0 +1,305 @@
+const express = require('express');
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+
+const supabase = require('../config/supabase');
+const validate = require('../middleware/validate');
+const verificarTokenCliente = require('../middleware/clienteAuth');
+const { mercadoPagoPixSchema } = require('../schemas');
+const { obterTaxaMarketplace } = require('../utils/limitesPlano');
+const { calcularValorFinalCheckout } = require('../services/pagamentoAgendamento');
+const {
+  montarUrlAutorizacao,
+  trocarCodigoPorToken,
+  criarPagamentoPix,
+  buscarPagamento
+} = require('../services/mercadopago');
+
+const router = express.Router();
+
+// Modelo "vendedor conectado" (ver services/mercadopago.js): cada empresa autoriza a aplicação
+// da SchedNext no Mercado Pago via OAuth, e a cobrança de cada Pix passa a sair com o
+// access_token DELA — o dinheiro cai direto na conta da empresa, com a nossa fatia
+// (application_fee) descontada automaticamente. Sem MERCADOPAGO_CLIENT_ID/SECRET configurados,
+// a integração fica "não configurada" e nenhuma rota de conectar funciona (mesmo padrão de
+// degradação graciosa já usado no Asaas e na Evolution API).
+function estaConfigurado() {
+  return Boolean(process.env.MERCADOPAGO_CLIENT_ID && process.env.MERCADOPAGO_CLIENT_SECRET);
+}
+
+function redirectUriCallback() {
+  return `${process.env.BACKEND_URL}/mercadopago/oauth/callback`;
+}
+
+// Reconfirma um Pix pendente direto na API do Mercado Pago (nunca confia em status já gravado
+// localmente além de 'pago', que é terminal) e persiste se tiver sido aprovado. Compartilhado
+// pelas rotas de status (admin e cliente) e pelo webhook — as três precisam do mesmo
+// comportamento de "sempre rebuscar antes de confiar".
+async function reconfirmarPagamento({ agendamentoId, accessTokenVendedor, paymentId, statusAtual }) {
+  if (statusAtual === 'pago' || !accessTokenVendedor) return statusAtual;
+
+  try {
+    const pagamento = await buscarPagamento({ accessTokenVendedor, paymentId });
+    if (pagamento.status === 'approved') {
+      await supabase.from('agendamentos').update({ pagamento_status: 'pago' }).eq('id', agendamentoId);
+      return 'pago';
+    }
+  } catch (err) {
+    console.error('Erro ao reconfirmar pagamento Pix:', err);
+  }
+  return statusAtual;
+}
+
+router.get('/admin/mercadopago', async (req, res) => {
+  const empresa_id = req.empresaId;
+
+  const { data: empresa, error } = await supabase
+    .from('empresas')
+    .select('mercadopago_access_token')
+    .eq('id', empresa_id)
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: 'Erro ao buscar configuração do Mercado Pago.' });
+
+  const taxa = await obterTaxaMarketplace(empresa_id);
+  res.json({ configurado: estaConfigurado(), conectado: !!empresa?.mercadopago_access_token, taxa_marketplace_percentual: taxa });
+});
+
+// Devolve a URL de autorização pro frontend redirecionar o navegador — não dá pra redirecionar
+// direto daqui porque o JWT de admin vive no localStorage do frontend (Authorization header),
+// não em cookie, então uma navegação de página inteira não carrega esse header. O `state`
+// carrega o empresaId de forma assinada (mesmo segredo do login de admin) pra identificar quem
+// está conectando quando o Mercado Pago chamar o callback de volta.
+router.get('/admin/mercadopago/link-conectar', async (req, res) => {
+  if (!estaConfigurado()) {
+    return res.status(503).json({ error: 'Integração com Mercado Pago não está disponível no momento.' });
+  }
+
+  const state = jwt.sign({ empresaId: req.empresaId }, process.env.JWT_SECRET, { expiresIn: '10m' });
+  const url = montarUrlAutorizacao({ redirectUri: redirectUriCallback(), state });
+  res.json({ url });
+});
+
+router.post('/admin/mercadopago/desconectar', async (req, res) => {
+  const { error } = await supabase
+    .from('empresas')
+    .update({
+      mercadopago_access_token: null,
+      mercadopago_refresh_token: null,
+      mercadopago_user_id: null,
+      mercadopago_token_expira_em: null
+    })
+    .eq('id', req.empresaId);
+
+  // Não tenta revogar o token no Mercado Pago — só limpa do nosso lado, mesmo padrão de
+  // fallback já usado no DELETE /admin/whatsapp.
+  if (error) return res.status(500).json({ error: 'Erro ao desconectar do Mercado Pago.' });
+  res.json({ success: true });
+});
+
+// Gera a cobrança Pix pro atendimento em andamento no PDV. Usa a MESMA fórmula de valor final
+// da rota /admin/finalizar-servico-checkout (ver services/pagamentoAgendamento.js) — precisam
+// bater exatamente, senão o Pix cobra um valor e o fechamento de caixa registra outro.
+router.post('/admin/mercadopago/pix/:agendamentoId', validate(mercadoPagoPixSchema), async (req, res) => {
+  const { produtos_vendidos, servicos_adicionais } = req.body;
+  const empresa_id = req.empresaId;
+
+  const { data: empresa, error: empErr } = await supabase
+    .from('empresas')
+    .select('nome, mercadopago_access_token')
+    .eq('id', empresa_id)
+    .maybeSingle();
+  if (empErr) return res.status(500).json({ error: 'Erro ao buscar empresa.' });
+  if (!empresa?.mercadopago_access_token) {
+    return res.status(400).json({ error: 'Conecte sua conta Mercado Pago antes de gerar um Pix.' });
+  }
+
+  try {
+    const resultado = await calcularValorFinalCheckout({
+      agendamentoId: req.params.agendamentoId,
+      empresaId: empresa_id,
+      produtosVendidos: produtos_vendidos,
+      servicosAdicionais: servicos_adicionais
+    });
+    if (!resultado) return res.status(404).json({ error: 'Agendamento não encontrado.' });
+    if (!(resultado.valorFinal > 0)) {
+      return res.status(400).json({ error: 'Não há valor a cobrar para este atendimento.' });
+    }
+
+    const taxaPercentual = await obterTaxaMarketplace(empresa_id);
+    const cobranca = await criarPagamentoPix({
+      accessTokenVendedor: empresa.mercadopago_access_token,
+      valor: resultado.valorFinal,
+      descricao: `SchedNext — atendimento em ${empresa.nome}`,
+      externalReference: req.params.agendamentoId,
+      applicationFee: resultado.valorFinal * (taxaPercentual / 100)
+    });
+
+    await supabase
+      .from('agendamentos')
+      .update({ mercadopago_payment_id: String(cobranca.id), pagamento_status: 'pendente' })
+      .eq('id', req.params.agendamentoId)
+      .eq('empresa_id', empresa_id);
+
+    res.json({
+      payment_id: cobranca.id,
+      valor: resultado.valorFinal,
+      qr_code: cobranca.point_of_interaction?.transaction_data?.qr_code || null,
+      qr_code_base64: cobranca.point_of_interaction?.transaction_data?.qr_code_base64 || null
+    });
+  } catch (err) {
+    if (err.jaConcluido) return res.status(409).json({ error: err.message });
+    console.error('Erro ao gerar Pix:', err);
+    res.status(500).json({ error: err.message || 'Não foi possível gerar o Pix agora.' });
+  }
+});
+
+router.get('/admin/mercadopago/pix/:agendamentoId/status', async (req, res) => {
+  const { data: agendamento, error } = await supabase
+    .from('agendamentos')
+    .select('empresa_id, mercadopago_payment_id, pagamento_status')
+    .eq('id', req.params.agendamentoId)
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: 'Erro ao buscar agendamento.' });
+  if (!agendamento || agendamento.empresa_id !== req.empresaId) {
+    return res.status(404).json({ error: 'Agendamento não encontrado.' });
+  }
+  if (!agendamento.mercadopago_payment_id) return res.json({ pagamento_status: null });
+
+  const { data: empresa } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', req.empresaId).maybeSingle();
+  const status = await reconfirmarPagamento({
+    agendamentoId: req.params.agendamentoId,
+    accessTokenVendedor: empresa?.mercadopago_access_token,
+    paymentId: agendamento.mercadopago_payment_id,
+    statusAtual: agendamento.pagamento_status
+  });
+  res.json({ pagamento_status: status });
+});
+
+// Mesma checagem de status, só que pro CLIENTE que fez o agendamento (ver Agenda.js) — token
+// de cliente comum (verificarTokenCliente), não de admin, e a posse é confirmada por
+// usuario_id em vez de empresa_id.
+router.get('/pix/:agendamentoId/status', verificarTokenCliente, async (req, res) => {
+  const { data: agendamento, error } = await supabase
+    .from('agendamentos')
+    .select('usuario_id, empresa_id, mercadopago_payment_id, pagamento_status')
+    .eq('id', req.params.agendamentoId)
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: 'Erro ao buscar agendamento.' });
+  if (!agendamento || String(agendamento.usuario_id) !== req.usuarioId) {
+    return res.status(404).json({ error: 'Agendamento não encontrado.' });
+  }
+  if (!agendamento.mercadopago_payment_id) return res.json({ pagamento_status: null });
+
+  const { data: empresa } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', agendamento.empresa_id).maybeSingle();
+  const status = await reconfirmarPagamento({
+    agendamentoId: req.params.agendamentoId,
+    accessTokenVendedor: empresa?.mercadopago_access_token,
+    paymentId: agendamento.mercadopago_payment_id,
+    statusAtual: agendamento.pagamento_status
+  });
+  res.json({ pagamento_status: status });
+});
+
+// Rota pública (fora de /admin, então fora do gate de JWT — ver server.js): o Mercado Pago
+// redireciona o navegador do admin pra cá depois que ele autoriza a conexão.
+router.get('/mercadopago/oauth/callback', async (req, res) => {
+  const destino = `${process.env.FRONTEND_URL}/admin/mercadopago`;
+  const { code, state, error: erroMp } = req.query;
+
+  if (erroMp || !code || !state) {
+    return res.redirect(`${destino}?erro=${encodeURIComponent('Autorização cancelada ou incompleta.')}`);
+  }
+
+  let empresaId;
+  try {
+    ({ empresaId } = jwt.verify(state, process.env.JWT_SECRET));
+  } catch (e) {
+    return res.redirect(`${destino}?erro=${encodeURIComponent('Sessão de conexão expirada, tente novamente.')}`);
+  }
+
+  try {
+    const token = await trocarCodigoPorToken({ code, redirectUri: redirectUriCallback() });
+    const expiraEm = new Date(Date.now() + Number(token.expires_in) * 1000).toISOString();
+
+    await supabase
+      .from('empresas')
+      .update({
+        mercadopago_access_token: token.access_token,
+        mercadopago_refresh_token: token.refresh_token,
+        mercadopago_user_id: String(token.user_id),
+        mercadopago_token_expira_em: expiraEm
+      })
+      .eq('id', empresaId);
+
+    res.redirect(`${destino}?conectado=true`);
+  } catch (err) {
+    console.error('Erro ao trocar código do Mercado Pago por token:', err);
+    res.redirect(`${destino}?erro=${encodeURIComponent('Não foi possível concluir a conexão com o Mercado Pago.')}`);
+  }
+});
+
+// Webhook do Mercado Pago (notificação de pagamento). Assinatura validada via header
+// x-signature, formato documentado pelo Mercado Pago: "ts=<timestamp>,v1=<hash>", onde hash é
+// um HMAC-SHA256 de "id:<data.id>;request-id:<x-request-id>;ts:<ts>;" usando a Webhook Secret
+// Key configurada no painel de desenvolvedor (Aplicação → Webhooks). Sem
+// MERCADOPAGO_WEBHOOK_SECRET configurado, recusa toda chamada (fail-closed) — mesmo padrão já
+// usado no webhook do Asaas (ver routes/pagamentos.js).
+router.post('/webhooks/mercadopago', async (req, res) => {
+  const segredo = process.env.MERCADOPAGO_WEBHOOK_SECRET;
+  if (!segredo) {
+    console.error('MERCADOPAGO_WEBHOOK_SECRET não configurado, recusando webhook de pagamento.');
+    return res.status(503).json({ error: 'Webhook de pagamento não configurado.' });
+  }
+
+  const assinatura = String(req.headers['x-signature'] || '');
+  const requestId = String(req.headers['x-request-id'] || '');
+  const dataId = String(req.query['data.id'] || req.body?.data?.id || '').toLowerCase();
+
+  const partes = Object.fromEntries(
+    assinatura.split(',').map((p) => p.trim().split('=')).filter((p) => p.length === 2)
+  );
+  const { ts, v1 } = partes;
+
+  if (!ts || !v1 || !dataId) {
+    return res.status(400).json({ error: 'Payload de webhook inválido.' });
+  }
+
+  const manifesto = `id:${dataId};request-id:${requestId};ts:${ts};`;
+  const hashEsperado = crypto.createHmac('sha256', segredo).update(manifesto).digest('hex');
+
+  const bufEsperado = Buffer.from(hashEsperado);
+  const bufRecebido = Buffer.from(v1);
+  const valido = bufEsperado.length === bufRecebido.length && crypto.timingSafeEqual(bufEsperado, bufRecebido);
+
+  if (!valido) return res.status(401).json({ error: 'Assinatura inválida.' });
+
+  if (req.body?.type && req.body.type !== 'payment') {
+    return res.json({ recebido: true, ignorado: true });
+  }
+
+  const { data: agendamento } = await supabase
+    .from('agendamentos')
+    .select('id, empresa_id')
+    .eq('mercadopago_payment_id', dataId)
+    .maybeSingle();
+
+  if (!agendamento) return res.json({ recebido: true, agendamentoNaoEncontrado: true });
+
+  const { data: empresa } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', agendamento.empresa_id).maybeSingle();
+
+  // Nunca confia no payload do webhook por si só — reconfirmarPagamento rebusca o pagamento de
+  // verdade antes de marcar como pago (mesmo princípio do webhook do Asaas).
+  await reconfirmarPagamento({
+    agendamentoId: agendamento.id,
+    accessTokenVendedor: empresa?.mercadopago_access_token,
+    paymentId: dataId,
+    statusAtual: null
+  });
+
+  res.json({ recebido: true });
+});
+
+module.exports = router;

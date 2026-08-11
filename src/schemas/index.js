@@ -331,6 +331,13 @@ const taxasPagamentoSchema = z.object({
   })
 });
 
+// --- mercadopago.js ---
+
+const mercadoPagoPixSchema = z.object({
+  produtos_vendidos: z.array(z.object({ id: idLike, quantidade: z.coerce.number().int().positive().optional() })).optional(),
+  servicos_adicionais: z.array(z.object({ id: idLike })).optional()
+});
+
 // --- dominioCustomizado.js ---
 
 const dominioCustomizadoSchema = z.object({
@@ -386,7 +393,10 @@ const planoPlataformaSchema = z.object({
   permite_multi_unidade: z.boolean().optional().default(false),
   permite_api_publica: z.boolean().optional().default(false),
   permite_relatorios_avancados: z.boolean().optional().default(false),
-  permite_dominio_customizado: z.boolean().optional().default(false)
+  permite_dominio_customizado: z.boolean().optional().default(false),
+  // Fatia (application_fee) que a SchedNext fica de cada Pix cobrado via Mercado Pago nesse
+  // plano — ver utils/limitesPlano.js (obterTaxaMarketplace) e routes/mercadopago.js.
+  taxa_marketplace_percentual: z.coerce.number().min(0, 'Taxa não pode ser negativa').max(100, 'Taxa não pode passar de 100%').optional().default(0)
 });
 
 module.exports = {
@@ -434,6 +444,7 @@ module.exports = {
   iniciarUpgradeSchema,
   apiKeyCriarSchema,
   taxasPagamentoSchema,
+  mercadoPagoPixSchema,
   dominioCustomizadoSchema,
   contatoEnterpriseSchema,
   superAdminLoginSchema,

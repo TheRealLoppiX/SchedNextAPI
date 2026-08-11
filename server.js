@@ -9,6 +9,7 @@ const verificarTokenSuperAdmin = require('./src/middleware/superAdminAuth');
 const iniciarLembretes = require('./src/cron/lembretes');
 const iniciarProcessamentoCancelamentos = require('./src/cron/assinaturas');
 const iniciarRecuperacaoClientes = require('./src/cron/recuperacaoClientes');
+const iniciarRenovacaoTokenMercadoPago = require('./src/cron/mercadoPago');
 
 const app = express();
 
@@ -80,10 +81,12 @@ app.use(require('./src/routes/clientes'));
 app.use(require('./src/routes/relatorios'));
 app.use(require('./src/routes/dominioCustomizado'));
 app.use(require('./src/routes/financeiro'));
+app.use(require('./src/routes/mercadopago'));
 
 iniciarLembretes();
 iniciarProcessamentoCancelamentos();
 iniciarRecuperacaoClientes();
+iniciarRenovacaoTokenMercadoPago();
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Servidor rodando em http://localhost:${PORT}`));

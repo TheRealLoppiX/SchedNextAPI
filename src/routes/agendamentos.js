@@ -18,16 +18,15 @@ const {
 const {
   limiteAgendamentosMesAtingido,
   confirmarLimiteAgendamentosOuDesfazer,
-  permiteWhatsappBot
+  permiteWhatsappBot,
+  obterTaxaMarketplace
 } = require('../utils/limitesPlano');
 const { calcularValorComDescontoAssinante } = require('../utils/valorAssinante');
-const {
-  calcularInicioCiclo,
-  obterUsoServicos,
-  calcularValorComLimiteAssinante
-} = require('../utils/limitesAssinatura');
+const { calcularInicioCiclo, obterUsoServicos } = require('../utils/limitesAssinatura');
 const { verificarEDispararPremioFidelidade } = require('../services/fidelidade');
 const { enviarMensagem } = require('../services/whatsapp/provider');
+const { calcularValorFinalCheckout } = require('../services/pagamentoAgendamento');
+const { criarPagamentoPix } = require('../services/mercadopago');
 
 const MENSAGEM_LIMITE_AGENDAMENTOS = 'Este estabelecimento atingiu o limite de agendamentos do mês. Peça para o administrador fazer upgrade de plano.';
 
@@ -59,7 +58,7 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
 
   const { data: emp, error: empErr } = await supabase
     .from('empresas')
-    .select('id, nome, whatsapp_phone_number_id')
+    .select('id, nome, whatsapp_phone_number_id, mercadopago_access_token')
     .eq('slug', empresa_slug)
     .maybeSingle();
 
@@ -109,6 +108,38 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
   const { error: vincErr } = await supabase.from('agendamento_servicos').insert(vinculos);
   if (vincErr) return res.status(500).json({ error: 'Erro ao vincular serviços' });
 
+  // Pagamento antecipado por Pix: só entra em jogo se a empresa já conectou a própria conta
+  // Mercado Pago (ver routes/mercadopago.js). Sem isso, o agendamento segue exatamente como
+  // sempre funcionou — pix é um extra opcional, nunca um bloqueio pra criar o agendamento.
+  let pix = null;
+  if (emp.mercadopago_access_token && valorTotal > 0) {
+    try {
+      const taxaPercentual = await obterTaxaMarketplace(emp.id);
+      const cobranca = await criarPagamentoPix({
+        accessTokenVendedor: emp.mercadopago_access_token,
+        valor: valorTotal,
+        descricao: `SchedNext — agendamento em ${emp.nome}`,
+        externalReference: novoAgendamento.id,
+        applicationFee: valorTotal * (taxaPercentual / 100)
+      });
+
+      await supabase
+        .from('agendamentos')
+        .update({ mercadopago_payment_id: String(cobranca.id), pagamento_status: 'pendente' })
+        .eq('id', novoAgendamento.id);
+
+      pix = {
+        payment_id: cobranca.id,
+        qr_code: cobranca.point_of_interaction?.transaction_data?.qr_code || null,
+        qr_code_base64: cobranca.point_of_interaction?.transaction_data?.qr_code_base64 || null
+      };
+    } catch (pixErr) {
+      console.error('Erro ao gerar Pix do agendamento:', pixErr);
+      // Não falha o agendamento por causa disso — cliente paga por outro meio na hora do
+      // atendimento, igual sempre funcionou antes desta feature existir.
+    }
+  }
+
   const { data: usuario } = await supabase.from('usuarios').select('email, nome_completo, telefone').eq('id', usuario_id).maybeSingle();
   if (usuario) {
     const dataFormatada = new Date(data_hora).toLocaleString('pt-BR');
@@ -133,7 +164,7 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
     }
   }
 
-  res.json({ message: 'Agendamento criado!' });
+  res.json({ message: 'Agendamento criado!', agendamento_id: novoAgendamento.id, pix });
 });
 
 // Rota para buscar estatísticas do Dashboard Admin
@@ -455,88 +486,22 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
   }
 
   try {
-    // 1. Busca o valor base e a empresa já salvos no agendamento
-    const { data: agAtual, error: agErr } = await supabase
-      .from('agendamentos')
-      .select('valor_total, empresa_id, usuario_id, status')
-      .eq('id', agendamento_id)
-      .maybeSingle();
-    if (agErr) throw agErr;
-    if (!agAtual || agAtual.empresa_id !== req.empresaId) {
-      return res.status(404).json({ error: 'Agendamento não encontrado.' });
-    }
-    // Sem essa checagem, reenviar o checkout (duplo clique, retry de rede) descontaria a cota
-    // de assinatura do cliente duas vezes pro mesmo atendimento.
-    if (agAtual.status === 'concluido') {
-      return res.status(409).json({ error: 'Este atendimento já foi finalizado.' });
-    }
-
-    // Recalcula o valor base a partir dos serviços de fato vinculados ao agendamento e do
-    // status de assinatura ATUAL do cliente, em vez de confiar cegamente no valor_total gravado
-    // na criação (que já podia ter sido calculado sem considerar desconto de assinatura, ou
-    // ficar desatualizado se o cliente virou assinante — ou deixou de ser — depois de agendar).
-    // Ver bug documentado: estava cobrando o valor cheio de serviços já inclusos no plano.
-    //
-    // calcularValorComLimiteAssinante (em vez de calcularValorComDescontoAssinante) também
-    // respeita o limite mensal por serviço do plano e debita a cota do ciclo atual do cliente
-    // (registrarConsumo: true) — este é o único ponto que efetivamente fecha a conta, então é o
-    // único lugar que deve consumir cota de verdade.
-    const { data: servicosVinculados } = await supabase
-      .from('agendamento_servicos')
-      .select('servico_id, servicos(id, valor)')
-      .eq('agendamento_id', agendamento_id);
-
-    let valorBase;
-    let servicosCobertos = [];
-    let servicosCobrados = [];
-    if (servicosVinculados && servicosVinculados.length > 0) {
-      const servicosParaCalculo = servicosVinculados
-        .filter((v) => v.servicos)
-        .map((v) => ({ id: v.servico_id, valor: v.servicos.valor }));
-      ({ valorBase, servicosCobertos, servicosCobrados } = await calcularValorComLimiteAssinante(
-        agAtual.usuario_id,
-        servicosParaCalculo,
-        { registrarConsumo: true }
-      ));
-    } else {
-      // Agendamentos sem serviço vinculado (ex: encaixe legado que só grava valor_total direto)
-      // caem no valor gravado, não tem como recalcular sem saber quais serviços foram feitos.
-      valorBase = parseFloat(agAtual?.valor_total || 0);
-    }
-
-    // 2. Soma os serviços adicionais escolhidos no PDV. O preço vem do banco (tabela
-    // `servicos`), nunca do valor que o cliente/admin mandou no body: senão uma requisição
-    // forjada podia fechar a conta por qualquer valor, incluindo 0.
-    const idsServicosAdicionais = (servicos_adicionais || []).map((s) => s.id).filter(Boolean);
-    let precoPorServico = {};
-    if (idsServicosAdicionais.length > 0) {
-      const { data: servicosReais } = await supabase
-        .from('servicos')
-        .select('id, valor')
-        .in('id', idsServicosAdicionais)
-        .eq('empresa_id', agAtual.empresa_id);
-      precoPorServico = Object.fromEntries((servicosReais || []).map((s) => [s.id, Number(s.valor) || 0]));
-    }
-    const valorAdicionais = (servicos_adicionais || []).reduce((acc, s) => acc + (precoPorServico[s.id] || 0), 0);
-
-    // 3. Soma os produtos vendidos. Mesmo raciocínio: preço vem do banco (`produtos`), não
-    // do body. Só a quantidade é informação legítima do PDV.
-    let valorProdutos = 0;
-    if (produtos_vendidos && produtos_vendidos.length > 0) {
-      const idsProdutos = produtos_vendidos.map((p) => p.id).filter(Boolean);
-      const { data: produtosReais } = await supabase
-        .from('produtos')
-        .select('id, valor')
-        .in('id', idsProdutos)
-        .eq('empresa_id', agAtual.empresa_id);
-      const precoPorProduto = Object.fromEntries((produtosReais || []).map((p) => [p.id, Number(p.valor) || 0]));
-      valorProdutos = produtos_vendidos.reduce((acc, p) => {
-        const qtd = parseInt(p.quantidade || 1, 10);
-        return acc + (precoPorProduto[p.id] || 0) * qtd;
-      }, 0);
-    }
-
-    const valorFinal = valorBase + valorAdicionais + valorProdutos;
+    // Cálculo do valor final (base com desconto/limite de assinante + adicionais + produtos) é
+    // compartilhado com POST /admin/mercadopago/pix/:agendamentoId — ver
+    // services/pagamentoAgendamento.js. registrarConsumo:true só aqui, que é o único ponto que
+    // efetivamente fecha a conta — gerar um Pix de prévia no PDV não deve debitar a cota de
+    // assinatura antes do atendimento ser confirmado de verdade (ver calcularValorComLimiteAssinante
+    // em utils/limitesAssinatura.js). A checagem de "já concluído" (evita descontar a cota duas
+    // vezes num duplo clique/retry) mora dentro do helper e chega aqui como erro com `jaConcluido`.
+    const resultado = await calcularValorFinalCheckout({
+      agendamentoId: agendamento_id,
+      empresaId: req.empresaId,
+      produtosVendidos: produtos_vendidos,
+      servicosAdicionais: servicos_adicionais,
+      registrarConsumo: true
+    });
+    if (!resultado) return res.status(404).json({ error: 'Agendamento não encontrado.' });
+    const { agendamento: agAtual, valorFinal, servicosCobertos, servicosCobrados } = resultado;
 
     // 4. Atualiza o agendamento para concluído com o valor total final. forma_pagamento é só
     // registro informativo (dinheiro/crédito/débito/pix) pro relatório de faturamento — não gera
@@ -593,6 +558,7 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
     // fechamento de caixa se o e-mail/WhatsApp falhar por qualquer motivo.
     verificarEDispararPremioFidelidade(agAtual.usuario_id, req.empresaId);
   } catch (err) {
+    if (err.jaConcluido) return res.status(409).json({ error: err.message });
     console.error('Erro no checkout:', err);
     res.status(500).json({ error: err.message || 'Erro ao processar o fechamento do caixa.' });
   }
