@@ -27,8 +27,13 @@ function estaConfigurado() {
   return Boolean(process.env.MERCADOPAGO_CLIENT_ID && process.env.MERCADOPAGO_CLIENT_SECRET);
 }
 
-function redirectUriCallback() {
-  return `${process.env.BACKEND_URL}/mercadopago/oauth/callback`;
+// BACKEND_URL é a fonte preferida (mesma variável usada pro webhook do WhatsApp), mas cai pro
+// host de quem chamou a rota se ela vier vazia por qualquer motivo — sem isso, a URL de
+// redirect virava literalmente "undefined/mercadopago/oauth/callback" e o Mercado Pago recusava
+// a autorização com um erro genérico, sem citar a causa.
+function redirectUriCallback(req) {
+  const base = process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`;
+  return `${base}/mercadopago/oauth/callback`;
 }
 
 // Reconfirma um Pix pendente direto na API do Mercado Pago (nunca confia em status já gravado
@@ -76,7 +81,7 @@ router.get('/admin/mercadopago/link-conectar', async (req, res) => {
   }
 
   const state = jwt.sign({ empresaId: req.empresaId }, process.env.JWT_SECRET, { expiresIn: '10m' });
-  const url = montarUrlAutorizacao({ redirectUri: redirectUriCallback(), state });
+  const url = montarUrlAutorizacao({ redirectUri: redirectUriCallback(req), state });
   res.json({ url });
 });
 
@@ -221,7 +226,7 @@ router.get('/mercadopago/oauth/callback', async (req, res) => {
   }
 
   try {
-    const token = await trocarCodigoPorToken({ code, redirectUri: redirectUriCallback() });
+    const token = await trocarCodigoPorToken({ code, redirectUri: redirectUriCallback(req) });
     const expiraEm = new Date(Date.now() + Number(token.expires_in) * 1000).toISOString();
 
     await supabase
