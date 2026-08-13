@@ -66,7 +66,8 @@ const confirmarCodigoSchema = z.object({
 });
 
 const recuperarSenhaSchema = z.object({
-  email: z.string().trim().toLowerCase().email('E-mail inválido')
+  email: z.string().trim().toLowerCase().email('E-mail inválido'),
+  empresaSlug: z.string().trim().min(1, 'Empresa não informada')
 });
 
 const resetarSenhaSchema = z.object({

@@ -161,11 +161,14 @@ router.post('/admin/clientes/rapido', validate(clienteRapidoSchema), async (req,
     const valNasc = nasc && nasc.trim() !== '' ? nasc : null;
     const emailLimpo = email.trim().toLowerCase();
 
-    // Verifica duplicata por email apenas (telefone pode ter formatos diferentes no banco)
+    // Verifica duplicata por email dentro desta empresa (telefone pode ter formatos
+    // diferentes no banco). O mesmo e-mail pode já ser cliente de outra empresa — isso é
+    // esperado, não bloqueia (ver sql/2026_email_multi_empresa.sql).
     const { data: jaExistePorEmail } = await supabase
       .from('usuarios')
       .select('id')
       .eq('email', emailLimpo)
+      .eq('empresa_id', empresa_id)
       .maybeSingle();
 
     if (jaExistePorEmail) {

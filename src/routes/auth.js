@@ -35,7 +35,15 @@ router.post('/registrar', cadastroClienteLimiter, validate(registrarSchema), asy
 
   if (empErr || !empresa) return res.status(404).json({ error: 'Empresa não encontrada' });
 
-  const { data: usuarioExistente } = await supabase.from('usuarios').select('id').eq('email', email).maybeSingle();
+  // Escopado por empresa: o mesmo e-mail pode ser cliente de várias empresas, cada uma com
+  // sua própria linha em `usuarios` (própria senha, perfil e assinatura) — só bloqueia se já
+  // for cliente DESTA empresa (ver sql/2026_email_multi_empresa.sql).
+  const { data: usuarioExistente } = await supabase
+    .from('usuarios')
+    .select('id')
+    .eq('email', email)
+    .eq('empresa_id', empresa.id)
+    .maybeSingle();
   if (usuarioExistente) return res.status(400).json({ error: 'Este e-mail já está cadastrado.' });
 
   const senhaHash = await bcrypt.hash(senha, 12);
@@ -47,6 +55,7 @@ router.post('/registrar', cadastroClienteLimiter, validate(registrarSchema), asy
   const { error } = await criarPendente({
     tipo: 'cliente',
     email,
+    empresa_id: empresa.id,
     codigo: codigoVerificacao,
     dados: { nome, nascimento, telefone, senha: senhaHash, empresa_id: empresa.id }
   });
@@ -150,13 +159,26 @@ router.post('/confirmar-codigo', codigoLimiter, validate(confirmarCodigoSchema),
 });
 
 router.post('/recuperar-senha', codigoLimiter, validate(recuperarSenhaSchema), async (req, res) => {
-  const { email } = req.body;
+  const { email, empresaSlug } = req.body;
   const codigo = Math.floor(100000 + Math.random() * 900000).toString();
 
+  const { data: empresa, error: empErr } = await supabase
+    .from('empresas')
+    .select('id')
+    .eq('slug', empresaSlug)
+    .maybeSingle();
+
+  if (empErr || !empresa) return res.status(404).json({ error: 'Empresa não encontrada' });
+
+  // Escopado por empresa: o mesmo e-mail pode ter uma linha em cada empresa da qual é
+  // cliente, cada uma com sua própria senha — sem isso, o código de recuperação era setado
+  // em TODAS as linhas daquele e-mail de uma vez, ambíguo sobre qual senha o próximo passo
+  // (/resetar-senha) realmente troca.
   const { data, error } = await supabase
     .from('usuarios')
     .update({ codigo_verificacao: codigo })
     .eq('email', email)
+    .eq('empresa_id', empresa.id)
     .select('id');
 
   if (error || !data || data.length === 0) return res.status(404).json({ error: 'E-mail não encontrado.' });
