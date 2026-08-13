@@ -24,6 +24,13 @@ const loginSchema = z.object({
   senha: z.string().min(1, 'Senha é obrigatória')
 });
 
+// Login de cliente é escopado por empresa (o slug vem da URL/subdomínio do tenant) — sem isso,
+// e-mail/senha válidos em qualquer empresa autenticavam em qualquer outra, inclusive slugs
+// inexistentes (ver POST /login em routes/auth.js).
+const loginClienteSchema = loginSchema.extend({
+  empresaSlug: z.string().trim().min(1, 'Empresa não informada')
+});
+
 const agendarSchema = z.object({
   usuario_id: idLike,
   barbeiro_id: idLike,
@@ -403,6 +410,7 @@ const planoPlataformaSchema = z.object({
 module.exports = {
   registrarSchema,
   loginSchema,
+  loginClienteSchema,
   agendarSchema,
   clienteRapidoSchema,
   registrarEmpresaSchema,

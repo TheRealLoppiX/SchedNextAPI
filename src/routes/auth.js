@@ -9,6 +9,7 @@ const { loginLimiter, codigoLimiter, cadastroClienteLimiter } = require('../midd
 const {
   registrarSchema,
   loginSchema,
+  loginClienteSchema,
   confirmarCodigoSchema,
   recuperarSenhaSchema,
   resetarSenhaSchema,
@@ -73,13 +74,24 @@ router.post('/registrar', cadastroClienteLimiter, validate(registrarSchema), asy
   res.status(201).json({ message: 'Enviamos um código de confirmação pro seu e-mail.' });
 });
 
-router.post('/login', loginLimiter, validate(loginSchema), async (req, res) => {
-  const { email, senha } = req.body;
+router.post('/login', loginLimiter, validate(loginClienteSchema), async (req, res) => {
+  const { email, senha, empresaSlug } = req.body;
 
+  const { data: empresa, error: empErr } = await supabase
+    .from('empresas')
+    .select('id')
+    .eq('slug', empresaSlug)
+    .maybeSingle();
+
+  if (empErr || !empresa) return res.status(404).json({ message: 'Empresa não encontrada' });
+
+  // Escopado por empresa_id: um e-mail/senha válido em OUTRA empresa não pode logar aqui,
+  // mesmo que a senha bata (ver comentário no schema).
   const { data: usuario, error } = await supabase
     .from('usuarios')
     .select('id, nome_completo, senha, ativo')
     .eq('email', email)
+    .eq('empresa_id', empresa.id)
     .maybeSingle();
 
   if (error || !usuario) return res.status(401).json({ message: 'E-mail não encontrado' });
