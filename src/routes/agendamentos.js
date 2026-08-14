@@ -13,7 +13,8 @@ const {
   confirmarAgendamentoSchema,
   cancelarAgendamentoSchema,
   finalizarCheckoutSchema,
-  agendarEncaixeSchema
+  agendarEncaixeSchema,
+  reagendarAgendamentoSchema
 } = require('../schemas');
 const {
   limiteAgendamentosMesAtingido,
@@ -619,6 +620,41 @@ router.get('/admin/agendamentos/:empresaId', async (req, res) => {
   });
 
   res.json(formatado);
+});
+
+// Move um agendamento existente pra outro horário/profissional (drag-and-drop na Agenda da
+// Equipe do dashboard, ver AdminDashboard.js). Mantém a mesma data — a grade só mostra um dia
+// por vez, então "arrastar pra outro dia" não é uma interação possível na UI atual.
+router.post('/admin/reagendar-agendamento', validate(reagendarAgendamentoSchema), async (req, res) => {
+  const { agendamento_id, barbeiro_id, data_hora } = req.body;
+  const empresa_id = req.empresaId;
+
+  if (new Date(data_hora) < new Date()) {
+    return res.status(400).json({ error: 'Não é possível mover o agendamento para um horário que já passou.' });
+  }
+
+  const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id, unidade_id').eq('id', barbeiro_id).maybeSingle();
+  if (!barbeiro || barbeiro.empresa_id !== empresa_id) return res.status(404).json({ error: 'Profissional não encontrado.' });
+  if (req.unidadeId && barbeiro.unidade_id !== req.unidadeId) return res.status(404).json({ error: 'Profissional não encontrado.' });
+
+  // Só move agendamentos ativos (cancelado/concluído ficam fixos no horário original, que é
+  // um registro histórico).
+  let query = supabase
+    .from('agendamentos')
+    .update({ barbeiro_id, data_hora })
+    .eq('id', agendamento_id)
+    .eq('empresa_id', empresa_id)
+    .in('status', ['pendente', 'confirmado']);
+  if (req.unidadeId) query = query.eq('unidade_id', req.unidadeId);
+  const { data, error } = await query.select('id');
+
+  if (error) {
+    console.error('Erro ao reagendar:', error);
+    return res.status(500).json({ error: 'Erro ao mover o agendamento.' });
+  }
+  if (!data || data.length === 0) return res.status(404).json({ error: 'Agendamento não encontrado ou não pode ser movido.' });
+
+  res.json({ success: true });
 });
 
 router.post('/admin/agendar-encaixe', validate(agendarEncaixeSchema), async (req, res) => {

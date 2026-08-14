@@ -283,6 +283,12 @@ const agendarEncaixeSchema = z.object({
   cliente_nome: textoOpcionalNullable
 });
 
+const reagendarAgendamentoSchema = z.object({
+  agendamento_id: idLike,
+  barbeiro_id: idLike,
+  data_hora: z.string().min(1)
+});
+
 // --- fidelidade.js ---
 
 const acaoFidelidadeSchema = z.object({
@@ -448,6 +454,7 @@ module.exports = {
   cancelarAgendamentoSchema,
   finalizarCheckoutSchema,
   agendarEncaixeSchema,
+  reagendarAgendamentoSchema,
   acaoFidelidadeSchema,
   acaoStatusSchema,
   assinaturaPlanoSchema,
