@@ -460,7 +460,13 @@ router.post('/webhooks/mercadopago', async (req, res) => {
           accessToken: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
           id: dataId
         });
-        if (pagamentoAutorizado?.preapproval_id) {
+        // 'processed' é o único status de authorized_payment que significa "essa cobrança
+        // do ciclo foi debitada de verdade". O preapproval associado continua 'authorized'
+        // mesmo quando essa cobrança específica falha e o Mercado Pago fica retentando
+        // (ver status 'scheduled'/'pending'/'recycled'/'cancelled'/'rejected') — chamar
+        // processarNotificacaoAssinatura só com base no preapproval.status confirmava
+        // assinaturas cuja cobrança do mês nunca foi paga.
+        if (pagamentoAutorizado?.preapproval_id && pagamentoAutorizado.status === 'processed') {
           await processarNotificacaoAssinatura(pagamentoAutorizado.preapproval_id);
         }
       } catch (err) {

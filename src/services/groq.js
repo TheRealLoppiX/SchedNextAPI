@@ -3,7 +3,9 @@
 // Usa fetch puro (já disponível nativamente no Node) em vez de instalar o SDK da Groq,
 // mesmo padrão dos outros adapters do projeto (pagamento.js, whatsapp/provider.js).
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const MODELO_PADRAO = 'llama-3.3-70b-versatile';
+// Llama 3.3 70B Versatile foi descontinuado pela Groq em 16/08/2026 — Qwen3.6 27B é o
+// substituto recomendado por eles pra workloads de produção.
+const MODELO_PADRAO = 'qwen/qwen3.6-27b';
 
 function estaConfigurado() {
   return Boolean(process.env.GROQ_API_KEY);
