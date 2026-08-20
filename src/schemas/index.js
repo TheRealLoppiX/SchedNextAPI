@@ -395,6 +395,20 @@ const leadStatusSchema = z.object({
   status: z.enum(['novo', 'contatado', 'fechado'])
 });
 
+// --- chavesAtivacao.js ---
+
+const chaveAtivacaoCriarSchema = z.object({
+  plano_plataforma_id: idLike,
+  duracao_dias: z.coerce.number().int().positive('Duração precisa ser maior que zero').max(3650, 'Duração máxima de 10 anos'),
+  quantidade: z.coerce.number().int().positive().max(50, 'No máximo 50 chaves por vez').optional().default(1),
+  observacao: textoOpcionalNullable,
+  prazo_resgate_dias: z.coerce.number().int().positive().max(3650).optional().nullable()
+});
+
+const chaveAtivacaoResgatarSchema = z.object({
+  codigo: z.string().trim().min(4, 'Informe o código da chave').max(40)
+});
+
 const planoPlataformaSchema = z.object({
   nome: z.string().trim().min(1, 'Nome do plano é obrigatório').max(100),
   preco_mensal: z.coerce.number().min(0).nullable(),
@@ -468,5 +482,7 @@ module.exports = {
   superAdminLoginSchema,
   superAdminCriarSchema,
   leadStatusSchema,
-  planoPlataformaSchema
+  planoPlataformaSchema,
+  chaveAtivacaoCriarSchema,
+  chaveAtivacaoResgatarSchema
 };

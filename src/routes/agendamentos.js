@@ -65,14 +65,28 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
 
   if (empErr || !emp) return res.status(404).json({ error: 'Empresa não encontrada' });
 
+  // Confere que o profissional escolhido é mesmo desta empresa — sem isso, um chamador podia
+  // marcar um agendamento (com empresa_id = emp.id) apontando pra um barbeiro de OUTRA empresa,
+  // ocupando a agenda dele indevidamente e misturando dado entre tenants.
+  const { data: barbeiroAgendar } = await supabase.from('barbeiros').select('empresa_id').eq('id', barbeiro_id).maybeSingle();
+  if (!barbeiroAgendar || barbeiroAgendar.empresa_id !== emp.id) {
+    return res.status(404).json({ error: 'Profissional não encontrado.' });
+  }
+
   if (await limiteAgendamentosMesAtingido(emp.id)) {
     return res.status(403).json({ error: MENSAGEM_LIMITE_AGENDAMENTOS });
   }
 
   const ids = servicos.map((s) => s.id);
-  const { data: servicosInfo, error: servErr } = await supabase.from('servicos').select('id, duracao, valor').in('id', ids);
+  // Escopado por empresa: sem isso, um chamador podia passar o ID de um serviço de OUTRA
+  // empresa (mais barato, ou de duração diferente) e o valor/duração cobrados vinham de lá.
+  const { data: servicosInfo, error: servErr } = await supabase
+    .from('servicos')
+    .select('id, duracao, valor')
+    .eq('empresa_id', emp.id)
+    .in('id', ids);
 
-  if (servErr || !servicosInfo || servicosInfo.length === 0) {
+  if (servErr || !servicosInfo || servicosInfo.length !== ids.length) {
     return res.status(400).json({ error: 'Serviços inválidos' });
   }
 
@@ -235,7 +249,11 @@ router.post('/admin/encaixe', validate(encaixeSchema), async (req, res) => {
     return res.status(403).json({ error: MENSAGEM_LIMITE_AGENDAMENTOS });
   }
 
-  const { data: servicosInfo, error: servErr } = await supabase.from('servicos').select('duracao, valor').in('id', servicos_ids);
+  const { data: servicosInfo, error: servErr } = await supabase
+    .from('servicos')
+    .select('duracao, valor')
+    .eq('empresa_id', empresa_id)
+    .in('id', servicos_ids);
   if (servErr) {
     console.error('Erro ao somar serviços:', servErr);
     return res.status(500).json({ error: 'Erro ao processar valores dos serviços.' });

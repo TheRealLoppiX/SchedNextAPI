@@ -2,6 +2,7 @@ const supabase = require('../../config/supabase');
 const { enviarMensagem } = require('./provider');
 const { limiteAgendamentosMesAtingido } = require('../../utils/limitesPlano');
 const { variantesTelefoneBR } = require('../../utils/telefone');
+const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
 
 // Encontra o cliente cadastrado dono deste número, tolerando os formatos diferentes em que
 // `usuarios.telefone` pode estar salvo (com máscara, sem DDI, com/sem o 9º dígito; ver
@@ -81,13 +82,21 @@ async function listarServicosAtivos(empresaId) {
   return data || [];
 }
 
+// hoje.toISOString() usaria o dia em UTC, não em Brasília: alguém digitando "hoje" entre ~21h e
+// meia-noite (horário de Brasília) cairia no dia seguinte, já virado em UTC. paraConvencaoDoBanco
+// desloca pro mesmo "horário de parede" que o resto do projeto usa pra ler data local (ver
+// utils/horarioBrasilia.js).
+function dataLocalISO(instanteReal) {
+  const d = paraConvencaoDoBanco(instanteReal);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
 function parseDataFalada(texto) {
   const hoje = new Date();
   const t = texto.trim().toLowerCase();
-  if (t === 'hoje') return hoje.toISOString().slice(0, 10);
+  if (t === 'hoje') return dataLocalISO(hoje);
   if (t === 'amanha' || t === 'amanhã') {
-    const amanha = new Date(hoje.getTime() + 24 * 60 * 60 * 1000);
-    return amanha.toISOString().slice(0, 10);
+    return dataLocalISO(new Date(hoje.getTime() + 24 * 60 * 60 * 1000));
   }
   const m = t.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
   if (m) {
@@ -99,7 +108,15 @@ function parseDataFalada(texto) {
   return null;
 }
 
-async function horariosDisponiveis(barbeiroId, dataStr) {
+// Mesma lógica de janela de funcionamento usada em routes/apiPublica.js (GET /disponibilidade) —
+// sem isso, o bot oferecia horário das 8h às 20h todo santo dia, mesmo em dias marcados como
+// fechados ou fora do horário de funcionamento configurado pela empresa.
+async function horariosDisponiveis(empresaId, barbeiroId, dataStr) {
+  const { data: empresa } = await supabase.from('empresas').select('horarios_funcionamento').eq('id', empresaId).maybeSingle();
+  const diaSemana = new Date(`${dataStr}T00:00:00Z`).getUTCDay();
+  const horarioDia = JSON.parse(empresa?.horarios_funcionamento || '{}')[diaSemana];
+  if (!horarioDia || !horarioDia.aberto) return [];
+
   const { data: ocupados } = await supabase
     .from('agendamentos')
     .select('data_hora')
@@ -110,12 +127,12 @@ async function horariosDisponiveis(barbeiroId, dataStr) {
 
   const horasOcupadas = new Set((ocupados || []).map((a) => new Date(a.data_hora).toISOString().slice(11, 16)));
 
+  const [horaAbre, minAbre] = horarioDia.abre.split(':').map(Number);
+  const [horaFecha, minFecha] = horarioDia.fecha.split(':').map(Number);
   const slots = [];
-  for (let h = 8; h < 20; h++) {
-    for (const min of [0, 30]) {
-      const hStr = `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
-      if (!horasOcupadas.has(hStr)) slots.push(hStr);
-    }
+  for (let min = horaAbre * 60 + minAbre; min < horaFecha * 60 + minFecha; min += 30) {
+    const hStr = `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+    if (!horasOcupadas.has(hStr)) slots.push(hStr);
   }
   return slots;
 }
@@ -165,7 +182,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   if (sessao.estado_atual === 'aguardando_data') {
     const dataEscolhida = parseDataFalada(msg);
     if (!dataEscolhida) return responder('Não entendi a data. Responda *hoje*, *amanha* ou dd/mm.', 'aguardando_data');
-    const slots = await horariosDisponiveis(dados.barbeiro_id, dataEscolhida);
+    const slots = await horariosDisponiveis(empresaId, dados.barbeiro_id, dataEscolhida);
     if (slots.length === 0) return responder('Não há horários livres nesse dia. Tente outra data.', 'aguardando_data', dados);
     const lista = slots.map((h, i) => `${i + 1}. ${h}`).join('\n');
     return responder(`Horários livres:\n${lista}`, 'aguardando_horario', { ...dados, data: dataEscolhida, slots });
@@ -207,6 +224,24 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
 
 async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados, nomeCliente }) {
   const dataHora = `${dados.data}T${dados.hora}:00`;
+
+  // Reduz a corrida entre listar horários livres (horariosDisponiveis, alguns passos atrás na
+  // conversa) e confirmar de fato: sem reconferir aqui, duas conversas simultâneas escolhendo o
+  // mesmo profissional+horário nessa janela resultavam em dois agendamentos confirmados pro
+  // mesmo slot (não há UNIQUE(barbeiro_id, data_hora) no banco).
+  const { data: conflito } = await supabase
+    .from('agendamentos')
+    .select('id')
+    .eq('barbeiro_id', dados.barbeiro_id)
+    .eq('data_hora', dataHora)
+    .neq('status', 'cancelado')
+    .maybeSingle();
+
+  if (conflito) {
+    await enviarMensagem(instancia, telefone, 'Esse horário acabou de ser reservado por outra pessoa. Digite *MENU* para tentar outro horário.');
+    await salvarSessao(sessao, 'inicio', {});
+    return;
+  }
 
   const { error } = await supabase.from('agendamentos').insert({
     usuario_id: dados.usuario_id || null,

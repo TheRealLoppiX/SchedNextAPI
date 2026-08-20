@@ -6,7 +6,23 @@ const { enviarMensagem } = require('../services/whatsapp/provider');
 const { paraConvencaoDoBanco, paraInstanteReal } = require('../utils/horarioBrasilia');
 
 function iniciarLembretes() {
+  let executando = false;
   cron.schedule('*/1 * * * *', async () => {
+    // Guarda contra sobreposição: se o lote de um minuto (envio de e-mail/WhatsApp por
+    // agendamento, sequencial) ainda não terminou quando o próximo minuto disparar, os mesmos
+    // agendamentos (lembrete_1h_enviado só vira true ao final de cada um) seriam reprocessados
+    // e o lembrete sairia duplicado pro cliente.
+    if (executando) return;
+    executando = true;
+    try {
+      await processarLembretes();
+    } finally {
+      executando = false;
+    }
+  });
+}
+
+async function processarLembretes() {
     console.log('Verificando lembretes de agendamentos próximos...');
 
     const agora = new Date();
@@ -66,7 +82,6 @@ function iniciarLembretes() {
         console.error('Erro no envio do lembrete:', err);
       }
     }
-  });
 }
 
 module.exports = iniciarLembretes;

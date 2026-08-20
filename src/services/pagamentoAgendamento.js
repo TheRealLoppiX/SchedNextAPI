@@ -33,10 +33,11 @@ async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId,
     throw erro;
   }
 
-  const { data: servicosVinculados } = await supabase
+  const { data: servicosVinculados, error: errVinc } = await supabase
     .from('agendamento_servicos')
     .select('servico_id, servicos(id, valor)')
     .eq('agendamento_id', agendamentoId);
+  if (errVinc) throw errVinc;
 
   let valorBase;
   let servicosCobertos = [];
@@ -59,11 +60,12 @@ async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId,
   const idsServicosAdicionais = (servicosAdicionais || []).map((s) => s.id).filter(Boolean);
   let precoPorServico = {};
   if (idsServicosAdicionais.length > 0) {
-    const { data: servicosReais } = await supabase
+    const { data: servicosReais, error: errServicosReais } = await supabase
       .from('servicos')
       .select('id, valor')
       .in('id', idsServicosAdicionais)
       .eq('empresa_id', agAtual.empresa_id);
+    if (errServicosReais) throw errServicosReais;
     precoPorServico = Object.fromEntries((servicosReais || []).map((s) => [s.id, Number(s.valor) || 0]));
   }
   const valorAdicionais = (servicosAdicionais || []).reduce((acc, s) => acc + (precoPorServico[s.id] || 0), 0);
@@ -71,11 +73,12 @@ async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId,
   let valorProdutos = 0;
   if (produtosVendidos && produtosVendidos.length > 0) {
     const idsProdutos = produtosVendidos.map((p) => p.id).filter(Boolean);
-    const { data: produtosReais } = await supabase
+    const { data: produtosReais, error: errProdutosReais } = await supabase
       .from('produtos')
       .select('id, valor')
       .in('id', idsProdutos)
       .eq('empresa_id', agAtual.empresa_id);
+    if (errProdutosReais) throw errProdutosReais;
     const precoPorProduto = Object.fromEntries((produtosReais || []).map((p) => [p.id, Number(p.valor) || 0]));
     valorProdutos = produtosVendidos.reduce((acc, p) => {
       const qtd = parseInt(p.quantidade || 1, 10);

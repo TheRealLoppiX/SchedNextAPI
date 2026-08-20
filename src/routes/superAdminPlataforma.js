@@ -46,7 +46,12 @@ router.get('/super-admin/empresas', async (req, res) => {
     .select('id, nome, slug, email, vertical, status_assinatura, plano_plataforma_id, plano_plataforma:plano_plataforma_id(nome, preco_mensal)')
     .order('id', { ascending: false });
 
-  if (busca) query = query.or(`nome.ilike.%${busca}%,slug.ilike.%${busca}%,email.ilike.%${busca}%`);
+  // Remove vírgula/parênteses antes de interpolar no `.or()`: o PostgREST separa condições por
+  // vírgula, então um valor como "x,plano_plataforma_id.eq.1" injetaria uma cláusula extra no filtro.
+  if (busca) {
+    const buscaSegura = String(busca).replace(/[,()]/g, '');
+    query = query.or(`nome.ilike.%${buscaSegura}%,slug.ilike.%${buscaSegura}%,email.ilike.%${buscaSegura}%`);
+  }
   if (status) query = query.eq('status_assinatura', status);
   if (plano_id) query = query.eq('plano_plataforma_id', plano_id);
 
