@@ -272,7 +272,7 @@ const finalizarCheckoutSchema = z.object({
   agendamento_id: idLike,
   produtos_vendidos: z.array(z.object({ id: idLike, quantidade: z.coerce.number().int().positive().optional() })).optional(),
   servicos_adicionais: z.array(z.object({ id: idLike })).optional(),
-  forma_pagamento: z.enum(['dinheiro', 'credito', 'debito', 'pix']).optional()
+  forma_pagamento: z.enum(['dinheiro', 'credito', 'debito', 'pix']).optional().nullable()
 });
 
 const agendarEncaixeSchema = z.object({
