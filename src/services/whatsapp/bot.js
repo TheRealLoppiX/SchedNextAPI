@@ -3,6 +3,30 @@ const { enviarMensagem } = require('./provider');
 const { limiteAgendamentosMesAtingido } = require('../../utils/limitesPlano');
 const { variantesTelefoneBR } = require('../../utils/telefone');
 const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
+const { gerarTexto, estaConfigurado: iaConfigurada } = require('../groq');
+
+// Interpreta texto livre digitado no menu principal (ex: "quero cortar amanhã de tarde") e tenta
+// mapear pra uma das opções do menu, em vez de sempre exigir o número exato — só entra em ação
+// quando "1"/"2"/"agendar"/"agendamento" já não bateram (ver estado 'menu' abaixo). Puramente um
+// classificador de intenção (responde só a palavra AGENDAR/AGENDAMENTOS/NENHUM); a máquina de
+// estados em si continua tocando o fluxo normalmente a partir da opção escolhida.
+async function interpretarIntencaoMenu(texto) {
+  if (!iaConfigurada()) return null;
+  try {
+    const resposta = await gerarTexto({
+      sistema: 'Você classifica a intenção de uma mensagem de WhatsApp enviada a um bot de agendamento de barbearia/salão. Responda APENAS uma destas palavras, sem mais nada: AGENDAR (a pessoa quer marcar/remarcar um horário), AGENDAMENTOS (a pessoa quer ver ou cancelar um agendamento que já tem), ou NENHUM (não deu pra saber).',
+      prompt: texto,
+      maxTokens: 6,
+      temperatura: 0
+    });
+    const intencao = resposta.trim().toUpperCase();
+    if (intencao.startsWith('AGENDAR')) return 'agendar';
+    if (intencao.startsWith('AGENDAMENTO')) return 'agendamentos';
+  } catch (err) {
+    console.error('Erro ao interpretar intenção via IA no bot do WhatsApp:', err);
+  }
+  return null;
+}
 
 // Encontra o cliente cadastrado dono deste número, tolerando os formatos diferentes em que
 // `usuarios.telefone` pode estar salvo (com máscara, sem DDI, com/sem o 9º dígito; ver
@@ -167,7 +191,13 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   }
 
   if (sessao.estado_atual === 'menu') {
-    if (msg === '1' || msgLower === 'agendar') {
+    // Se não bateu com o número/palavra exata, tenta uma última vez interpretar o texto livre
+    // via IA (ex: "quero cortar amanhã de tarde") antes de desistir com o "não entendi" — sem
+    // isso, qualquer mensagem fora do padrão exato travava a conversa logo na primeira resposta.
+    let opcaoEscolhida = msg === '1' || msgLower === 'agendar' ? 'agendar' : (msg === '2' || msgLower.includes('agendamento')) ? 'agendamentos' : null;
+    if (!opcaoEscolhida) opcaoEscolhida = await interpretarIntencaoMenu(msg);
+
+    if (opcaoEscolhida === 'agendar') {
       if (await limiteAgendamentosMesAtingido(empresaId)) {
         return responder('Desculpe, este estabelecimento atingiu o limite de agendamentos do mês. Tente novamente em breve.', 'inicio', {});
       }
@@ -177,7 +207,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
       return responder(`Com quem você quer agendar?\n${lista}`, 'aguardando_barbeiro', { barbeiros });
     }
 
-    if (msg === '2' || msgLower.includes('agendamento')) {
+    if (opcaoEscolhida === 'agendamentos') {
       const cliente = await encontrarClientePorTelefone(empresaId, telefone);
       if (!cliente) {
         return responder('Não encontrei nenhum cadastro com este número de telefone. Digite *MENU* para ver as opções.', 'inicio', {});

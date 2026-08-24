@@ -27,9 +27,12 @@ function periodoAnterior(dataInicio, dataFim) {
 router.get('/admin/relatorios/:empresaId', async (req, res) => {
   const empresaId = req.empresaId;
 
-  if (!(await permiteRelatoriosAvancados(empresaId))) {
-    return res.status(403).json({ error: 'Relatórios avançados são um recurso exclusivo do plano Enterprise. Fale com o suporte para fazer upgrade.' });
-  }
+  // Antes disso, planos abaixo do Enterprise recebiam 403 e não viam relatório NENHUM (nem
+  // resumo, nem filtro de data, nem faturamento por dia — só um aviso de upsell). Agora todo
+  // plano pago vê o essencial (resumo + faturamento por dia, com o mesmo filtro de data); só o
+  // comparativo com o período anterior e os rankings (top serviços/profissionais/recorrência)
+  // continuam exclusivos do Enterprise, sinalizado no campo `avancado` da resposta.
+  const avancado = await permiteRelatoriosAvancados(empresaId);
 
   const hoje = formatarDataLocal(new Date());
   const dataInicio = req.query.dataInicio || hoje;
@@ -141,6 +144,7 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
     const taxaRecorrenciaPct = clientesNoPeriodo.length > 0 ? (clientesRecorrentes / clientesNoPeriodo.length) * 100 : 0;
 
     res.json({
+      avancado,
       periodo: { inicio: dataInicio, fim: dataFim },
       resumo: {
         faturamento_total: faturamentoTotal,
@@ -148,17 +152,20 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
         ticket_medio: ticketMedio,
         quantidade_concluidos: concluidos.length,
         taxa_cancelamento: Number(taxaCancelamento.toFixed(1)),
-        faturamento_periodo_anterior: faturamentoAnterior,
-        variacao_faturamento_pct: Number(variacaoFaturamentoPct.toFixed(1))
+        // Comparação com o período anterior é só do plano Enterprise (junto com os rankings
+        // abaixo) — planos menores recebem null em vez do número, pro front não exibir a
+        // variação sem também mostrar de onde ela vem.
+        faturamento_periodo_anterior: avancado ? faturamentoAnterior : null,
+        variacao_faturamento_pct: avancado ? Number(variacaoFaturamentoPct.toFixed(1)) : null
       },
       serie_diaria: serieDiaria,
-      top_servicos: topServicos,
-      top_profissionais: topProfissionais,
-      recorrencia: {
+      top_servicos: avancado ? topServicos : [],
+      top_profissionais: avancado ? topProfissionais : [],
+      recorrencia: avancado ? {
         total_clientes_periodo: clientesNoPeriodo.length,
         clientes_recorrentes: clientesRecorrentes,
         taxa_recorrencia_pct: Number(taxaRecorrenciaPct.toFixed(1))
-      }
+      } : null
     });
   } catch (err) {
     console.error('Erro ao gerar relatório avançado:', err);

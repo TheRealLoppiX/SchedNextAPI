@@ -1,4 +1,5 @@
 const express = require('express');
+const supabase = require('../config/supabase');
 const { gerarTexto } = require('../services/groq');
 const { permiteIA } = require('../utils/limitesPlano');
 
@@ -30,6 +31,25 @@ router.post('/admin/ia/resumo-dashboard', async (req, res) => {
     res.json({ resumo: texto });
   } catch (e) {
     console.error('Erro no resumo de IA:', e);
+    res.status(502).json({ error: 'Não foi possível gerar o resumo agora. Tente novamente em instantes.' });
+  }
+});
+
+// 1b. Mesma ideia do resumo de dashboard, mas em cima do relatório avançado de período
+// (routes/relatorios.js) — período + resumo financeiro + rankings, quando disponíveis.
+router.post('/admin/ia/resumo-relatorio', async (req, res) => {
+  const { stats } = req.body;
+  if (!stats) return res.status(400).json({ error: 'Envie os dados de "stats".' });
+
+  try {
+    const texto = await gerarTexto({
+      sistema: 'Você é um analista de negócios. Escreva um resumo executivo curto (3-4 frases), direto, em português do Brasil, destacando o que está bom, o que merece atenção e uma sugestão prática. Sem saudação, sem markdown, só o texto corrido.',
+      prompt: `Relatório de período de um negócio de hora marcada:\n${JSON.stringify(stats)}`,
+      maxTokens: 220
+    });
+    res.json({ resumo: texto });
+  } catch (e) {
+    console.error('Erro no resumo de relatório por IA:', e);
     res.status(502).json({ error: 'Não foi possível gerar o resumo agora. Tente novamente em instantes.' });
   }
 });
@@ -68,6 +88,37 @@ router.post('/admin/ia/sugestao-followup', async (req, res) => {
     res.json({ mensagem: texto });
   } catch (e) {
     console.error('Erro na sugestão de follow-up de IA:', e);
+    res.status(502).json({ error: 'Não foi possível gerar a sugestão agora. Tente novamente em instantes.' });
+  }
+});
+
+// 4. Sugestão de campanha de fidelidade: olha o faturamento/frequência dos últimos 30 dias
+// (mesma janela usada no dashboard) e devolve um texto com uma sugestão pronta de campanha —
+// o admin ainda preenche o formulário na mão em routes/acoes.js, a IA só dá o ponto de partida.
+router.post('/admin/ia/sugestao-campanha', async (req, res) => {
+  const empresaId = req.empresaId;
+  try {
+    const desde = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: agendamentos } = await supabase
+      .from('agendamentos')
+      .select('valor_total, usuario_id, status')
+      .eq('empresa_id', empresaId)
+      .eq('status', 'concluido')
+      .gte('data_hora', desde);
+
+    const concluidos = agendamentos || [];
+    const faturamento30d = concluidos.reduce((acc, a) => acc + Number(a.valor_total || 0), 0);
+    const clientesUnicos = new Set(concluidos.map((a) => a.usuario_id).filter(Boolean)).size;
+    const ticketMedio = concluidos.length > 0 ? faturamento30d / concluidos.length : 0;
+
+    const texto = await gerarTexto({
+      sistema: 'Você sugere campanhas de fidelidade (tipo "a cada N cortes, ganha um prêmio") para negócios de hora marcada, em português do Brasil. Responda em 3-4 frases curtas e diretas: sugira um nome de campanha, uma meta de quantidade de atendimentos, e um prêmio proporcional ao ticket médio informado. Sem markdown, sem saudação.',
+      prompt: `Faturamento dos últimos 30 dias: R$ ${faturamento30d.toFixed(2)}\nAtendimentos concluídos: ${concluidos.length}\nClientes únicos atendidos: ${clientesUnicos}\nTicket médio: R$ ${ticketMedio.toFixed(2)}`,
+      maxTokens: 200
+    });
+    res.json({ sugestao: texto, base: { faturamento_30d: faturamento30d, atendimentos_30d: concluidos.length, clientes_unicos_30d: clientesUnicos, ticket_medio_30d: Number(ticketMedio.toFixed(2)) } });
+  } catch (e) {
+    console.error('Erro na sugestão de campanha de IA:', e);
     res.status(502).json({ error: 'Não foi possível gerar a sugestão agora. Tente novamente em instantes.' });
   }
 });

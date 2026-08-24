@@ -63,6 +63,43 @@ router.get('/admin/clientes/:empresaId', async (req, res) => {
   res.json(formatado);
 });
 
+// Indicador de risco de não comparecimento — regra simples em cima do histórico (sem LLM,
+// pra ficar instantâneo e não depender de GROQ_API_KEY): olha os últimos atendimentos do
+// cliente que já deveriam ter acontecido e conta quantos foram cancelados ou nunca confirmados
+// como concluídos (mesmo critério de "não compareceu" usado no dashboard, ver
+// routes/agendamentos.js GET /admin/stats). Histórico curto demais (<3) não é base suficiente
+// pra classificar risco.
+router.get('/admin/clientes/:id/risco-faltas', async (req, res) => {
+  const { data: cliente } = await supabase.from('usuarios').select('id').eq('id', req.params.id).eq('empresa_id', req.empresaId).maybeSingle();
+  if (!cliente) return res.status(404).json({ error: 'Cliente não encontrado.' });
+
+  const agora = new Date();
+  const dezMinAtras = new Date(agora.getTime() - 10 * 60000);
+
+  const { data: agendamentos, error } = await supabase
+    .from('agendamentos')
+    .select('status, data_hora')
+    .eq('usuario_id', req.params.id)
+    .eq('empresa_id', req.empresaId)
+    .lt('data_hora', dezMinAtras.toISOString());
+
+  if (error) return res.status(500).json({ error: 'Erro ao calcular risco.' });
+
+  const total = (agendamentos || []).length;
+  const faltas = (agendamentos || []).filter((a) => a.status === 'cancelado' || (a.status !== 'concluido' && new Date(a.data_hora) < dezMinAtras)).length;
+  const percentual = total > 0 ? (faltas / total) * 100 : 0;
+
+  let risco = 'baixo';
+  if (total >= 3) {
+    if (percentual >= 50) risco = 'alto';
+    else if (percentual >= 20) risco = 'medio';
+  } else {
+    risco = 'indefinido';
+  }
+
+  res.json({ risco, total, faltas, percentual: Number(percentual.toFixed(1)) });
+});
+
 router.put('/admin/clientes/:id', validate(clienteAtualizarSchema), async (req, res) => {
   const { id } = req.params;
   const { nome_completo, telefone, email, data_nascimento, notas } = req.body;
