@@ -31,7 +31,10 @@ async function gerarTexto({ prompt, sistema, maxTokens = 400, temperatura = 0.6 
         { role: 'user', content: prompt }
       ],
       max_tokens: maxTokens,
-      temperature: temperatura
+      temperature: temperatura,
+      // Qwen3 é um modelo de raciocínio: sem isso ele devolve o <think>...</think>
+      // junto no content e vaza pro usuário final.
+      reasoning_format: 'hidden'
     })
   });
 
@@ -41,7 +44,10 @@ async function gerarTexto({ prompt, sistema, maxTokens = 400, temperatura = 0.6 
   }
 
   const dados = await resposta.json();
-  return dados.choices?.[0]?.message?.content?.trim() || '';
+  const texto = dados.choices?.[0]?.message?.content?.trim() || '';
+  // Rede de segurança: remove bloco de raciocínio caso reasoning_format não seja
+  // respeitado (ex.: modelo trocado no futuro por outro que não suporte o parâmetro).
+  return texto.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 }
 
 module.exports = { estaConfigurado, gerarTexto };
