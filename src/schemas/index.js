@@ -117,12 +117,6 @@ const empresaAtualizarSchema = z.object({
   cor_destaque: z.string().trim().max(20).optional()
 });
 
-const configEmpresaSchema = z.object({
-  nome_fantasia: z.string().trim().min(1).max(150).optional(),
-  logo_url: z.string().trim().optional().nullable(),
-  cor_primary: z.string().trim().max(20).optional()
-});
-
 // --- estoque.js ---
 
 const estoqueProdutoSchema = z.object({
@@ -353,6 +347,21 @@ const mercadoPagoPixSchema = z.object({
   servicos_adicionais: z.array(z.object({ id: idLike })).optional()
 });
 
+// --- apiPublica.js ---
+
+const apiPublicaAgendamentoSchema = z.object({
+  profissional_id: idLike,
+  data_hora: z.string().min(1),
+  cliente_nome: z.string().trim().min(1, 'Informe o nome do cliente').max(150),
+  servicos_ids: z.array(idLike).min(1, 'Selecione ao menos um serviço')
+});
+
+// --- whatsappInstancia.js ---
+
+const whatsappTesteSchema = z.object({
+  telefone: z.string().trim().min(8, 'Telefone inválido').max(20)
+});
+
 // --- dominioCustomizado.js ---
 
 const dominioCustomizadoSchema = z.object({
@@ -444,7 +453,6 @@ module.exports = {
   perfilAtualizarSchema,
   avaliarSchema,
   empresaAtualizarSchema,
-  configEmpresaSchema,
   ativoSchema,
   estoqueProdutoSchema,
   estoqueLoginSchema,
@@ -477,6 +485,8 @@ module.exports = {
   apiKeyCriarSchema,
   taxasPagamentoSchema,
   mercadoPagoPixSchema,
+  apiPublicaAgendamentoSchema,
+  whatsappTesteSchema,
   dominioCustomizadoSchema,
   contatoEnterpriseSchema,
   superAdminLoginSchema,

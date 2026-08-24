@@ -2,7 +2,7 @@ const express = require('express');
 const supabase = require('../config/supabase');
 const { obterSlugTenant, resolverEmpresaPorSlug } = require('../utils/tenantContext');
 const validate = require('../middleware/validate');
-const { empresaAtualizarSchema, configEmpresaSchema, contatoEnterpriseSchema } = require('../schemas');
+const { empresaAtualizarSchema, contatoEnterpriseSchema } = require('../schemas');
 const { registrarLead } = require('../services/leadsEnterprise');
 
 const router = express.Router();
@@ -75,24 +75,6 @@ router.get('/empresa/slug/:slug', async (req, res) => {
   if (error) return res.status(500).json(error);
   if (!data) return res.status(404).json({ message: 'Empresa não encontrada' });
   res.json(data);
-});
-
-router.put('/admin/config-empresa', validate(configEmpresaSchema), async (req, res) => {
-  const { nome_fantasia, logo_url, cor_primary } = req.body;
-
-  // Bug pré-existente corrigido aqui: a coluna real no banco é `cor_principal`, não
-  // `cor_primary` (ver database-schema.md). A query original apontava para uma coluna
-  // inexistente e derrubava a rota em toda chamada.
-  const { error } = await supabase
-    .from('empresas')
-    .update({ nome_fantasia, logo_url, cor_principal: cor_primary })
-    .eq('id', req.empresaId);
-
-  if (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Erro ao salvar configurações' });
-  }
-  res.json({ success: true, message: 'Perfil atualizado!' });
 });
 
 module.exports = router;

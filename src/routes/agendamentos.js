@@ -504,8 +504,8 @@ router.post('/admin/cancelar-agendamento', validate(cancelarAgendamentoSchema), 
 
   transporter.sendMail(mailOptions, (error) => {
     if (error) {
-      console.error('Erro ao enviar e-mail (Gmail):', error);
-      return res.json({ message: 'Cancelado no banco, mas o e-mail falhou (verifique a senha de app do Gmail).' });
+      console.error('Erro ao enviar e-mail de cancelamento:', error);
+      return res.json({ message: 'Cancelado no banco, mas não foi possível enviar o e-mail de aviso ao cliente.' });
     }
     res.json({ message: 'Cancelado com sucesso e cliente avisado por e-mail!' });
   });
@@ -673,6 +673,42 @@ router.post('/admin/reagendar-agendamento', validate(reagendarAgendamentoSchema)
   if (!data || data.length === 0) return res.status(404).json({ error: 'Agendamento não encontrado ou não pode ser movido.' });
 
   res.json({ success: true });
+
+  // Avisa o cliente que o horário mudou — antes disso o reagendamento por arrastar-e-soltar era
+  // totalmente silencioso pro cliente, que só descobria chegando no horário errado. Disparado
+  // depois da resposta (mesmo padrão de finalizar-servico-checkout): não deve atrasar nem
+  // quebrar o reagendamento em si se o envio falhar.
+  (async () => {
+    const { data: agReagendado } = await supabase
+      .from('agendamentos')
+      .select('data_hora, usuarios(email, nome_completo, telefone), barbeiros(nome)')
+      .eq('id', agendamento_id)
+      .maybeSingle();
+    if (!agReagendado?.usuarios) return;
+
+    const dataFormatada = new Date(agReagendado.data_hora).toLocaleString('pt-BR');
+    const mensagemTexto = `Seu agendamento foi remarcado para ${dataFormatada}${agReagendado.barbeiros?.nome ? ` com ${agReagendado.barbeiros.nome}` : ''}.`;
+
+    if (agReagendado.usuarios.email) {
+      transporter.sendMail({
+        to: agReagendado.usuarios.email,
+        subject: 'Seu agendamento foi remarcado - SchedNext',
+        html: emailHtml({
+          titulo: `Olá, ${agReagendado.usuarios.nome_completo}!`,
+          mensagemHtml: `<p style="margin: 0;">${mensagemTexto}</p>`
+        })
+      }).catch((err) => console.error('Erro ao enviar e-mail de reagendamento:', err));
+    }
+
+    if (agReagendado.usuarios.telefone && (await permiteWhatsappBot(empresa_id))) {
+      const { data: empresaWa } = await supabase.from('empresas').select('whatsapp_phone_number_id').eq('id', empresa_id).maybeSingle();
+      enviarMensagem(
+        empresaWa?.whatsapp_phone_number_id,
+        `55${agReagendado.usuarios.telefone.replace(/\D/g, '')}`,
+        mensagemTexto
+      ).catch((err) => console.error('Erro ao enviar WhatsApp de reagendamento:', err));
+    }
+  })();
 });
 
 router.post('/admin/agendar-encaixe', validate(agendarEncaixeSchema), async (req, res) => {

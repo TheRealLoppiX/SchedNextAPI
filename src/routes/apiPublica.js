@@ -1,5 +1,7 @@
 const express = require('express');
 const supabase = require('../config/supabase');
+const validate = require('../middleware/validate');
+const { apiPublicaAgendamentoSchema } = require('../schemas');
 const { autenticarApiKey } = require('../middleware/apiKeyAuth');
 const { apiPublicaLimiter } = require('../middleware/rateLimiters');
 const { limiteAgendamentosMesAtingido } = require('../utils/limitesPlano');
@@ -82,16 +84,23 @@ router.get('/api/v1/disponibilidade', async (req, res) => {
   res.json({ profissional_id: Number(profissional_id), data, horarios_disponiveis: slots });
 });
 
-router.post('/api/v1/agendamentos', async (req, res) => {
+router.post('/api/v1/agendamentos', validate(apiPublicaAgendamentoSchema), async (req, res) => {
   const { profissional_id, data_hora, servicos_ids, cliente_nome } = req.body;
-
-  if (!profissional_id || !data_hora || !cliente_nome || !Array.isArray(servicos_ids) || servicos_ids.length === 0) {
-    return res.status(400).json({ error: 'Campos obrigatórios: profissional_id, data_hora, cliente_nome, servicos_ids.' });
-  }
 
   if (await limiteAgendamentosMesAtingido(req.empresaId)) {
     return res.status(403).json({ error: 'Esta conta atingiu o limite de agendamentos do mês.' });
   }
+
+  // Sem isso, uma empresa Enterprise com API key válida podia criar (ou poluir/derrubar) a
+  // agenda de OUTRO tenant só adivinhando um profissional_id — diferente de GET
+  // /disponibilidade acima, que já confere isso corretamente.
+  const { data: profissionalValido } = await supabase
+    .from('barbeiros')
+    .select('id')
+    .eq('id', profissional_id)
+    .eq('empresa_id', req.empresaId)
+    .maybeSingle();
+  if (!profissionalValido) return res.status(404).json({ error: 'Profissional não encontrado nesta conta.' });
 
   const { data: servicosInfo, error: servErr } = await supabase
     .from('servicos')
