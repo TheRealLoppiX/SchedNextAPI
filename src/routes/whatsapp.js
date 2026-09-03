@@ -20,7 +20,17 @@ router.post('/whatsapp/webhook', async (req, res) => {
     const key = dadoMsg?.key;
     if (!key || key.fromMe) return; // ignora eco das mensagens que a própria instância envia
 
-    const texto = dadoMsg?.message?.conversation || dadoMsg?.message?.extendedTextMessage?.text || '';
+    // Além de texto normal, também trata toques em botão/lista (bot.js manda esses IDs iguais aos
+    // números do menu numerado, então o resto do fluxo nem precisa saber que veio de um toque em
+    // vez de o cliente digitar o número).
+    const conteudoMsg = dadoMsg?.message || {};
+    const texto =
+      conteudoMsg.conversation ||
+      conteudoMsg.extendedTextMessage?.text ||
+      conteudoMsg.buttonsResponseMessage?.selectedButtonId ||
+      conteudoMsg.listResponseMessage?.singleSelectReply?.selectedRowId ||
+      conteudoMsg.templateButtonReplyMessage?.selectedId ||
+      '';
     const telefone = (key.remoteJid || '').replace('@s.whatsapp.net', '');
     const instancia = req.body?.instance;
 

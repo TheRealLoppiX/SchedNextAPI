@@ -74,6 +74,22 @@ router.post('/admin/barbeiro-servicos', validate(barbeiroServicosSchema), async 
   const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', barbeiro_id).maybeSingle();
   if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
 
+  if (servicosIds.length > 0) {
+    // Sem isso, um admin podia vincular o próprio barbeiro a um servico_id de OUTRA empresa
+    // (só adivinhando o ID) — o vínculo depois vazava publicamente via
+    // GET /servicos-por-barbeiro/:barbeiro_id (routes/servicos.js), misturando nome/preço/duração
+    // do serviço de uma empresa na tela de agendamento de outra.
+    const { data: servicosValidos, error: errServicos } = await supabase
+      .from('servicos')
+      .select('id')
+      .eq('empresa_id', req.empresaId)
+      .in('id', servicosIds);
+    if (errServicos) return res.status(500).json(errServicos);
+    if (!servicosValidos || servicosValidos.length !== servicosIds.length) {
+      return res.status(400).json({ error: 'Um ou mais serviços informados são inválidos.' });
+    }
+  }
+
   const { error: delError } = await supabase.from('barbeiro_servicos').delete().eq('barbeiro_id', barbeiro_id);
   if (delError) return res.status(500).json(delError);
 
@@ -119,6 +135,13 @@ router.post('/admin/barbeiro', validate(barbeiroCriarSchema), async (req, res) =
     return res.status(403).json({ error: 'Você atingiu o limite de profissionais do seu plano atual. Faça upgrade para cadastrar mais.' });
   }
 
+  // Sem checar isso, um admin podia apontar o próprio barbeiro pra um unidade_id de OUTRA
+  // empresa só adivinhando o ID, criando uma referência órfã/cruzada entre tenants.
+  if (unidade_id) {
+    const { data: unidadeValida } = await supabase.from('unidades').select('id').eq('id', unidade_id).eq('empresa_id', empresa_id).maybeSingle();
+    if (!unidadeValida) return res.status(400).json({ error: 'Unidade inválida.' });
+  }
+
   const { data, error } = await supabase
     .from('barbeiros')
     .insert({ nome, empresa_id, foto_url, ativo: true, unidade_id: unidade_id || null })
@@ -138,7 +161,13 @@ router.put('/admin/barbeiro/editar', validate(barbeiroEditarSchema), async (req,
   const { id, nome, foto_url, percentual_comissao, unidade_id } = req.body;
   const atualizacao = { nome, foto_url };
   if (percentual_comissao !== undefined) atualizacao.percentual_comissao = percentual_comissao;
-  if (unidade_id !== undefined) atualizacao.unidade_id = unidade_id;
+  if (unidade_id !== undefined) {
+    if (unidade_id) {
+      const { data: unidadeValida } = await supabase.from('unidades').select('id').eq('id', unidade_id).eq('empresa_id', req.empresaId).maybeSingle();
+      if (!unidadeValida) return res.status(400).json({ error: 'Unidade inválida.' });
+    }
+    atualizacao.unidade_id = unidade_id;
+  }
 
   const { data, error } = await supabase
     .from('barbeiros')

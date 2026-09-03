@@ -15,7 +15,7 @@ const { calcularValorComLimiteAssinante } = require('../utils/limitesAssinatura'
 async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId, produtosVendidos, servicosAdicionais, registrarConsumo = false }) {
   const { data: agAtual, error: agErr } = await supabase
     .from('agendamentos')
-    .select('valor_total, empresa_id, usuario_id, status, unidade_id')
+    .select('valor_total, empresa_id, usuario_id, status, unidade_id, pagamento_status, mercadopago_payment_id')
     .eq('id', agendamentoId)
     .maybeSingle();
   if (agErr) throw agErr;

@@ -1,7 +1,9 @@
 const express = require('express');
 const supabase = require('../config/supabase');
+const validate = require('../middleware/validate');
+const { whatsappTesteSchema } = require('../schemas');
 const { permiteWhatsappBot } = require('../utils/limitesPlano');
-const { estaConfigurado, criarInstancia, obterQrCode, obterStatusConexao, removerInstancia } = require('../services/whatsapp/provider');
+const { estaConfigurado, criarInstancia, obterQrCode, obterStatusConexao, removerInstancia, enviarMensagem } = require('../services/whatsapp/provider');
 
 const router = express.Router();
 
@@ -28,8 +30,44 @@ router.get('/admin/whatsapp', async (req, res) => {
   const instancia = empresa?.whatsapp_phone_number_id || null;
   if (!instancia) return res.json({ permitido: true, conectado: false, instancia: null, estado: null });
 
-  const status = await obterStatusConexao(instancia);
-  res.json({ permitido: true, instancia, estado: status.state, conectado: status.state === 'open' });
+  // Esta rota é consultada pelo front a cada poucos segundos (tela de conexão do WhatsApp) —
+  // sem o try/catch, uma falha/lentidão pontual da Evolution API/VPS derrubava o polling com um
+  // 500 cru em vez de simplesmente reportar "não deu pra checar agora" e tentar de novo no
+  // próximo ciclo.
+  try {
+    const status = await obterStatusConexao(instancia);
+    res.json({ permitido: true, instancia, estado: status.state, conectado: status.state === 'open' });
+  } catch (err) {
+    console.error('Erro ao consultar status da conexão de WhatsApp:', err);
+    res.json({ permitido: true, instancia, estado: null, conectado: false, erroConsulta: true });
+  }
+});
+
+// Envia uma mensagem de teste pro próprio admin confirmar que o envio outbound está de fato
+// funcionando, sem precisar simular uma conversa inteira do bot escrevendo pro número conectado.
+router.post('/admin/whatsapp/testar', validate(whatsappTesteSchema), async (req, res) => {
+  const empresa_id = req.empresaId;
+  if (!(await permiteWhatsappBot(empresa_id))) return res.status(403).json({ error: 'Recurso não disponível no seu plano.' });
+
+  const { data: empresa } = await supabase.from('empresas').select('whatsapp_phone_number_id').eq('id', empresa_id).maybeSingle();
+  if (!empresa?.whatsapp_phone_number_id) return res.status(400).json({ error: 'Conecte o WhatsApp antes de enviar um teste.' });
+
+  const telefone = String(req.body.telefone).replace(/\D/g, '');
+  const numeroCompleto = telefone.startsWith('55') ? telefone : `55${telefone}`;
+
+  try {
+    const resultado = await enviarMensagem(empresa.whatsapp_phone_number_id, numeroCompleto, 'Mensagem de teste do SchedNext: se você recebeu isso, seu bot de agendamento está pronto para responder clientes por aqui. ✅');
+    if (resultado.simulado) {
+      return res.status(503).json({ error: 'Integração de WhatsApp não configurada no servidor — mensagem não enviada de verdade.' });
+    }
+    if (!resultado.enviado) {
+      return res.status(502).json({ error: 'Não foi possível enviar a mensagem de teste. Confira se o número ainda está conectado.' });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Erro ao enviar mensagem de teste de WhatsApp:', err);
+    res.status(500).json({ error: 'Erro ao enviar a mensagem de teste.' });
+  }
 });
 
 router.post('/admin/whatsapp/conectar', async (req, res) => {

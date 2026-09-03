@@ -44,6 +44,79 @@ async function enviarMensagem(instancia, telefone, texto) {
   return { enviado: true, id: dados.key?.id };
 }
 
+// Botões/lista interativos (estilo "banco do brasil"). Como a instância é Baileys (protocolo não-
+// oficial), não há garantia de que todo aparelho renderize a UI tocável — por isso `texto` (o corpo
+// da mensagem) sempre traz a listagem numerada por extenso também, igual o menu de texto puro:
+// mesmo se os botões não aparecerem, o cliente ainda consegue responder digitando o número. Se a
+// chamada em si falhar (rede, instância desconectada etc.), cai pro sendText comum.
+async function enviarBotoes(instancia, telefone, texto, botoes, footerText) {
+  if (!instancia || !estaConfigurado()) {
+    console.log(`[WhatsApp simulado] instancia=${instancia || 'nenhuma'} para ${telefone} (botões): ${texto}`);
+    return { enviado: false, simulado: true };
+  }
+
+  try {
+    const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/message/sendButtons/${instancia}`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        number: telefone.replace(/\D/g, ''),
+        text: texto,
+        footerText: footerText || 'SchedNext',
+        buttons: botoes.map((b) => ({ buttonId: b.id, buttonText: { displayText: b.titulo } })),
+      }),
+    });
+    const dados = await resposta.json();
+    if (!resposta.ok) throw new Error(dados?.response?.message?.[0] || dados?.message || 'Falha ao enviar botões.');
+    return { enviado: true, id: dados.key?.id };
+  } catch (err) {
+    console.error('Erro ao enviar botões via Evolution API, caindo pro texto simples:', err);
+    return enviarMensagem(instancia, telefone, texto);
+  }
+}
+
+// Lista suspensa (até 10 opções); mesma lógica de fallback de enviarBotoes acima.
+async function enviarLista(instancia, telefone, texto, botaoTexto, opcoes) {
+  if (!instancia || !estaConfigurado()) {
+    console.log(`[WhatsApp simulado] instancia=${instancia || 'nenhuma'} para ${telefone} (lista): ${texto}`);
+    return { enviado: false, simulado: true };
+  }
+
+  try {
+    const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/message/sendList/${instancia}`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        number: telefone.replace(/\D/g, ''),
+        title: 'SchedNext',
+        description: texto,
+        buttonText: botaoTexto || 'Escolher',
+        sections: [
+          {
+            title: 'Opções',
+            rows: opcoes.map((o) => ({ rowId: o.id, title: o.titulo, description: o.descricao || '' })),
+          },
+        ],
+      }),
+    });
+    const dados = await resposta.json();
+    if (!resposta.ok) throw new Error(dados?.response?.message?.[0] || dados?.message || 'Falha ao enviar lista.');
+    return { enviado: true, id: dados.key?.id };
+  } catch (err) {
+    console.error('Erro ao enviar lista via Evolution API, caindo pro texto simples:', err);
+    return enviarMensagem(instancia, telefone, texto);
+  }
+}
+
+// Escolhe automaticamente botões (WhatsApp não aceita mais que 3) ou lista (até 10); acima disso
+// não há suporte nativo, então manda só o texto puro mesmo (que já traz a listagem numerada).
+async function enviarMenu(instancia, telefone, texto, opcoes, botaoTexto) {
+  if (!opcoes || opcoes.length === 0) return enviarMensagem(instancia, telefone, texto);
+  if (opcoes.length <= 3) return enviarBotoes(instancia, telefone, texto, opcoes);
+  if (opcoes.length <= 10) return enviarLista(instancia, telefone, texto, botaoTexto, opcoes);
+  return enviarMensagem(instancia, telefone, texto);
+}
+
 // Cria a instância na Evolution API pra uma empresa e já registra o webhook de recebimento
 // (ver routes/whatsapp.js). `qrcode: true` faz a Evolution já devolver o QR Code de pareamento
 // na própria resposta de criação, sem precisar de uma segunda chamada.
@@ -99,4 +172,4 @@ async function removerInstancia(instancia) {
   }
 }
 
-module.exports = { estaConfigurado, enviarMensagem, criarInstancia, obterQrCode, obterStatusConexao, removerInstancia };
+module.exports = { estaConfigurado, enviarMensagem, enviarMenu, criarInstancia, obterQrCode, obterStatusConexao, removerInstancia };

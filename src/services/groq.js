@@ -5,7 +5,7 @@
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 // Llama 3.3 70B Versatile foi descontinuado pela Groq em 16/08/2026 — Qwen3.6 27B é o
 // substituto recomendado por eles pra workloads de produção.
-const MODELO_PADRAO = 'qwen/qwen3.6-27b';
+const MODELO_PADRAO = 'qwen/qwen3.8-27b';
 
 function estaConfigurado() {
   return Boolean(process.env.GROQ_API_KEY);
@@ -31,7 +31,10 @@ async function gerarTexto({ prompt, sistema, maxTokens = 400, temperatura = 0.6 
         { role: 'user', content: prompt }
       ],
       max_tokens: maxTokens,
-      temperature: temperatura
+      temperature: temperatura,
+      // Qwen3 é um modelo de raciocínio: sem isso ele devolve o <think>...</think>
+      // junto no content e vaza pro usuário final.
+      reasoning_format: 'hidden'
     })
   });
 
@@ -41,7 +44,10 @@ async function gerarTexto({ prompt, sistema, maxTokens = 400, temperatura = 0.6 
   }
 
   const dados = await resposta.json();
-  return dados.choices?.[0]?.message?.content?.trim() || '';
+  const texto = dados.choices?.[0]?.message?.content?.trim() || '';
+  // Rede de segurança: remove bloco de raciocínio caso reasoning_format não seja
+  // respeitado (ex.: modelo trocado no futuro por outro que não suporte o parâmetro).
+  return texto.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 }
 
 module.exports = { estaConfigurado, gerarTexto };

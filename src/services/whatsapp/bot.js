@@ -1,8 +1,32 @@
 const supabase = require('../../config/supabase');
-const { enviarMensagem } = require('./provider');
+const { enviarMensagem, enviarMenu } = require('./provider');
 const { limiteAgendamentosMesAtingido } = require('../../utils/limitesPlano');
 const { variantesTelefoneBR } = require('../../utils/telefone');
 const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
+const { gerarTexto, estaConfigurado: iaConfigurada } = require('../groq');
+
+// Interpreta texto livre digitado no menu principal (ex: "quero cortar amanhã de tarde") e tenta
+// mapear pra uma das opções do menu, em vez de sempre exigir o número exato — só entra em ação
+// quando "1"/"2"/"agendar"/"agendamento" já não bateram (ver estado 'menu' abaixo). Puramente um
+// classificador de intenção (responde só a palavra AGENDAR/AGENDAMENTOS/NENHUM); a máquina de
+// estados em si continua tocando o fluxo normalmente a partir da opção escolhida.
+async function interpretarIntencaoMenu(texto) {
+  if (!iaConfigurada()) return null;
+  try {
+    const resposta = await gerarTexto({
+      sistema: 'Você classifica a intenção de uma mensagem de WhatsApp enviada a um bot de agendamento de barbearia/salão. Responda APENAS uma destas palavras, sem mais nada: AGENDAR (a pessoa quer marcar/remarcar um horário), AGENDAMENTOS (a pessoa quer ver ou cancelar um agendamento que já tem), ou NENHUM (não deu pra saber).',
+      prompt: texto,
+      maxTokens: 6,
+      temperatura: 0
+    });
+    const intencao = resposta.trim().toUpperCase();
+    if (intencao.startsWith('AGENDAR')) return 'agendar';
+    if (intencao.startsWith('AGENDAMENTO')) return 'agendamentos';
+  } catch (err) {
+    console.error('Erro ao interpretar intenção via IA no bot do WhatsApp:', err);
+  }
+  return null;
+}
 
 // Encontra o cliente cadastrado dono deste número, tolerando os formatos diferentes em que
 // `usuarios.telefone` pode estar salvo (com máscara, sem DDI, com/sem o 9º dígito; ver
@@ -137,35 +161,152 @@ async function horariosDisponiveis(empresaId, barbeiroId, dataStr) {
   return slots;
 }
 
+const MENU_PRINCIPAL_OPCOES = [
+  { id: '1', titulo: 'Agendar um horário' },
+  { id: '2', titulo: 'Ver/cancelar agendamentos' },
+  { id: 'sair', titulo: 'Sair' },
+];
+
 async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   const sessao = await obterOuCriarSessao(empresaId, telefone);
   const dados = sessao.dados_temporarios || {};
   const msg = (texto || '').trim();
   const msgLower = msg.toLowerCase();
 
-  const responder = async (resposta, novoEstado, novosDados) => {
-    await enviarMensagem(instancia, telefone, resposta);
+  // `opcoes`, quando presente, manda a mesma resposta como botões/lista tocáveis (ver
+  // services/whatsapp/provider.js#enviarMenu); o texto de `resposta` continua trazendo a
+  // listagem numerada por extenso, que serve tanto de leitura quanto de fallback garantido caso
+  // os botões não cheguem a renderizar no aparelho do cliente.
+  const responder = async (resposta, novoEstado, novosDados, opcoes, botaoTexto) => {
+    if (opcoes && opcoes.length > 0) {
+      await enviarMenu(instancia, telefone, resposta, opcoes, botaoTexto);
+    } else {
+      await enviarMensagem(instancia, telefone, resposta);
+    }
     await salvarSessao(sessao, novoEstado, novosDados !== undefined ? novosDados : dados);
   };
 
+  // Comandos globais: funcionam em QUALQUER estado, não só no menu. Antes disso, "SAIR" era
+  // prometido na mensagem de boas-vindas mas não fazia nada de verdade (caía no catch-all genérico
+  // "Digite MENU"), e não havia nenhuma forma de abortar um fluxo de agendamento no meio (ex: o
+  // cliente errou o profissional e queria recomeçar sem esperar toda a conversa expirar sozinha).
+  if (sessao.estado_atual !== 'inicio' && msgLower === 'sair') {
+    return responder('Até logo! 👋 Quando quiser, é só chamar de novo.', 'inicio', {});
+  }
+  if (sessao.estado_atual !== 'inicio' && sessao.estado_atual !== 'menu' && msgLower === 'cancelar') {
+    return responder(
+      'Ok, cancelei o que você estava fazendo.\n\nO que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.',
+      'menu',
+      undefined,
+      MENU_PRINCIPAL_OPCOES
+    );
+  }
+
   if (sessao.estado_atual === 'inicio' || msgLower === 'menu') {
     return responder(
-      'Olá! 👋 Digite *AGENDAR* para marcar um horário, ou *SAIR* para encerrar.',
-      'menu'
+      'Olá! 👋 O que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.',
+      'menu',
+      undefined,
+      MENU_PRINCIPAL_OPCOES
     );
   }
 
   if (sessao.estado_atual === 'menu') {
-    if (msgLower === 'agendar') {
+    // Se não bateu com o número/palavra exata, tenta uma última vez interpretar o texto livre
+    // via IA (ex: "quero cortar amanhã de tarde") antes de desistir com o "não entendi" — sem
+    // isso, qualquer mensagem fora do padrão exato travava a conversa logo na primeira resposta.
+    let opcaoEscolhida = msg === '1' || msgLower === 'agendar' ? 'agendar' : (msg === '2' || msgLower.includes('agendamento')) ? 'agendamentos' : null;
+    if (!opcaoEscolhida) opcaoEscolhida = await interpretarIntencaoMenu(msg);
+
+    if (opcaoEscolhida === 'agendar') {
       if (await limiteAgendamentosMesAtingido(empresaId)) {
         return responder('Desculpe, este estabelecimento atingiu o limite de agendamentos do mês. Tente novamente em breve.', 'inicio', {});
       }
       const barbeiros = await listarBarbeirosAtivos(empresaId);
       if (barbeiros.length === 0) return responder('No momento não há profissionais disponíveis para agendamento.', 'inicio', {});
       const lista = barbeiros.map((b, i) => `${i + 1}. ${b.nome}`).join('\n');
-      return responder(`Com quem você quer agendar?\n${lista}`, 'aguardando_barbeiro', { barbeiros });
+      const opcoesBarbeiros = barbeiros.map((b, i) => ({ id: String(i + 1), titulo: b.nome }));
+      return responder(`Com quem você quer agendar?\n${lista}`, 'aguardando_barbeiro', { barbeiros }, opcoesBarbeiros, 'Escolher profissional');
     }
-    return responder('Não entendi. Digite *AGENDAR* para marcar um horário.', 'menu');
+
+    if (opcaoEscolhida === 'agendamentos') {
+      const cliente = await encontrarClientePorTelefone(empresaId, telefone);
+      if (!cliente) {
+        return responder('Não encontrei nenhum cadastro com este número de telefone. Digite *MENU* para ver as opções.', 'inicio', {});
+      }
+
+      const { data: futuros } = await supabase
+        .from('agendamentos')
+        .select('id, data_hora, barbeiros(nome)')
+        .eq('usuario_id', cliente.id)
+        .eq('empresa_id', empresaId)
+        .in('status', ['pendente', 'confirmado'])
+        .gte('data_hora', paraConvencaoDoBanco(new Date()).toISOString())
+        .order('data_hora', { ascending: true })
+        .limit(10);
+
+      if (!futuros || futuros.length === 0) {
+        return responder('Você não tem nenhum agendamento futuro. Digite *MENU* para ver as opções.', 'inicio', {});
+      }
+
+      const futurosFmt = futuros.map((a) => {
+        const dh = new Date(a.data_hora);
+        const dataFmt = `${String(dh.getUTCDate()).padStart(2, '0')}/${String(dh.getUTCMonth() + 1).padStart(2, '0')}`;
+        const horaFmt = `${String(dh.getUTCHours()).padStart(2, '0')}:${String(dh.getUTCMinutes()).padStart(2, '0')}`;
+        return { dataFmt, horaFmt, nome: a.barbeiros?.nome || 'profissional' };
+      });
+      const lista = futurosFmt.map((f, i) => `${i + 1}. ${f.dataFmt} às ${f.horaFmt} — ${f.nome}`).join('\n');
+      const opcoesAgendamentos = futurosFmt.map((f, i) => ({
+        id: String(i + 1),
+        titulo: `${f.dataFmt} às ${f.horaFmt}`,
+        descricao: f.nome,
+      }));
+
+      return responder(
+        `Seus próximos agendamentos:\n${lista}\n\nDigite o número de um deles para cancelar, ou *MENU* para voltar.`,
+        'aguardando_escolha_agendamento',
+        { agendamentos: futuros },
+        opcoesAgendamentos,
+        'Ver agendamento'
+      );
+    }
+
+    return responder('Não entendi. Digite *1* para agendar ou *2* para ver seus agendamentos.', 'menu', undefined, MENU_PRINCIPAL_OPCOES);
+  }
+
+  if (sessao.estado_atual === 'aguardando_escolha_agendamento') {
+    const idx = parseInt(msg, 10) - 1;
+    const escolhido = (dados.agendamentos || [])[idx];
+    if (!escolhido) return responder('Escolha um número válido da lista, ou digite *MENU* para voltar.', 'aguardando_escolha_agendamento');
+
+    const dh = new Date(escolhido.data_hora);
+    const dataFmt = `${String(dh.getUTCDate()).padStart(2, '0')}/${String(dh.getUTCMonth() + 1).padStart(2, '0')} às ${String(dh.getUTCHours()).padStart(2, '0')}:${String(dh.getUTCMinutes()).padStart(2, '0')}`;
+    return responder(
+      `Confirma cancelar o agendamento de ${dataFmt} com ${escolhido.barbeiros?.nome || 'profissional'}?\nResponda *SIM* ou *NAO*.`,
+      'confirmando_cancelamento',
+      { ...dados, agendamento_cancelar_id: escolhido.id, agendamento_cancelar_texto: dataFmt },
+      [
+        { id: 'sim', titulo: 'Sim, cancelar' },
+        { id: 'nao', titulo: 'Não, manter' },
+      ]
+    );
+  }
+
+  if (sessao.estado_atual === 'confirmando_cancelamento') {
+    if (msgLower !== 'sim') {
+      return responder('Ok, mantive seu agendamento. Digite *MENU* para ver as opções.', 'inicio', {});
+    }
+    const { error: erroCancelar } = await supabase
+      .from('agendamentos')
+      .update({ status: 'cancelado', justificativa_cancelamento: 'Cancelado pelo cliente via WhatsApp', cancelado_por: 'cliente' })
+      .eq('id', dados.agendamento_cancelar_id)
+      .eq('empresa_id', empresaId);
+
+    if (erroCancelar) {
+      console.error('Erro ao cancelar agendamento via WhatsApp:', erroCancelar);
+      return responder('Não consegui cancelar agora. Tente novamente em instantes.', 'inicio', {});
+    }
+    return responder(`✅ Agendamento de ${dados.agendamento_cancelar_texto} cancelado. Digite *MENU* para ver as opções.`, 'inicio', {});
   }
 
   if (sessao.estado_atual === 'aguardando_barbeiro') {
@@ -175,7 +316,11 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
     return responder(
       `Para qual dia? Responda *hoje*, *amanha* ou uma data (dd/mm).`,
       'aguardando_data',
-      { ...dados, barbeiro_id: escolhido.id, barbeiro_nome: escolhido.nome }
+      { ...dados, barbeiro_id: escolhido.id, barbeiro_nome: escolhido.nome },
+      [
+        { id: 'hoje', titulo: 'Hoje' },
+        { id: 'amanha', titulo: 'Amanhã' },
+      ]
     );
   }
 
@@ -185,7 +330,8 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
     const slots = await horariosDisponiveis(empresaId, dados.barbeiro_id, dataEscolhida);
     if (slots.length === 0) return responder('Não há horários livres nesse dia. Tente outra data.', 'aguardando_data', dados);
     const lista = slots.map((h, i) => `${i + 1}. ${h}`).join('\n');
-    return responder(`Horários livres:\n${lista}`, 'aguardando_horario', { ...dados, data: dataEscolhida, slots });
+    const opcoesHorarios = slots.map((h, i) => ({ id: String(i + 1), titulo: h }));
+    return responder(`Horários livres:\n${lista}`, 'aguardando_horario', { ...dados, data: dataEscolhida, slots }, opcoesHorarios, 'Escolher horário');
   }
 
   if (sessao.estado_atual === 'aguardando_horario') {
@@ -195,7 +341,8 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
     const servicos = await listarServicosAtivos(empresaId);
     if (servicos.length === 0) return responder('Nenhum serviço cadastrado para agendamento no momento.', 'inicio', {});
     const lista = servicos.map((s, i) => `${i + 1}. ${s.nome} (R$ ${Number(s.valor).toFixed(2)})`).join('\n');
-    return responder(`Qual serviço?\n${lista}`, 'aguardando_servico', { ...dados, hora: horaEscolhida, servicos });
+    const opcoesServicos = servicos.map((s, i) => ({ id: String(i + 1), titulo: s.nome, descricao: `R$ ${Number(s.valor).toFixed(2)}` }));
+    return responder(`Qual serviço?\n${lista}`, 'aguardando_servico', { ...dados, hora: horaEscolhida, servicos }, opcoesServicos, 'Escolher serviço');
   }
 
   if (sessao.estado_atual === 'aguardando_servico') {

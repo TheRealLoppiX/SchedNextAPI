@@ -3,10 +3,13 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 
 const supabase = require('../config/supabase');
+const transporter = require('../config/mailer');
+const { emailHtml } = require('../utils/emailTemplate');
+const { enviarMensagem } = require('../services/whatsapp/provider');
 const validate = require('../middleware/validate');
 const verificarTokenCliente = require('../middleware/clienteAuth');
 const { mercadoPagoPixSchema } = require('../schemas');
-const { obterTaxaMarketplace } = require('../utils/limitesPlano');
+const { obterTaxaMarketplace, permiteWhatsappBot } = require('../utils/limitesPlano');
 const { calcularValorFinalCheckout } = require('../services/pagamentoAgendamento');
 const {
   montarUrlAutorizacao,
@@ -45,18 +48,64 @@ function redirectUriCallback(req) {
 // pelas rotas de status (admin e cliente) e pelo webhook — as três precisam do mesmo
 // comportamento de "sempre rebuscar antes de confiar".
 async function reconfirmarPagamento({ agendamentoId, accessTokenVendedor, paymentId, statusAtual }) {
-  if (statusAtual === 'pago' || !accessTokenVendedor) return statusAtual;
+  if (statusAtual === 'pago' || statusAtual === 'falhou' || !accessTokenVendedor) return statusAtual;
 
   try {
     const pagamento = await buscarPagamento({ accessTokenVendedor, paymentId });
     if (pagamento.status === 'approved') {
       await supabase.from('agendamentos').update({ pagamento_status: 'pago' }).eq('id', agendamentoId);
+      notificarPagamentoConfirmado(agendamentoId).catch((err) => console.error('Erro ao notificar pagamento confirmado:', err));
       return 'pago';
+    }
+    // 'rejected'/'cancelled' são terminais pro Pix (não fica tentando de novo sozinho, o
+    // pagador precisa gerar um Pix novo) — sem escrever esse estado, o front ficava com
+    // polling infinito mostrando "aguardando confirmação" mesmo com o pagamento já morto.
+    if (pagamento.status === 'rejected' || pagamento.status === 'cancelled') {
+      await supabase.from('agendamentos').update({ pagamento_status: 'falhou' }).eq('id', agendamentoId);
+      return 'falhou';
     }
   } catch (err) {
     console.error('Erro ao reconfirmar pagamento Pix:', err);
   }
   return statusAtual;
+}
+
+// Recibo de pagamento pro cliente final quando o Pix (agendamento ou PDV) é confirmado. Chamada
+// só a partir da transição de estado acima (nunca de novo pro mesmo agendamento, já que
+// reconfirmarPagamento retorna cedo assim que statusAtual já é 'pago'), então dispara uma vez só.
+async function notificarPagamentoConfirmado(agendamentoId) {
+  const { data: agendamento } = await supabase
+    .from('agendamentos')
+    .select('data_hora, valor_total, empresa_id, usuario_id, usuarios(email, nome_completo, telefone), empresas(nome, whatsapp_phone_number_id)')
+    .eq('id', agendamentoId)
+    .maybeSingle();
+
+  if (!agendamento?.usuarios) return;
+
+  const dataFormatada = new Date(agendamento.data_hora).toLocaleString('pt-BR');
+  const nomeEmpresa = agendamento.empresas?.nome || 'SchedNext';
+
+  if (agendamento.usuarios.email) {
+    transporter.sendMail({
+      to: agendamento.usuarios.email,
+      subject: `Pagamento confirmado - ${nomeEmpresa}`,
+      html: emailHtml({
+        titulo: `Olá, ${agendamento.usuarios.nome_completo}!`,
+        mensagemHtml: `
+          <p style="margin: 0 0 4px;">Recebemos seu pagamento via Pix referente ao atendimento na <strong>${nomeEmpresa}</strong>:</p>
+          <p style="margin: 12px 0; font-size: 15px;"><strong>Data:</strong> ${dataFormatada}<br><strong>Valor pago:</strong> R$ ${agendamento.valor_total}</p>
+        `
+      })
+    }).catch((err) => console.error('Erro ao enviar e-mail de confirmação de pagamento:', err));
+  }
+
+  if (agendamento.usuarios.telefone && (await permiteWhatsappBot(agendamento.empresa_id))) {
+    enviarMensagem(
+      agendamento.empresas?.whatsapp_phone_number_id,
+      `55${agendamento.usuarios.telefone.replace(/\D/g, '')}`,
+      `✅ Pagamento confirmado! ${nomeEmpresa}, ${dataFormatada}. Valor: R$ ${agendamento.valor_total}.`
+    ).catch((err) => console.error('Erro ao enviar WhatsApp de confirmação de pagamento:', err));
+  }
 }
 
 router.get('/admin/mercadopago', async (req, res) => {
@@ -136,6 +185,32 @@ router.post('/admin/mercadopago/pix/:agendamentoId', validate(mercadoPagoPixSche
       return res.status(400).json({ error: 'Não há valor a cobrar para este atendimento.' });
     }
 
+    // Duplo clique em "gerar Pix" (ou um retry de rede) criava uma segunda cobrança pro mesmo
+    // atendimento, com só a mais recente ficando salva em `mercadopago_payment_id` — a anterior
+    // ficava órfã, mas ainda válida pro pagador pagar (dinheiro indo pro mesmo lugar, só
+    // confuso). Se já existe uma cobrança pendente registrada, reconfirma o status dela antes de
+    // decidir: se ainda está pendente de verdade na Mercado Pago, devolve o mesmo QR Code em vez
+    // de gerar um novo.
+    const { agendamento: agAtual } = resultado;
+    if (agAtual.pagamento_status === 'pendente' && agAtual.mercadopago_payment_id) {
+      try {
+        const pagamentoExistente = await buscarPagamento({
+          accessTokenVendedor: empresa.mercadopago_access_token,
+          paymentId: agAtual.mercadopago_payment_id
+        });
+        if (pagamentoExistente.status === 'pending' || pagamentoExistente.status === 'in_process') {
+          return res.json({
+            payment_id: pagamentoExistente.id,
+            valor: resultado.valorFinal,
+            qr_code: pagamentoExistente.point_of_interaction?.transaction_data?.qr_code || null,
+            qr_code_base64: pagamentoExistente.point_of_interaction?.transaction_data?.qr_code_base64 || null
+          });
+        }
+      } catch (err) {
+        console.error('Erro ao reconfirmar Pix pendente existente, gerando um novo:', err);
+      }
+    }
+
     const taxaPercentual = await obterTaxaMarketplace(empresa_id);
     const cobranca = await criarPagamentoPix({
       accessTokenVendedor: empresa.mercadopago_access_token,
@@ -160,7 +235,9 @@ router.post('/admin/mercadopago/pix/:agendamentoId', validate(mercadoPagoPixSche
   } catch (err) {
     if (err.jaConcluido) return res.status(409).json({ error: err.message });
     console.error('Erro ao gerar Pix:', err);
-    res.status(500).json({ error: err.message || 'Não foi possível gerar o Pix agora.' });
+    // Não repassa err.message pro cliente final — vinha cru da API do Mercado Pago
+    // (services/mercadopago.js:request), podia expor detalhe interno/nomenclatura da API.
+    res.status(500).json({ error: 'Não foi possível gerar o Pix agora. Tente novamente em instantes.' });
   }
 });
 
@@ -369,7 +446,7 @@ router.get('/mercadopago/oauth/callback', async (req, res) => {
 async function processarNotificacaoAssinatura(preapprovalId) {
   const { data: empresaPlataforma } = await supabase
     .from('empresas')
-    .select('id, plano_plataforma_pendente_id')
+    .select('id, nome, email, plano_plataforma_pendente_id, status_assinatura')
     .eq('gateway_subscription_id', preapprovalId)
     .maybeSingle();
 
@@ -387,7 +464,38 @@ async function processarNotificacaoAssinatura(preapprovalId) {
       atualizacao.plano_plataforma_id = empresaPlataforma.plano_plataforma_pendente_id;
       atualizacao.plano_plataforma_pendente_id = null;
     }
+    // Sem isso, `proxima_cobranca_em` nunca era escrito em lugar nenhum do sistema (só zerado
+    // no cancelamento) — o que quebrava silenciosamente TRÊS consumidores dessa coluna:
+    // POST /admin/assinatura-plataforma/cancelar-cobranca (sempre recusava com "sem cobrança
+    // ativa"), o cron de downgrade pós-cancelamento (routes/../cron/assinaturas.js, nunca
+    // encontrava nenhuma linha vencida) e reativarAssinaturaNoGateway (services/pagamento.js,
+    // sempre caía no fallback de "amanhã" em vez da data prometida ao cliente). O Mercado Pago
+    // cobra mensalmente (mesma cadência de `criarPreapproval`, frequency:1/months), então cada
+    // ativação/renovação empurra a data prevista da próxima cobrança em 1 mês a partir de agora.
+    if (ativa) {
+      const proxima = new Date();
+      proxima.setMonth(proxima.getMonth() + 1);
+      atualizacao.proxima_cobranca_em = proxima.toISOString();
+    }
     await supabase.from('empresas').update(atualizacao).eq('id', empresaPlataforma.id);
+
+    // Avisa o dono da empresa quando a cobrança da própria plataforma falha (cartão recusado,
+    // etc.) — antes disso acontecia 100% em silêncio, o admin só descobria ao perder acesso a
+    // recursos do plano. Só dispara na transição pra inadimplente (evita reenviar o mesmo aviso
+    // a cada notificação repetida do Mercado Pago pro mesmo status).
+    if (!ativa && empresaPlataforma.status_assinatura !== 'inadimplente' && empresaPlataforma.email) {
+      transporter.sendMail({
+        to: empresaPlataforma.email,
+        subject: 'Não conseguimos confirmar o pagamento da sua assinatura - SchedNext',
+        html: emailHtml({
+          titulo: `Olá, ${empresaPlataforma.nome}!`,
+          mensagemHtml: `
+            <p style="margin: 0 0 4px;">Não conseguimos confirmar o pagamento da sua assinatura na SchedNext.</p>
+            <p style="margin: 12px 0;">Verifique os dados de cobrança no painel administrativo para evitar interrupção dos recursos do seu plano.</p>
+          `
+        })
+      }).catch((err) => console.error('Erro ao enviar e-mail de assinatura inadimplente:', err));
+    }
     return;
   }
 
