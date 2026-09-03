@@ -132,7 +132,11 @@ async function criarInstancia(instancia) {
       instanceName: instancia,
       integration: 'WHATSAPP-BAILEYS',
       qrcode: true,
-      webhook: { url: `${backendUrl}/whatsapp/webhook`, events: ['messages.upsert'] },
+      // Evolution normaliza o nome do evento pra maiúsculo+underscore ("messages.upsert"
+      // -> "MESSAGES_UPSERT") antes de checar se está na lista de eventos inscritos do
+      // webhook — registrar em minúsculo/com ponto faz essa checagem nunca bater, e o
+      // disparo é pulado em silêncio (sem erro, sem log, sem retry).
+      webhook: { url: `${backendUrl}/whatsapp/webhook`, events: ['MESSAGES_UPSERT'] },
     }),
   });
 

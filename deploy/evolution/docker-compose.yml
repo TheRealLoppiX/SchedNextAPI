@@ -32,8 +32,10 @@ services:
     networks:
       - evolution-net
     # Limite de memória pra não deixar o Postgres sem RAM num host de 1GB total
-    # (shape VM.Standard.E2.1.Micro do Oracle Always Free).
-    mem_limit: 600m
+    # (shape VM.Standard.E2.1.Micro do Oracle Always Free). Reduzido de 600m pra
+    # 400m em 2026-09-03: o evolution-api de fato usa uns 100-150MiB em operação
+    # normal, sobrando bem menos que isso pro Postgres (ver nota abaixo).
+    mem_limit: 400m
 
   postgres:
     image: postgres:15
@@ -48,7 +50,12 @@ services:
       - evolution_postgres_data:/var/lib/postgresql/data
     networks:
       - evolution-net
-    mem_limit: 250m
+    # Subido de 250m pra 450m em 2026-09-03: 250m estourava (OOM-kill do processo
+    # postgres pelo cgroup) durante INSERTs em lote de mensagens — ex: ao conectar
+    # um WhatsApp com histórico grande, ou sob uso normal do bot — derrubando o
+    # banco por alguns segundos bem na hora de processar uma mensagem recebida, o
+    # que fazia a Evolution nem chegar a disparar o webhook pro backend.
+    mem_limit: 450m
     # Sem "ports:" de propósito — só acessível dentro da rede interna do compose,
     # nunca exposto na internet.
 
