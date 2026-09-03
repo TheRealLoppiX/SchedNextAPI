@@ -27,7 +27,7 @@ const { calcularInicioCiclo, obterUsoServicos } = require('../utils/limitesAssin
 const { verificarEDispararPremioFidelidade } = require('../services/fidelidade');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 const { calcularValorFinalCheckout } = require('../services/pagamentoAgendamento');
-const { criarPagamentoPix } = require('../services/mercadopago');
+const { criarPagamentoPix, buscarPagamento } = require('../services/mercadopago');
 
 const MENSAGEM_LIMITE_AGENDAMENTOS = 'Este estabelecimento atingiu o limite de agendamentos do mês. Peça para o administrador fazer upgrade de plano.';
 
@@ -513,7 +513,7 @@ router.post('/admin/cancelar-agendamento', validate(cancelarAgendamentoSchema), 
 
 // ROTA DE CHECKOUT (Para finalizar o atendimento e receber o pagamento)
 router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchema), async (req, res) => {
-  const { agendamento_id, produtos_vendidos, servicos_adicionais, forma_pagamento } = req.body;
+  const { agendamento_id, produtos_vendidos, servicos_adicionais, forma_pagamento, formas_pagamento } = req.body;
 
   if (!agendamento_id) {
     return res.status(400).json({ error: 'ID do agendamento é obrigatório.' });
@@ -538,12 +538,62 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
     if (!resultado) return res.status(404).json({ error: 'Agendamento não encontrado.' });
     const { agendamento: agAtual, valorFinal, servicosCobertos, servicosCobrados } = resultado;
 
-    // 4. Atualiza o agendamento para concluído com o valor total final. forma_pagamento é só
-    // registro informativo (dinheiro/crédito/débito/pix) pro relatório de faturamento — não gera
-    // cobrança nenhuma de verdade, isso depende de gateway configurado por fora (ver PENDENCIAS.md).
+    // Pagamento dividido: cada perna soma pro valor total, e se uma delas for Pix precisa
+    // corresponder a uma cobrança de verdade já APROVADA no Mercado Pago (nunca confia no valor
+    // que o front manda pra perna Pix — sempre rebusca o pagamento real, mesmo princípio de
+    // reconfirmarPagamento em routes/mercadopago.js).
+    let formaPagamentoParaSalvar = forma_pagamento || null;
+    let formasPagamentoParaSalvar = null;
+    if (formas_pagamento && formas_pagamento.length > 0) {
+      const somaPernas = formas_pagamento.reduce((acc, f) => acc + Number(f.valor || 0), 0);
+      if (Math.abs(somaPernas - valorFinal) > 0.01) {
+        return res.status(400).json({ error: `A soma das formas de pagamento (R$ ${somaPernas.toFixed(2)}) não bate com o valor total do atendimento (R$ ${valorFinal.toFixed(2)}).` });
+      }
+
+      const pernasPix = formas_pagamento.filter((f) => f.forma_pagamento === 'pix');
+      if (pernasPix.length > 1) {
+        return res.status(400).json({ error: 'Só é possível ter uma perna de pagamento via Pix por atendimento.' });
+      }
+      if (pernasPix.length === 1) {
+        if (!agAtual.mercadopago_payment_id) {
+          return res.status(400).json({ error: 'Gere e confirme o Pix dessa perna antes de finalizar o atendimento.' });
+        }
+        const { data: empresaPix } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', req.empresaId).maybeSingle();
+        if (!empresaPix?.mercadopago_access_token) {
+          return res.status(400).json({ error: 'Conta Mercado Pago não conectada — não é possível confirmar a perna Pix.' });
+        }
+        let pagamentoPix;
+        try {
+          pagamentoPix = await buscarPagamento({
+            accessTokenVendedor: empresaPix.mercadopago_access_token,
+            paymentId: agAtual.mercadopago_payment_id
+          });
+        } catch (errPix) {
+          console.error('Erro ao reconfirmar Pix da perna dividida:', errPix);
+          return res.status(502).json({ error: 'Não foi possível confirmar o Pix agora com o Mercado Pago. Tente novamente em instantes.' });
+        }
+        const valorPagoConfere = Math.abs(Number(pagamentoPix.transaction_amount || 0) - Number(pernasPix[0].valor)) < 0.01;
+        if (pagamentoPix.status !== 'approved' || !valorPagoConfere) {
+          return res.status(400).json({ error: 'O Pix dessa perna ainda não foi confirmado como pago (ou o valor não confere). Aguarde a confirmação antes de finalizar.' });
+        }
+      }
+
+      formasPagamentoParaSalvar = formas_pagamento;
+      formaPagamentoParaSalvar = formas_pagamento.length === 1 ? formas_pagamento[0].forma_pagamento : null;
+    }
+
+    // 4. Atualiza o agendamento para concluído com o valor total final. forma_pagamento (e, em
+    // pagamento dividido, formas_pagamento) é só registro informativo (dinheiro/crédito/débito/
+    // pix) pro relatório de faturamento — a perna Pix é a única que já foi cobrada de verdade,
+    // via gateway configurado por fora (ver PENDENCIAS.md).
     const { error: updError } = await supabase
       .from('agendamentos')
-      .update({ status: 'concluido', valor_total: valorFinal, forma_pagamento: forma_pagamento || null })
+      .update({
+        status: 'concluido',
+        valor_total: valorFinal,
+        forma_pagamento: formaPagamentoParaSalvar,
+        formas_pagamento: formasPagamentoParaSalvar
+      })
       .eq('id', agendamento_id)
       .eq('empresa_id', req.empresaId);
     if (updError) throw updError;

@@ -12,6 +12,21 @@ function formatarDataLocal(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
+// Receita líquida de um agendamento, descontando a taxa de maquineta por forma de pagamento
+// (ver routes/financeiro.js). Em pagamento dividido (formasPagamento preenchido), cada perna
+// desconta a SUA própria taxa antes de somar — ex: R$30 no crédito com taxa 3% + R$20 no Pix com
+// taxa 1% dá um desconto efetivo diferente de aplicar uma taxa só sobre o total de R$50.
+function receitaLiquidaComTaxas(valorBase, formaPagamento, formasPagamento, taxas) {
+  if (formasPagamento && formasPagamento.length > 0) {
+    return formasPagamento.reduce((acc, perna) => {
+      const taxaPct = taxas[perna.forma_pagamento] || 0;
+      return acc + Number(perna.valor || 0) * (1 - taxaPct / 100);
+    }, 0);
+  }
+  const taxaPct = taxas[formaPagamento] || 0;
+  return Number(valorBase || 0) * (1 - taxaPct / 100);
+}
+
 function periodoAnterior(dataInicio, dataFim) {
   const inicio = new Date(`${dataInicio}T00:00:00`);
   const fim = new Date(`${dataFim}T00:00:00`);
@@ -45,7 +60,7 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
 
     const { data: agendamentos, error } = await supabase
       .from('agendamentos')
-      .select('id, status, data_hora, valor_total, usuario_id, barbeiro_id, forma_pagamento, barbeiros(nome)')
+      .select('id, status, data_hora, valor_total, usuario_id, barbeiro_id, forma_pagamento, formas_pagamento, barbeiros(nome)')
       .eq('empresa_id', empresaId)
       .gte('data_hora', `${dataInicio}T00:00:00`)
       .lte('data_hora', `${dataFim}T23:59:59`);
@@ -58,12 +73,11 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
 
     const faturamentoTotal = concluidos.reduce((acc, a) => acc + Number(a.valor_total || 0), 0);
     // Receita líquida: desconta a taxa de maquineta cadastrada (ver routes/financeiro.js) pra
-    // cada agendamento, de acordo com a forma de pagamento usada. Agendamentos sem
+    // cada agendamento, de acordo com a(s) forma(s) de pagamento usada(s). Agendamentos sem
     // forma_pagamento registrada (histórico antigo, ou fechado sem informar) entram sem desconto.
-    const receitaLiquidaTotal = concluidos.reduce((acc, a) => {
-      const taxaPct = taxas[a.forma_pagamento] || 0;
-      return acc + Number(a.valor_total || 0) * (1 - taxaPct / 100);
-    }, 0);
+    const receitaLiquidaTotal = concluidos.reduce((acc, a) => (
+      acc + receitaLiquidaComTaxas(a.valor_total, a.forma_pagamento, a.formas_pagamento, taxas)
+    ), 0);
     const ticketMedio = concluidos.length > 0 ? faturamentoTotal / concluidos.length : 0;
     const taxaCancelamento = total > 0 ? (cancelados.length / total) * 100 : 0;
 
@@ -198,7 +212,7 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
 
     const { data: agendamentos, error } = await supabase
       .from('agendamentos')
-      .select('id, barbeiro_id, usuario_id, valor_total, forma_pagamento, data_hora')
+      .select('id, barbeiro_id, usuario_id, valor_total, forma_pagamento, formas_pagamento, data_hora')
       .eq('empresa_id', empresaId)
       .eq('status', 'concluido')
       .gte('data_hora', `${dataInicio}T00:00:00`)
@@ -358,8 +372,12 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
         receita = precoAssinaturaPorCliente[a.usuario_id] / visitas;
       }
 
-      const taxaPct = taxas[a.forma_pagamento] || 0;
-      const receitaLiquida = receita * (1 - taxaPct / 100);
+      // Pagamento dividido só se aplica à fatia avulsa (receita === valor_total) — a fatia
+      // rateada de assinatura não corresponde a um pagamento real feito NESTE atendimento (foi a
+      // mensalidade, cobrada em outro momento/forma), então usa a taxa única de sempre.
+      const receitaLiquida = ehAssinante
+        ? receita * (1 - (taxas[a.forma_pagamento] || 0) / 100)
+        : receitaLiquidaComTaxas(a.valor_total, a.forma_pagamento, a.formas_pagamento, taxas);
       const percentual = percentualPorProfissional[a.barbeiro_id] || 0;
       const comissao = receitaLiquida * (percentual / 100);
 
@@ -388,7 +406,8 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
         valor_base: Number(a.valor_total || 0),
         valor_atribuido: Number(receita.toFixed(2)),
         receita_liquida: Number(receitaLiquida.toFixed(2)),
-        comissao: Number(comissao.toFixed(2))
+        comissao: Number(comissao.toFixed(2)),
+        formas_pagamento: a.formas_pagamento || null
       });
     }
 
