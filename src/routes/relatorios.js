@@ -223,7 +223,11 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
     const assinanteDesdePorCliente = {};
     const nomePorCliente = {};
     if (idsClientes.length > 0) {
-      const { data: usuarios } = await supabase.from('usuarios').select('id, nome, plano_id, assinante_desde').in('id', idsClientes);
+      const { data: usuarios, error: erroUsuarios } = await supabase
+        .from('usuarios')
+        .select('id, nome_completo, plano_id, assinante_desde')
+        .in('id', idsClientes);
+      if (erroUsuarios) throw erroUsuarios;
       const planoIds = [...new Set((usuarios || []).filter((u) => u.plano_id).map((u) => u.plano_id))];
       let precoPorPlano = {};
       if (planoIds.length > 0) {
@@ -231,7 +235,7 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
         precoPorPlano = Object.fromEntries((planos || []).map((p) => [p.id, Number(p.preco) || 0]));
       }
       for (const u of usuarios || []) {
-        nomePorCliente[u.id] = u.nome;
+        nomePorCliente[u.id] = u.nome_completo;
         if (u.plano_id && precoPorPlano[u.plano_id] != null) {
           precoAssinaturaPorCliente[u.id] = precoPorPlano[u.plano_id];
           if (u.assinante_desde) assinanteDesdePorCliente[u.id] = u.assinante_desde;
