@@ -1,11 +1,15 @@
-const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const supabase = require('../../config/supabase');
+const transporter = require('../../config/mailer');
+const { emailHtml, blocoCodigo } = require('../../utils/emailTemplate');
+const { criarPendente, buscarPendenteValido, removerPendente } = require('../cadastroPendente');
 const { enviarMensagem } = require('./provider');
 const { limiteAgendamentosMesAtingido } = require('../../utils/limitesPlano');
 const { variantesTelefoneBR } = require('../../utils/telefone');
 const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
 const { gerarTexto, estaConfigurado: iaConfigurada } = require('../groq');
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // Interpreta texto livre (ex: "quero cortar amanhã de tarde") e mapeia pra uma das opções do
 // menu. Usado tanto na primeira mensagem de uma conversa nova quanto como uma última tentativa
@@ -122,35 +126,28 @@ async function listarServicosAtivos(empresaId) {
   return data || [];
 }
 
-// Cadastra de fato um cliente novo (usuarios.email/senha são NOT NULL, mas o cliente que veio
-// pelo WhatsApp nunca escolhe e-mail/senha numa conversa de chat) — gera credenciais sintéticas
-// que ele nunca vai precisar usar, já que a interação dele continua sendo só pelo WhatsApp. Isso
-// substitui o antigo comportamento de só guardar o nome como texto livre no agendamento
-// (cliente_nome, sem usuario_id de verdade): agora o cliente passa a aparecer normalmente na
-// lista de clientes do admin e em "ver meus agendamentos" nas próximas conversas.
-async function cadastrarClienteRapido(empresaId, telefone, nomeCompleto) {
-  const emailSintetico = `whatsapp-${telefone}@clientes.schednext.com.br`;
-  const senhaHash = await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 12);
-
-  const { data, error } = await supabase
-    .from('usuarios')
-    .insert({
-      empresa_id: empresaId,
-      nome_completo: nomeCompleto,
-      telefone,
-      email: emailSintetico,
-      senha: senhaHash,
-      ativo: true,
-      notas: 'Cadastrado automaticamente pelo bot do WhatsApp.'
+// Manda o e-mail de código de confirmação de cadastro — mesmo template/assunto usado em
+// POST /registrar (routes/auth.js), só pra manter a identidade visual consistente entre o
+// cadastro pelo site e pelo WhatsApp.
+function enviarEmailCodigoCadastro(email, nome, codigo) {
+  transporter.sendMail({
+    to: email,
+    subject: 'Confirme seu cadastro - SchedNext',
+    html: emailHtml({
+      titulo: `Olá, ${nome}!`,
+      mensagemHtml: `
+        <p style="margin: 0 0 4px;">Use o código abaixo para confirmar seu cadastro:</p>
+        ${blocoCodigo(codigo)}
+        <p style="margin: 0; color: #666; font-size: 13px;">Esse código expira em 30 minutos.</p>
+      `
     })
-    .select('id, nome_completo')
-    .single();
+  }, (mailErr) => {
+    if (mailErr) console.error('Erro ao enviar e-mail de código de cadastro (bot do WhatsApp):', mailErr);
+  });
+}
 
-  if (error) {
-    console.error('Erro ao cadastrar cliente via bot do WhatsApp:', error);
-    return null;
-  }
-  return data;
+function gerarCodigoConfirmacao() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
 // hoje.toISOString() usaria o dia em UTC, não em Brasília: alguém digitando "hoje" entre ~21h e
@@ -435,7 +432,124 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
 
   if (sessao.estado_atual === 'aguardando_nome') {
     if (msg.length < 2) return responder('Digite seu nome completo, por favor.', 'aguardando_nome');
-    return criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados, nomeCliente: msg });
+    return responder(
+      `Prazer, ${msg}! Agora preciso do seu e-mail pra confirmar o cadastro.`,
+      'aguardando_email',
+      { ...dados, nome_cadastro: msg }
+    );
+  }
+
+  if (sessao.estado_atual === 'aguardando_email') {
+    const emailNormalizado = msg.toLowerCase();
+    if (!EMAIL_REGEX.test(emailNormalizado)) {
+      return responder('Esse e-mail não parece válido. Digite seu e-mail:', 'aguardando_email');
+    }
+
+    const { data: emailJaExiste } = await supabase
+      .from('usuarios')
+      .select('id')
+      .eq('email', emailNormalizado)
+      .eq('empresa_id', empresaId)
+      .maybeSingle();
+
+    if (emailJaExiste) {
+      return responder('Esse e-mail já tem cadastro por aqui. Digite outro e-mail, ou *SAIR* para cancelar.', 'aguardando_email');
+    }
+
+    return responder(
+      'Show! Agora escolha uma senha (mínimo 6 caracteres) — pode usar depois pra entrar no site como cliente.',
+      'aguardando_senha',
+      { ...dados, email_cadastro: emailNormalizado }
+    );
+  }
+
+  if (sessao.estado_atual === 'aguardando_senha') {
+    if (msg.length < 6) {
+      return responder('A senha precisa ter pelo menos 6 caracteres. Digite uma senha:', 'aguardando_senha');
+    }
+
+    const senhaHash = await bcrypt.hash(msg, 12);
+    const codigo = gerarCodigoConfirmacao();
+
+    const { error: erroPendente } = await criarPendente({
+      tipo: 'cliente',
+      email: dados.email_cadastro,
+      empresa_id: empresaId,
+      codigo,
+      dados: { nome: dados.nome_cadastro, nascimento: null, telefone, senha: senhaHash, empresa_id: empresaId }
+    });
+
+    if (erroPendente) {
+      console.error('Erro ao criar cadastro pendente via bot do WhatsApp:', erroPendente);
+      return responder('Não consegui gerar o código de confirmação agora. Tente novamente em instantes.', 'aguardando_senha', dados);
+    }
+
+    enviarEmailCodigoCadastro(dados.email_cadastro, dados.nome_cadastro, codigo);
+
+    return responder(
+      `Mandamos um código de confirmação para ${dados.email_cadastro}. Digite o código aqui para concluir o cadastro (ou *REENVIAR* para receber um novo).`,
+      'aguardando_codigo_cadastro',
+      dados
+    );
+  }
+
+  if (sessao.estado_atual === 'aguardando_codigo_cadastro') {
+    if (msgLower === 'reenviar') {
+      // Busca o pendente já existente (criado em 'aguardando_senha') só pra reaproveitar o mesmo
+      // hash de senha — criarPendente faz upsert por (tipo,email,empresa_id), então só troca o
+      // código e a validade, sem pedir a senha de novo.
+      const { data: pendenteAtual } = await supabase
+        .from('cadastros_pendentes')
+        .select('dados')
+        .eq('tipo', 'cliente')
+        .eq('email', dados.email_cadastro)
+        .eq('empresa_id', empresaId)
+        .maybeSingle();
+
+      if (!pendenteAtual) {
+        return responder('Seu cadastro pendente expirou. Digite *MENU* para recomeçar.', 'inicio', {});
+      }
+
+      const codigo = gerarCodigoConfirmacao();
+      const { error: erroPendente } = await criarPendente({
+        tipo: 'cliente',
+        email: dados.email_cadastro,
+        empresa_id: empresaId,
+        codigo,
+        dados: pendenteAtual.dados
+      });
+      if (!erroPendente) enviarEmailCodigoCadastro(dados.email_cadastro, dados.nome_cadastro, codigo);
+      return responder('Novo código enviado! Digite ele aqui para concluir o cadastro.', 'aguardando_codigo_cadastro', dados);
+    }
+
+    const pendente = await buscarPendenteValido({ tipo: 'cliente', email: dados.email_cadastro, codigo: msg });
+    if (!pendente) {
+      return responder('Código inválido ou expirado. Confira o e-mail e digite de novo, ou *REENVIAR* para receber um novo código.', 'aguardando_codigo_cadastro');
+    }
+
+    const { nome, nascimento, telefone: telefonePendente, senha, empresa_id } = pendente.dados;
+    const { data: novoUsuario, error: erroCadastro } = await supabase
+      .from('usuarios')
+      .insert({
+        nome_completo: nome,
+        data_nascimento: nascimento,
+        email: dados.email_cadastro,
+        telefone: telefonePendente,
+        senha,
+        empresa_id,
+        ativo: true,
+        tipo: 'cliente'
+      })
+      .select('id')
+      .single();
+
+    if (erroCadastro) {
+      console.error('Erro ao ativar cadastro via bot do WhatsApp:', erroCadastro);
+      return responder('Não consegui concluir seu cadastro agora. Tente novamente em instantes, ou digite *MENU*.', 'inicio', {});
+    }
+
+    await removerPendente(pendente.id);
+    return criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados: { ...dados, usuario_id: novoUsuario.id }, nomeCliente: nome });
   }
 
   return responder('Digite *MENU* para ver as opções.', 'inicio', {});
@@ -462,26 +576,20 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sess
     return;
   }
 
-  // Cliente não encontrado no cadastro (dados.usuario_id vazio): cadastra de verdade em vez de só
-  // guardar o nome como texto livre no agendamento — assim ele passa a existir de fato pra
-  // próxima conversa ("ver meus agendamentos" já reconhece o telefone) e aparece na lista de
-  // clientes do admin. Se o cadastro falhar por algum motivo, segue com o texto livre mesmo (não
-  // vale travar o agendamento por causa disso).
-  let usuarioId = dados.usuario_id || null;
-  if (!usuarioId) {
-    const novoUsuario = await cadastrarClienteRapido(empresaId, telefone, nomeCliente);
-    if (novoUsuario) usuarioId = novoUsuario.id;
-  }
-
+  // Chegando aqui, dados.usuario_id já está sempre preenchido — ou era um cliente já cadastrado
+  // (achado por telefone lá em 'aguardando_servico'), ou acabou de completar o cadastro por
+  // e-mail+código (ver 'aguardando_codigo_cadastro'). cliente_nome só existe como campo de texto
+  // livre pra agendamentos sem conta de verdade (ex: cadastrado direto pelo admin sem usuário);
+  // mantido aqui só como rede de segurança caso usuario_id venha vazio por algum motivo.
   const { error } = await supabase.from('agendamentos').insert({
-    usuario_id: usuarioId,
+    usuario_id: dados.usuario_id || null,
     empresa_id: empresaId,
     barbeiro_id: dados.barbeiro_id,
     data_hora: dataHora,
     status: 'confirmado',
     valor_total: dados.servico_valor,
     duracao_total: dados.servico_duracao,
-    cliente_nome: usuarioId ? null : nomeCliente
+    cliente_nome: dados.usuario_id ? null : nomeCliente
   });
 
   if (error) {
