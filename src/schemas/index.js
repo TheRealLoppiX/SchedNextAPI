@@ -262,11 +262,20 @@ const cancelarAgendamentoSchema = z.object({
   enviadoPor: textoOpcionalNullable
 });
 
+const formaPagamentoEnum = z.enum(['dinheiro', 'credito', 'debito', 'pix']);
+
 const finalizarCheckoutSchema = z.object({
   agendamento_id: idLike,
   produtos_vendidos: z.array(z.object({ id: idLike, quantidade: z.coerce.number().int().positive().optional() })).optional(),
   servicos_adicionais: z.array(z.object({ id: idLike })).optional(),
-  forma_pagamento: z.enum(['dinheiro', 'credito', 'debito', 'pix']).optional().nullable()
+  forma_pagamento: formaPagamentoEnum.optional().nullable(),
+  // Pagamento dividido (ex: parte no crédito, parte no Pix) — quando presente, tem prioridade
+  // sobre forma_pagamento (que fica ignorado). Cada perna soma pro valor total do atendimento;
+  // validamos a soma exata no handler, onde já sabemos o valor final calculado no servidor.
+  formas_pagamento: z.array(z.object({
+    forma_pagamento: formaPagamentoEnum,
+    valor: z.coerce.number().positive()
+  })).min(1).max(4).optional()
 });
 
 const agendarEncaixeSchema = z.object({
@@ -344,7 +353,10 @@ const taxasPagamentoSchema = z.object({
 
 const mercadoPagoPixSchema = z.object({
   produtos_vendidos: z.array(z.object({ id: idLike, quantidade: z.coerce.number().int().positive().optional() })).optional(),
-  servicos_adicionais: z.array(z.object({ id: idLike })).optional()
+  servicos_adicionais: z.array(z.object({ id: idLike })).optional(),
+  // Presente só em pagamento dividido: cobra esse valor específico via Pix em vez do total do
+  // atendimento (o resto fica com outra(s) forma(s) registrada(s) no fechamento de caixa).
+  valor: z.coerce.number().positive().optional()
 });
 
 // --- apiPublica.js ---

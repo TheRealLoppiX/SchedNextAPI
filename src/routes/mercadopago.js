@@ -159,7 +159,7 @@ router.post('/admin/mercadopago/desconectar', async (req, res) => {
 // da rota /admin/finalizar-servico-checkout (ver services/pagamentoAgendamento.js) — precisam
 // bater exatamente, senão o Pix cobra um valor e o fechamento de caixa registra outro.
 router.post('/admin/mercadopago/pix/:agendamentoId', validate(mercadoPagoPixSchema), async (req, res) => {
-  const { produtos_vendidos, servicos_adicionais } = req.body;
+  const { produtos_vendidos, servicos_adicionais, valor } = req.body;
   const empresa_id = req.empresaId;
 
   const { data: empresa, error: empErr } = await supabase
@@ -185,12 +185,21 @@ router.post('/admin/mercadopago/pix/:agendamentoId', validate(mercadoPagoPixSche
       return res.status(400).json({ error: 'Não há valor a cobrar para este atendimento.' });
     }
 
+    // `valor` só vem preenchido em pagamento dividido — cobra só a perna do Pix, o resto fica
+    // com outra(s) forma(s) registrada(s) no fechamento de caixa (ver finalizar-servico-checkout).
+    // Sem `valor`, cobra o total do atendimento (fluxo de sempre, Pix único).
+    const valorCobranca = valor != null ? Number(valor) : resultado.valorFinal;
+    if (valorCobranca > resultado.valorFinal + 0.01) {
+      return res.status(400).json({ error: 'O valor do Pix não pode ser maior que o total do atendimento.' });
+    }
+
     // Duplo clique em "gerar Pix" (ou um retry de rede) criava uma segunda cobrança pro mesmo
     // atendimento, com só a mais recente ficando salva em `mercadopago_payment_id` — a anterior
     // ficava órfã, mas ainda válida pro pagador pagar (dinheiro indo pro mesmo lugar, só
     // confuso). Se já existe uma cobrança pendente registrada, reconfirma o status dela antes de
-    // decidir: se ainda está pendente de verdade na Mercado Pago, devolve o mesmo QR Code em vez
-    // de gerar um novo.
+    // decidir: se ainda está pendente de verdade na Mercado Pago E é do MESMO valor pedido agora
+    // (senão o staff mudou a divisão entre um clique e outro), devolve o mesmo QR Code em vez de
+    // gerar um novo.
     const { agendamento: agAtual } = resultado;
     if (agAtual.pagamento_status === 'pendente' && agAtual.mercadopago_payment_id) {
       try {
@@ -198,10 +207,11 @@ router.post('/admin/mercadopago/pix/:agendamentoId', validate(mercadoPagoPixSche
           accessTokenVendedor: empresa.mercadopago_access_token,
           paymentId: agAtual.mercadopago_payment_id
         });
-        if (pagamentoExistente.status === 'pending' || pagamentoExistente.status === 'in_process') {
+        const mesmoValor = Math.abs(Number(pagamentoExistente.transaction_amount || 0) - valorCobranca) < 0.01;
+        if (mesmoValor && (pagamentoExistente.status === 'pending' || pagamentoExistente.status === 'in_process')) {
           return res.json({
             payment_id: pagamentoExistente.id,
-            valor: resultado.valorFinal,
+            valor: valorCobranca,
             qr_code: pagamentoExistente.point_of_interaction?.transaction_data?.qr_code || null,
             qr_code_base64: pagamentoExistente.point_of_interaction?.transaction_data?.qr_code_base64 || null
           });
@@ -214,10 +224,10 @@ router.post('/admin/mercadopago/pix/:agendamentoId', validate(mercadoPagoPixSche
     const taxaPercentual = await obterTaxaMarketplace(empresa_id);
     const cobranca = await criarPagamentoPix({
       accessTokenVendedor: empresa.mercadopago_access_token,
-      valor: resultado.valorFinal,
+      valor: valorCobranca,
       descricao: `SchedNext — atendimento em ${empresa.nome}`,
       externalReference: req.params.agendamentoId,
-      applicationFee: resultado.valorFinal * (taxaPercentual / 100)
+      applicationFee: valorCobranca * (taxaPercentual / 100)
     });
 
     await supabase
@@ -228,7 +238,7 @@ router.post('/admin/mercadopago/pix/:agendamentoId', validate(mercadoPagoPixSche
 
     res.json({
       payment_id: cobranca.id,
-      valor: resultado.valorFinal,
+      valor: valorCobranca,
       qr_code: cobranca.point_of_interaction?.transaction_data?.qr_code || null,
       qr_code_base64: cobranca.point_of_interaction?.transaction_data?.qr_code_base64 || null
     });
