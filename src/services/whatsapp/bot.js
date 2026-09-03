@@ -1,3 +1,5 @@
+const crypto = require('crypto');
+const bcrypt = require('bcrypt');
 const supabase = require('../../config/supabase');
 const { enviarMensagem } = require('./provider');
 const { limiteAgendamentosMesAtingido } = require('../../utils/limitesPlano');
@@ -5,11 +7,13 @@ const { variantesTelefoneBR } = require('../../utils/telefone');
 const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
 const { gerarTexto, estaConfigurado: iaConfigurada } = require('../groq');
 
-// Interpreta texto livre digitado no menu principal (ex: "quero cortar amanhã de tarde") e tenta
-// mapear pra uma das opções do menu, em vez de sempre exigir o número exato — só entra em ação
-// quando "1"/"2"/"agendar"/"agendamento" já não bateram (ver estado 'menu' abaixo). Puramente um
-// classificador de intenção (responde só a palavra AGENDAR/AGENDAMENTOS/NENHUM); a máquina de
-// estados em si continua tocando o fluxo normalmente a partir da opção escolhida.
+// Interpreta texto livre (ex: "quero cortar amanhã de tarde") e mapeia pra uma das opções do
+// menu. Usado tanto na primeira mensagem de uma conversa nova quanto como uma última tentativa
+// antes de desistir com "não entendi" em qualquer estado do meio do fluxo (ver
+// tentarInterceptarGlobal) — é o que permite o cliente pedir o que quer a qualquer momento, sem
+// precisar digitar MENU antes. Puramente um classificador de intenção (responde só a palavra
+// AGENDAR/AGENDAMENTOS/NENHUM); a máquina de estados em si continua tocando o fluxo normalmente
+// a partir da opção escolhida.
 async function interpretarIntencaoMenu(texto) {
   if (!iaConfigurada()) return null;
   try {
@@ -26,6 +30,18 @@ async function interpretarIntencaoMenu(texto) {
     console.error('Erro ao interpretar intenção via IA no bot do WhatsApp:', err);
   }
   return null;
+}
+
+// Resolve a intenção da mensagem pros dois fluxos principais (agendar / ver-agendamentos).
+// `atalhosNumericos` só é ligado no estado 'menu'/'inicio' (onde "1"/"2" realmente significam as
+// opções do menu) — nos demais estados um "1"/"2" já foi tratado como escolha de item da lista
+// atual antes de chegar aqui, então tratar como atalho de menu ali seria ambíguo/errado.
+async function resolverIntencaoGlobal(msg, msgLower, { atalhosNumericos = false } = {}) {
+  if (atalhosNumericos && (msg === '1' || msgLower === 'agendar')) return 'agendar';
+  if (atalhosNumericos && (msg === '2' || msgLower.includes('agendamento'))) return 'agendamentos';
+  if (!atalhosNumericos && msgLower === 'agendar') return 'agendar';
+  if (!atalhosNumericos && msgLower.includes('agendamento')) return 'agendamentos';
+  return interpretarIntencaoMenu(msg);
 }
 
 // Encontra o cliente cadastrado dono deste número, tolerando os formatos diferentes em que
@@ -106,6 +122,37 @@ async function listarServicosAtivos(empresaId) {
   return data || [];
 }
 
+// Cadastra de fato um cliente novo (usuarios.email/senha são NOT NULL, mas o cliente que veio
+// pelo WhatsApp nunca escolhe e-mail/senha numa conversa de chat) — gera credenciais sintéticas
+// que ele nunca vai precisar usar, já que a interação dele continua sendo só pelo WhatsApp. Isso
+// substitui o antigo comportamento de só guardar o nome como texto livre no agendamento
+// (cliente_nome, sem usuario_id de verdade): agora o cliente passa a aparecer normalmente na
+// lista de clientes do admin e em "ver meus agendamentos" nas próximas conversas.
+async function cadastrarClienteRapido(empresaId, telefone, nomeCompleto) {
+  const emailSintetico = `whatsapp-${telefone}@clientes.schednext.com.br`;
+  const senhaHash = await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 12);
+
+  const { data, error } = await supabase
+    .from('usuarios')
+    .insert({
+      empresa_id: empresaId,
+      nome_completo: nomeCompleto,
+      telefone,
+      email: emailSintetico,
+      senha: senhaHash,
+      ativo: true,
+      notas: 'Cadastrado automaticamente pelo bot do WhatsApp.'
+    })
+    .select('id, nome_completo')
+    .single();
+
+  if (error) {
+    console.error('Erro ao cadastrar cliente via bot do WhatsApp:', error);
+    return null;
+  }
+  return data;
+}
+
 // hoje.toISOString() usaria o dia em UTC, não em Brasília: alguém digitando "hoje" entre ~21h e
 // meia-noite (horário de Brasília) cairia no dia seguinte, já virado em UTC. paraConvencaoDoBanco
 // desloca pro mesmo "horário de parede" que o resto do projeto usa pra ler data local (ver
@@ -161,6 +208,68 @@ async function horariosDisponiveis(empresaId, barbeiroId, dataStr) {
   return slots;
 }
 
+// As duas construções abaixo (agendar / ver-agendamentos) ficam à parte de processarMensagem
+// porque são chamadas de dois lugares: a partir do menu normal, e a partir de
+// tentarInterceptarGlobal (quando o cliente pede isso em texto livre no meio de outro estado).
+async function construirRespostaAgendar(empresaId) {
+  if (await limiteAgendamentosMesAtingido(empresaId)) {
+    return { texto: 'Desculpe, este estabelecimento atingiu o limite de agendamentos do mês. Tente novamente em breve.', estado: 'inicio', dados: {} };
+  }
+  const barbeiros = await listarBarbeirosAtivos(empresaId);
+  if (barbeiros.length === 0) {
+    return { texto: 'No momento não há profissionais disponíveis para agendamento.', estado: 'inicio', dados: {} };
+  }
+  const lista = barbeiros.map((b, i) => `${i + 1}. ${b.nome}`).join('\n');
+  return { texto: `Com quem você quer agendar?\n${lista}`, estado: 'aguardando_barbeiro', dados: { barbeiros } };
+}
+
+async function construirRespostaVerAgendamentos(empresaId, telefone) {
+  const cliente = await encontrarClientePorTelefone(empresaId, telefone);
+  if (!cliente) {
+    return { texto: 'Não encontrei nenhum cadastro com este número de telefone. Digite *MENU* para ver as opções.', estado: 'inicio', dados: {} };
+  }
+
+  const { data: futuros } = await supabase
+    .from('agendamentos')
+    .select('id, data_hora, barbeiros(nome)')
+    .eq('usuario_id', cliente.id)
+    .eq('empresa_id', empresaId)
+    .in('status', ['pendente', 'confirmado'])
+    .gte('data_hora', paraConvencaoDoBanco(new Date()).toISOString())
+    .order('data_hora', { ascending: true })
+    .limit(10);
+
+  if (!futuros || futuros.length === 0) {
+    return { texto: 'Você não tem nenhum agendamento futuro. Digite *MENU* para ver as opções.', estado: 'inicio', dados: {} };
+  }
+
+  const futurosFmt = futuros.map((a) => {
+    const dh = new Date(a.data_hora);
+    const dataFmt = `${String(dh.getUTCDate()).padStart(2, '0')}/${String(dh.getUTCMonth() + 1).padStart(2, '0')}`;
+    const horaFmt = `${String(dh.getUTCHours()).padStart(2, '0')}:${String(dh.getUTCMinutes()).padStart(2, '0')}`;
+    return { dataFmt, horaFmt, nome: a.barbeiros?.nome || 'profissional' };
+  });
+  const lista = futurosFmt.map((f, i) => `${i + 1}. ${f.dataFmt} às ${f.horaFmt} — ${f.nome}`).join('\n');
+
+  return {
+    texto: `Seus próximos agendamentos:\n${lista}\n\nDigite o número de um deles para cancelar, ou *MENU* para voltar.`,
+    estado: 'aguardando_escolha_agendamento',
+    dados: { agendamentos: futuros }
+  };
+}
+
+// Tentativa final antes de desistir com "não entendi"/"escolha um número válido" num estado do
+// meio do fluxo (ex: aguardando_barbeiro, aguardando_data...) — permite o cliente mudar de ideia
+// ou pedir outra coisa a qualquer momento em texto livre, sem precisar digitar SAIR/MENU antes
+// pra depois recomeçar. Retorna null se não identificou nada, e quem chamou segue com a mensagem
+// de erro específica daquele estado.
+async function tentarInterceptarGlobal(msg, msgLower, empresaId, telefone) {
+  const intencao = await resolverIntencaoGlobal(msg, msgLower, { atalhosNumericos: false });
+  if (intencao === 'agendar') return construirRespostaAgendar(empresaId);
+  if (intencao === 'agendamentos') return construirRespostaVerAgendamentos(empresaId, telefone);
+  return null;
+}
+
 async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   const sessao = await obterOuCriarSessao(empresaId, telefone);
   const dados = sessao.dados_temporarios || {};
@@ -186,63 +295,42 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
     );
   }
 
-  if (sessao.estado_atual === 'inicio' || msgLower === 'menu') {
-    return responder(
-      'Olá! 👋 O que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.',
-      'menu'
-    );
+  const MENSAGEM_MENU = 'Olá! 👋 O que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.';
+
+  // "menu" digitado explicitamente sempre mostra o menu, em qualquer estado — é um pedido
+  // direto, não faz sentido reinterpretar via IA.
+  if (msgLower === 'menu') {
+    return responder(MENSAGEM_MENU, 'menu');
+  }
+
+  if (sessao.estado_atual === 'inicio') {
+    // Antes, a primeira mensagem de qualquer conversa nova sempre caía no menu padrão, mesmo se
+    // o cliente já tivesse dito o que queria (ex: "quero cortar amanhã de tarde") — precisava
+    // digitar de novo depois de ver o menu. Agora tenta entender de cara; só mostra o menu se
+    // não identificar nada.
+    const intencao = await resolverIntencaoGlobal(msg, msgLower, { atalhosNumericos: true });
+    if (intencao === 'agendar') {
+      const { texto: t, estado, dados: d } = await construirRespostaAgendar(empresaId);
+      return responder(t, estado, d);
+    }
+    if (intencao === 'agendamentos') {
+      const { texto: t, estado, dados: d } = await construirRespostaVerAgendamentos(empresaId, telefone);
+      return responder(t, estado, d);
+    }
+    return responder(MENSAGEM_MENU, 'menu');
   }
 
   if (sessao.estado_atual === 'menu') {
-    // Se não bateu com o número/palavra exata, tenta uma última vez interpretar o texto livre
-    // via IA (ex: "quero cortar amanhã de tarde") antes de desistir com o "não entendi" — sem
-    // isso, qualquer mensagem fora do padrão exato travava a conversa logo na primeira resposta.
-    let opcaoEscolhida = msg === '1' || msgLower === 'agendar' ? 'agendar' : (msg === '2' || msgLower.includes('agendamento')) ? 'agendamentos' : null;
-    if (!opcaoEscolhida) opcaoEscolhida = await interpretarIntencaoMenu(msg);
+    const opcaoEscolhida = await resolverIntencaoGlobal(msg, msgLower, { atalhosNumericos: true });
 
     if (opcaoEscolhida === 'agendar') {
-      if (await limiteAgendamentosMesAtingido(empresaId)) {
-        return responder('Desculpe, este estabelecimento atingiu o limite de agendamentos do mês. Tente novamente em breve.', 'inicio', {});
-      }
-      const barbeiros = await listarBarbeirosAtivos(empresaId);
-      if (barbeiros.length === 0) return responder('No momento não há profissionais disponíveis para agendamento.', 'inicio', {});
-      const lista = barbeiros.map((b, i) => `${i + 1}. ${b.nome}`).join('\n');
-      return responder(`Com quem você quer agendar?\n${lista}`, 'aguardando_barbeiro', { barbeiros });
+      const { texto: t, estado, dados: d } = await construirRespostaAgendar(empresaId);
+      return responder(t, estado, d);
     }
 
     if (opcaoEscolhida === 'agendamentos') {
-      const cliente = await encontrarClientePorTelefone(empresaId, telefone);
-      if (!cliente) {
-        return responder('Não encontrei nenhum cadastro com este número de telefone. Digite *MENU* para ver as opções.', 'inicio', {});
-      }
-
-      const { data: futuros } = await supabase
-        .from('agendamentos')
-        .select('id, data_hora, barbeiros(nome)')
-        .eq('usuario_id', cliente.id)
-        .eq('empresa_id', empresaId)
-        .in('status', ['pendente', 'confirmado'])
-        .gte('data_hora', paraConvencaoDoBanco(new Date()).toISOString())
-        .order('data_hora', { ascending: true })
-        .limit(10);
-
-      if (!futuros || futuros.length === 0) {
-        return responder('Você não tem nenhum agendamento futuro. Digite *MENU* para ver as opções.', 'inicio', {});
-      }
-
-      const futurosFmt = futuros.map((a) => {
-        const dh = new Date(a.data_hora);
-        const dataFmt = `${String(dh.getUTCDate()).padStart(2, '0')}/${String(dh.getUTCMonth() + 1).padStart(2, '0')}`;
-        const horaFmt = `${String(dh.getUTCHours()).padStart(2, '0')}:${String(dh.getUTCMinutes()).padStart(2, '0')}`;
-        return { dataFmt, horaFmt, nome: a.barbeiros?.nome || 'profissional' };
-      });
-      const lista = futurosFmt.map((f, i) => `${i + 1}. ${f.dataFmt} às ${f.horaFmt} — ${f.nome}`).join('\n');
-
-      return responder(
-        `Seus próximos agendamentos:\n${lista}\n\nDigite o número de um deles para cancelar, ou *MENU* para voltar.`,
-        'aguardando_escolha_agendamento',
-        { agendamentos: futuros }
-      );
+      const { texto: t, estado, dados: d } = await construirRespostaVerAgendamentos(empresaId, telefone);
+      return responder(t, estado, d);
     }
 
     return responder('Não entendi. Digite *1* para agendar ou *2* para ver seus agendamentos.', 'menu');
@@ -251,7 +339,11 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   if (sessao.estado_atual === 'aguardando_escolha_agendamento') {
     const idx = parseInt(msg, 10) - 1;
     const escolhido = (dados.agendamentos || [])[idx];
-    if (!escolhido) return responder('Escolha um número válido da lista, ou digite *MENU* para voltar.', 'aguardando_escolha_agendamento');
+    if (!escolhido) {
+      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone);
+      if (global) return responder(global.texto, global.estado, global.dados);
+      return responder('Escolha um número válido da lista, ou digite *MENU* para voltar.', 'aguardando_escolha_agendamento');
+    }
 
     const dh = new Date(escolhido.data_hora);
     const dataFmt = `${String(dh.getUTCDate()).padStart(2, '0')}/${String(dh.getUTCMonth() + 1).padStart(2, '0')} às ${String(dh.getUTCHours()).padStart(2, '0')}:${String(dh.getUTCMinutes()).padStart(2, '0')}`;
@@ -282,7 +374,11 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   if (sessao.estado_atual === 'aguardando_barbeiro') {
     const idx = parseInt(msg, 10) - 1;
     const escolhido = (dados.barbeiros || [])[idx];
-    if (!escolhido) return responder('Escolha um número válido da lista.', 'aguardando_barbeiro');
+    if (!escolhido) {
+      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone);
+      if (global) return responder(global.texto, global.estado, global.dados);
+      return responder('Escolha um número válido da lista.', 'aguardando_barbeiro');
+    }
     return responder(
       `Para qual dia? Responda *hoje*, *amanha* ou uma data (dd/mm).`,
       'aguardando_data',
@@ -292,7 +388,11 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
 
   if (sessao.estado_atual === 'aguardando_data') {
     const dataEscolhida = parseDataFalada(msg);
-    if (!dataEscolhida) return responder('Não entendi a data. Responda *hoje*, *amanha* ou dd/mm.', 'aguardando_data');
+    if (!dataEscolhida) {
+      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone);
+      if (global) return responder(global.texto, global.estado, global.dados);
+      return responder('Não entendi a data. Responda *hoje*, *amanha* ou dd/mm.', 'aguardando_data');
+    }
     const slots = await horariosDisponiveis(empresaId, dados.barbeiro_id, dataEscolhida);
     if (slots.length === 0) return responder('Não há horários livres nesse dia. Tente outra data.', 'aguardando_data', dados);
     const lista = slots.map((h, i) => `${i + 1}. ${h}`).join('\n');
@@ -302,7 +402,11 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   if (sessao.estado_atual === 'aguardando_horario') {
     const idx = parseInt(msg, 10) - 1;
     const horaEscolhida = (dados.slots || [])[idx];
-    if (!horaEscolhida) return responder('Escolha um número válido da lista de horários.', 'aguardando_horario');
+    if (!horaEscolhida) {
+      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone);
+      if (global) return responder(global.texto, global.estado, global.dados);
+      return responder('Escolha um número válido da lista de horários.', 'aguardando_horario');
+    }
     const servicos = await listarServicosAtivos(empresaId);
     if (servicos.length === 0) return responder('Nenhum serviço cadastrado para agendamento no momento.', 'inicio', {});
     const lista = servicos.map((s, i) => `${i + 1}. ${s.nome} (R$ ${Number(s.valor).toFixed(2)})`).join('\n');
@@ -312,7 +416,11 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   if (sessao.estado_atual === 'aguardando_servico') {
     const idx = parseInt(msg, 10) - 1;
     const servicoEscolhido = (dados.servicos || [])[idx];
-    if (!servicoEscolhido) return responder('Escolha um número válido da lista de serviços.', 'aguardando_servico');
+    if (!servicoEscolhido) {
+      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone);
+      if (global) return responder(global.texto, global.estado, global.dados);
+      return responder('Escolha um número válido da lista de serviços.', 'aguardando_servico');
+    }
 
     const usuarioExistente = await encontrarClientePorTelefone(empresaId, telefone);
 
@@ -354,15 +462,26 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sess
     return;
   }
 
+  // Cliente não encontrado no cadastro (dados.usuario_id vazio): cadastra de verdade em vez de só
+  // guardar o nome como texto livre no agendamento — assim ele passa a existir de fato pra
+  // próxima conversa ("ver meus agendamentos" já reconhece o telefone) e aparece na lista de
+  // clientes do admin. Se o cadastro falhar por algum motivo, segue com o texto livre mesmo (não
+  // vale travar o agendamento por causa disso).
+  let usuarioId = dados.usuario_id || null;
+  if (!usuarioId) {
+    const novoUsuario = await cadastrarClienteRapido(empresaId, telefone, nomeCliente);
+    if (novoUsuario) usuarioId = novoUsuario.id;
+  }
+
   const { error } = await supabase.from('agendamentos').insert({
-    usuario_id: dados.usuario_id || null,
+    usuario_id: usuarioId,
     empresa_id: empresaId,
     barbeiro_id: dados.barbeiro_id,
     data_hora: dataHora,
     status: 'confirmado',
     valor_total: dados.servico_valor,
     duracao_total: dados.servico_duracao,
-    cliente_nome: dados.usuario_id ? null : nomeCliente
+    cliente_nome: usuarioId ? null : nomeCliente
   });
 
   if (error) {
