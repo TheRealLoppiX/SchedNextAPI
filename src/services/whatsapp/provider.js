@@ -63,7 +63,9 @@ async function enviarBotoes(instancia, telefone, texto, botoes, footerText) {
         number: telefone.replace(/\D/g, ''),
         text: texto,
         footerText: footerText || 'SchedNext',
-        buttons: botoes.map((b) => ({ buttonId: b.id, buttonText: { displayText: b.titulo } })),
+        // Evolution API exige "type" em cada botão desde a v2 (schema antigo com
+        // buttonId/buttonText aninhado passou a dar 400 "requires property type").
+        buttons: botoes.map((b) => ({ type: 'reply', displayText: b.titulo, id: b.id })),
       }),
     });
     const dados = await resposta.json();
