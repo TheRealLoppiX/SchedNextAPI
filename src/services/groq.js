@@ -5,6 +5,7 @@
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 // Llama 3.3 70B Versatile foi descontinuado pela Groq em 16/08/2026 — Qwen3.6 27B é o
 // substituto recomendado por eles pra workloads de produção.
+// Qwen3.6 27B também foi descontinuado, na data 02/09/2026, seguimos com Qwen3.8 27B
 const MODELO_PADRAO = 'qwen/qwen3.8-27b';
 
 function estaConfigurado() {
