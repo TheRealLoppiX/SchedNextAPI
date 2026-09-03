@@ -1,6 +1,7 @@
 const express = require('express');
 const supabase = require('../config/supabase');
 const { permiteRelatoriosAvancados } = require('../utils/limitesPlano');
+const { calcularInicioCiclo, calcularFimCiclo } = require('../utils/limitesAssinatura');
 
 const router = express.Router();
 
@@ -205,10 +206,10 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
     if (error) throw error;
 
     // Rateio de cliente assinante: o atendimento em si custa R$0 (ou menos que o preço de
-    // tabela) pro assinante, já descontado no checkout (ver calcularValorComDescontoAssinante),
-    // mas ele PAGOU pela mensalidade — então, só pra fins de comissão, atribuímos ao profissional
-    // a fatia proporcional do valor do plano (preço mensal ÷ quantidade de visitas cobertas
-    // naquele mês-calendário do cliente).
+    // tabela) pro assinante, já descontado no checkout (ver calcularValorComLimiteAssinante), mas
+    // ele PAGOU pela mensalidade — então, só pra fins de comissão, atribuímos ao profissional a
+    // fatia proporcional do valor do plano (preço mensal ÷ quantidade de visitas cobertas naquele
+    // CICLO de cobrança do cliente).
     //
     // Usamos `plano_id` (não o boolean `assinante`, que reflete só o status ATUAL) pra achar o
     // preço da mensalidade a ratear — senão, assim que o cliente cancela/deixa de pagar, TODO o
@@ -219,9 +220,10 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
     // o preço vigente na época depois disso.
     const idsClientes = [...new Set(agendamentos.map((a) => a.usuario_id).filter(Boolean))];
     const precoAssinaturaPorCliente = {};
+    const assinanteDesdePorCliente = {};
     const nomePorCliente = {};
     if (idsClientes.length > 0) {
-      const { data: usuarios } = await supabase.from('usuarios').select('id, nome, plano_id').in('id', idsClientes);
+      const { data: usuarios } = await supabase.from('usuarios').select('id, nome, plano_id, assinante_desde').in('id', idsClientes);
       const planoIds = [...new Set((usuarios || []).filter((u) => u.plano_id).map((u) => u.plano_id))];
       let precoPorPlano = {};
       if (planoIds.length > 0) {
@@ -232,8 +234,30 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
         nomePorCliente[u.id] = u.nome;
         if (u.plano_id && precoPorPlano[u.plano_id] != null) {
           precoAssinaturaPorCliente[u.id] = precoPorPlano[u.plano_id];
+          if (u.assinante_desde) assinanteDesdePorCliente[u.id] = u.assinante_desde;
         }
       }
+    }
+
+    // O ciclo de cobrança da assinatura é ancorado no dia em que o cliente assinou
+    // (assinante_desde), não no mês-calendário — é o mesmo ciclo que o limite mensal por serviço
+    // usa de verdade (ver calcularInicioCiclo em utils/limitesAssinatura.js). Quem assinou dia 10
+    // tem cota nova todo dia 10, não no dia 1. Sem assinante_desde (cadastro antigo, anterior a
+    // essa coluna existir) caímos de volta pro mês-calendário como aproximação.
+    function cicloDoCliente(usuarioId, dataHoraIso) {
+      const desde = assinanteDesdePorCliente[usuarioId];
+      if (!desde) {
+        // Sem assinante_desde: aproxima pelo mês-calendário da própria data (mesma regra de
+        // sempre — cliente cadastrado antes dessa coluna existir).
+        const [ano, mes] = dataHoraIso.slice(0, 7).split('-').map(Number);
+        const inicio = `${dataHoraIso.slice(0, 7)}-01`;
+        const proxAno = mes === 12 ? ano + 1 : ano;
+        const proxMes = mes === 12 ? 1 : mes + 1;
+        const fim = `${proxAno}-${String(proxMes).padStart(2, '0')}-01`;
+        return { inicio, fim, chave: inicio };
+      }
+      const inicio = calcularInicioCiclo(desde, new Date(dataHoraIso));
+      return { inicio, fim: calcularFimCiclo(inicio, desde), chave: inicio };
     }
 
     // Preço de tabela dos serviços de cada agendamento (id -> [{nome, valor}]) — usado tanto pra
@@ -270,41 +294,48 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
       return valorCheio > Number(a.valor_total || 0);
     };
 
-    // A quantidade de visitas usada pra ratear a mensalidade tem que ser a do MÊS-CALENDÁRIO
-    // inteiro do cliente, não só dos agendamentos que caíram dentro do filtro de data escolhido
-    // no relatório — senão um filtro de "últimos 7 dias" ou qualquer período que não bate exato
-    // com o mês inteiro faz o rateio contar menos visitas do que o cliente realmente teve,
-    // inflando indevidamente a fatia de cada corte e estourando o valor total da assinatura. E só
-    // contam as visitas com evidência real de cobertura (valor_total abaixo do preço de tabela),
-    // não qualquer visita de alguém que tem plano cadastrado.
+    // A quantidade de visitas usada pra ratear a mensalidade tem que ser a do CICLO inteiro do
+    // cliente, não só dos agendamentos que caíram dentro do filtro de data escolhido no
+    // relatório — senão um filtro que não bate exato com o ciclo (ex.: "últimos 7 dias", ou um
+    // ciclo que começa no meio do mês) faz o rateio contar menos visitas do que o cliente
+    // realmente teve, inflando indevidamente a fatia de cada corte e estourando o valor total da
+    // assinatura. E só contam as visitas com evidência real de cobertura (valor_total abaixo do
+    // preço de tabela), não qualquer visita de alguém que tem plano cadastrado.
     const idsAssinantes = idsClientes.filter((id) => precoAssinaturaPorCliente[id] != null);
     const visitasPorClienteMes = {};
     if (idsAssinantes.length > 0) {
-      const primeiroMes = dataInicio.slice(0, 7);
-      const ultimoMes = dataFim.slice(0, 7);
-      const [anoFim, mesFim] = ultimoMes.split('-').map(Number);
-      const ultimoDiaUltimoMes = new Date(anoFim, mesFim, 0).getDate();
+      let janelaInicio = null;
+      let janelaFim = null; // exclusivo
+      for (const usuarioId of idsAssinantes) {
+        const referencias = agendamentos.filter((a) => a.usuario_id === usuarioId).map((a) => a.data_hora);
+        for (const dataHora of referencias) {
+          const ciclo = cicloDoCliente(usuarioId, dataHora);
+          if (!janelaInicio || ciclo.inicio < janelaInicio) janelaInicio = ciclo.inicio;
+          if (!janelaFim || ciclo.fim > janelaFim) janelaFim = ciclo.fim;
+        }
+      }
 
-      const { data: agendamentosMes, error: erroMes } = await supabase
+      const { data: agendamentosCiclo, error: erroCiclo } = await supabase
         .from('agendamentos')
         .select('id, usuario_id, valor_total, data_hora')
         .eq('empresa_id', empresaId)
         .eq('status', 'concluido')
         .in('usuario_id', idsAssinantes)
-        .gte('data_hora', `${primeiroMes}-01T00:00:00`)
-        .lte('data_hora', `${ultimoMes}-${String(ultimoDiaUltimoMes).padStart(2, '0')}T23:59:59`);
-      if (erroMes) throw erroMes;
+        .gte('data_hora', `${janelaInicio}T00:00:00`)
+        .lt('data_hora', `${janelaFim}T00:00:00`);
+      if (erroCiclo) throw erroCiclo;
 
-      const idsFaltantes = (agendamentosMes || []).map((a) => a.id).filter((id) => !(id in servicosPorAgendamento));
+      const idsFaltantes = (agendamentosCiclo || []).map((a) => a.id).filter((id) => !(id in servicosPorAgendamento));
       const servicosExtras = await buscarServicosPorAgendamento(idsFaltantes);
       for (const [id, servicos] of Object.entries(servicosExtras)) {
         servicosPorAgendamento[id] = servicos;
         valorCheioPorAgendamento[id] = servicos.reduce((acc, s) => acc + s.valor, 0);
       }
 
-      for (const a of agendamentosMes || []) {
+      for (const a of agendamentosCiclo || []) {
         if (!foiCobertoPorAssinatura(a)) continue;
-        const chave = `${a.usuario_id}-${a.data_hora.slice(0, 7)}`;
+        const ciclo = cicloDoCliente(a.usuario_id, a.data_hora);
+        const chave = `${a.usuario_id}-${ciclo.chave}`;
         visitasPorClienteMes[chave] = (visitasPorClienteMes[chave] || 0) + 1;
       }
     }
@@ -317,7 +348,8 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
       let receita = Number(a.valor_total || 0);
       let visitas = 1;
       if (ehAssinante) {
-        const chave = `${a.usuario_id}-${a.data_hora.slice(0, 7)}`;
+        const ciclo = cicloDoCliente(a.usuario_id, a.data_hora);
+        const chave = `${a.usuario_id}-${ciclo.chave}`;
         visitas = visitasPorClienteMes[chave] || 1;
         receita = precoAssinaturaPorCliente[a.usuario_id] / visitas;
       }
