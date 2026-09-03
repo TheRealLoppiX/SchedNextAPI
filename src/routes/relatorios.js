@@ -203,8 +203,9 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
     // (preço mensal ÷ quantidade de visitas concluídas naquele mês-calendário do cliente).
     const idsClientes = [...new Set(agendamentos.map((a) => a.usuario_id).filter(Boolean))];
     const precoAssinaturaPorCliente = {};
+    const nomePorCliente = {};
     if (idsClientes.length > 0) {
-      const { data: usuarios } = await supabase.from('usuarios').select('id, assinante, plano_id').in('id', idsClientes);
+      const { data: usuarios } = await supabase.from('usuarios').select('id, nome, assinante, plano_id').in('id', idsClientes);
       const planoIds = [...new Set((usuarios || []).filter((u) => u.assinante && u.plano_id).map((u) => u.plano_id))];
       let precoPorPlano = {};
       if (planoIds.length > 0) {
@@ -212,9 +213,27 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
         precoPorPlano = Object.fromEntries((planos || []).map((p) => [p.id, Number(p.preco) || 0]));
       }
       for (const u of usuarios || []) {
+        nomePorCliente[u.id] = u.nome;
         if (u.assinante && u.plano_id && precoPorPlano[u.plano_id] != null) {
           precoAssinaturaPorCliente[u.id] = precoPorPlano[u.plano_id];
         }
+      }
+    }
+
+    // Serviços vinculados a cada agendamento — pra deixar rastreável exatamente o que o
+    // profissional fez em cada atendimento que compôs a comissão dele, não só o valor agregado.
+    const idsAgendamentos = agendamentos.map((a) => a.id);
+    const servicosPorAgendamento = {};
+    if (idsAgendamentos.length > 0) {
+      const { data: vinculos, error: erroVinculos } = await supabase
+        .from('agendamento_servicos')
+        .select('agendamento_id, servicos(nome)')
+        .in('agendamento_id', idsAgendamentos);
+      if (erroVinculos) throw erroVinculos;
+      for (const v of vinculos || []) {
+        if (!v.servicos) continue;
+        if (!servicosPorAgendamento[v.agendamento_id]) servicosPorAgendamento[v.agendamento_id] = [];
+        servicosPorAgendamento[v.agendamento_id].push(v.servicos.nome);
       }
     }
 
@@ -229,10 +248,12 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
     for (const a of agendamentos) {
       if (!a.barbeiro_id) continue;
 
+      const ehAssinante = a.usuario_id && precoAssinaturaPorCliente[a.usuario_id] != null;
       let receita = Number(a.valor_total || 0);
-      if (a.usuario_id && precoAssinaturaPorCliente[a.usuario_id] != null) {
+      let visitas = 1;
+      if (ehAssinante) {
         const chave = `${a.usuario_id}-${a.data_hora.slice(0, 7)}`;
-        const visitas = visitasPorClienteMes[chave] || 1;
+        visitas = visitasPorClienteMes[chave] || 1;
         receita = precoAssinaturaPorCliente[a.usuario_id] / visitas;
       }
 
@@ -243,18 +264,31 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
 
       if (!porProfissional[a.barbeiro_id]) {
         porProfissional[a.barbeiro_id] = {
+          id: a.barbeiro_id,
           nome: nomePorProfissional[a.barbeiro_id] || 'Sem nome',
           percentual_comissao: percentual,
           quantidade: 0,
           receita_bruta: 0,
           receita_liquida: 0,
-          comissao: 0
+          comissao: 0,
+          itens: []
         };
       }
       porProfissional[a.barbeiro_id].quantidade += 1;
       porProfissional[a.barbeiro_id].receita_bruta += Number(a.valor_total || 0);
       porProfissional[a.barbeiro_id].receita_liquida += receitaLiquida;
       porProfissional[a.barbeiro_id].comissao += comissao;
+      porProfissional[a.barbeiro_id].itens.push({
+        data: a.data_hora,
+        cliente: a.usuario_id ? (nomePorCliente[a.usuario_id] || 'Cliente') : 'Cliente avulso',
+        servicos: servicosPorAgendamento[a.id] || [],
+        tipo: ehAssinante ? 'assinante' : 'avulso',
+        visitas_no_mes: ehAssinante ? visitas : null,
+        valor_base: Number(a.valor_total || 0),
+        valor_atribuido: Number(receita.toFixed(2)),
+        receita_liquida: Number(receitaLiquida.toFixed(2)),
+        comissao: Number(comissao.toFixed(2))
+      });
     }
 
     const profissionaisFormatado = Object.values(porProfissional)
@@ -262,7 +296,8 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
         ...p,
         receita_bruta: Number(p.receita_bruta.toFixed(2)),
         receita_liquida: Number(p.receita_liquida.toFixed(2)),
-        comissao: Number(p.comissao.toFixed(2))
+        comissao: Number(p.comissao.toFixed(2)),
+        itens: p.itens.sort((a, b) => b.data.localeCompare(a.data))
       }))
       .sort((a, b) => b.comissao - a.comissao);
 
