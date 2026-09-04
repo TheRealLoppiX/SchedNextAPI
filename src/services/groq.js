@@ -51,4 +51,43 @@ async function gerarTexto({ prompt, sistema, maxTokens = 400, temperatura = 0.6 
   return texto.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 }
 
-module.exports = { estaConfigurado, gerarTexto };
+// Chat completion genérico com suporte a tool calling (function calling), usado pelo modo
+// "livre" do bot de WhatsApp (ver services/whatsapp/agente.js) — diferente de gerarTexto (que só
+// devolve texto), aqui o chamador precisa do array de tool_calls cru pra decidir o que executar.
+// `mensagens` já vem no formato OpenAI (role/content, incluindo role:'tool' das respostas de
+// chamadas anteriores) — quem monta o histórico é o chamador.
+async function chat({ mensagens, sistema, temperatura = 0.6, maxTokens = 700, tools }) {
+  if (!estaConfigurado()) {
+    const erro = new Error('GROQ_API_KEY não configurada.');
+    erro.naoConfigurado = true;
+    throw erro;
+  }
+
+  const resposta = await fetch(GROQ_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: MODELO_PADRAO,
+      messages: [...(sistema ? [{ role: 'system', content: sistema }] : []), ...mensagens],
+      max_tokens: maxTokens,
+      temperature: temperatura,
+      reasoning_format: 'hidden',
+      ...(tools ? { tools, tool_choice: 'auto' } : {})
+    })
+  });
+
+  if (!resposta.ok) {
+    const detalhe = await resposta.text().catch(() => '');
+    throw new Error(`Groq respondeu ${resposta.status}: ${detalhe}`);
+  }
+
+  const dados = await resposta.json();
+  const mensagem = dados.choices?.[0]?.message || {};
+  const conteudo = (mensagem.content || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  return { content: conteudo, toolCalls: mensagem.tool_calls || null };
+}
+
+module.exports = { estaConfigurado, gerarTexto, chat };

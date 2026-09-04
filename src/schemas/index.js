@@ -390,6 +390,16 @@ const whatsappTesteSchema = z.object({
   telefone: z.string().trim().min(8, 'Telefone inválido').max(20)
 });
 
+// boas_vindas fica liberado pra qualquer empresa com o bot ligado; modo/nome/personalidade/
+// temperatura só têm efeito de fato quando o plano também libera IA (checado na rota, não aqui).
+const whatsappBotConfigSchema = z.object({
+  modo: z.enum(['guiado', 'livre']).optional(),
+  nome: z.string().trim().max(40).nullable().optional(),
+  personalidade: z.string().trim().max(1000).nullable().optional(),
+  boas_vindas: z.string().trim().max(300).nullable().optional(),
+  temperatura: z.coerce.number().min(0).max(1).optional()
+});
+
 // --- dominioCustomizado.js ---
 
 const dominioCustomizadoSchema = z.object({
@@ -517,6 +527,7 @@ module.exports = {
   baixaManualAssinaturaSchema,
   apiPublicaAgendamentoSchema,
   whatsappTesteSchema,
+  whatsappBotConfigSchema,
   dominioCustomizadoSchema,
   contatoEnterpriseSchema,
   superAdminLoginSchema,
