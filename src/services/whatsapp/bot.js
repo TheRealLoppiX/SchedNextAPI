@@ -3,8 +3,9 @@ const supabase = require('../../config/supabase');
 const transporter = require('../../config/mailer');
 const { emailHtml, blocoCodigo } = require('../../utils/emailTemplate');
 const { criarPendente, buscarPendenteValido, removerPendente } = require('../cadastroPendente');
-const { enviarMensagem } = require('./provider');
-const { limiteAgendamentosMesAtingido } = require('../../utils/limitesPlano');
+const { enviarMensagem, enviarImagem } = require('./provider');
+const { criarPagamentoPix } = require('../mercadopago');
+const { limiteAgendamentosMesAtingido, obterTaxaMarketplace } = require('../../utils/limitesPlano');
 const { variantesTelefoneBR } = require('../../utils/telefone');
 const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
 const { gerarTexto, estaConfigurado: iaConfigurada } = require('../groq');
@@ -552,7 +553,62 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
     return criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados: { ...dados, usuario_id: novoUsuario.id }, nomeCliente: nome });
   }
 
+  // Pergunta feita logo após confirmar o agendamento, só quando a empresa tem Mercado Pago
+  // conectado (ver criarAgendamentoEConfirmar) — pagamento antecipado é opcional, então "não"
+  // (ou qualquer coisa que não seja "sim") só encerra normalmente, sem travar o fluxo.
+  if (sessao.estado_atual === 'aguardando_pix') {
+    if (msgLower !== 'sim') {
+      return responder('Sem problema, é só pagar direto no local. Digite *MENU* para agendar outro horário.', 'inicio', {});
+    }
+    return gerarPixEEnviar({ empresaId, telefone, instancia, sessao, dados });
+  }
+
   return responder('Digite *MENU* para ver as opções.', 'inicio', {});
+}
+
+// Gera a mesma cobrança Pix usada no PDV (ver POST /admin/mercadopago/pix/:agendamentoId), só que
+// disparada pelo próprio bot em vez de um clique do admin. A confirmação do pagamento continua
+// 100% pelo webhook do Mercado Pago já existente (routes/mercadopago.js -> reconfirmarPagamento ->
+// notificarPagamentoConfirmado) — daqui só sai o convite pra pagar, o aviso de "pago" chega depois
+// por conta própria, de forma assíncrona.
+async function gerarPixEEnviar({ empresaId, telefone, instancia, sessao, dados }) {
+  const finalizar = () => salvarSessao(sessao, 'inicio', {});
+
+  const { data: empresa } = await supabase.from('empresas').select('nome, mercadopago_access_token').eq('id', empresaId).maybeSingle();
+  if (!empresa?.mercadopago_access_token) {
+    await enviarMensagem(instancia, telefone, 'Não consegui gerar o Pix agora. Digite *MENU* para agendar outro horário.');
+    return finalizar();
+  }
+
+  try {
+    const valor = Number(dados.valor_pix);
+    const taxaPercentual = await obterTaxaMarketplace(empresaId);
+    const cobranca = await criarPagamentoPix({
+      accessTokenVendedor: empresa.mercadopago_access_token,
+      valor,
+      descricao: `SchedNext — atendimento em ${empresa.nome}`,
+      externalReference: dados.agendamento_id,
+      applicationFee: valor * (taxaPercentual / 100)
+    });
+
+    await supabase
+      .from('agendamentos')
+      .update({ mercadopago_payment_id: String(cobranca.id), pagamento_status: 'pendente' })
+      .eq('id', dados.agendamento_id)
+      .eq('empresa_id', empresaId);
+
+    const qrBase64 = cobranca.point_of_interaction?.transaction_data?.qr_code_base64;
+    const qrCode = cobranca.point_of_interaction?.transaction_data?.qr_code;
+    if (!qrCode) throw new Error('Mercado Pago não devolveu o código Pix.');
+
+    if (qrBase64) await enviarImagem(instancia, telefone, qrBase64, `Pix de R$ ${valor.toFixed(2)}`);
+    await enviarMensagem(instancia, telefone, `Código Pix Copia e Cola:\n${qrCode}\n\nAssim que o pagamento cair, te aviso por aqui. ✅`);
+  } catch (err) {
+    console.error('Erro ao gerar Pix via bot do WhatsApp:', err);
+    await enviarMensagem(instancia, telefone, 'Não consegui gerar o Pix agora. Pode pagar direto no local.');
+  }
+
+  return finalizar();
 }
 
 async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados, nomeCliente }) {
@@ -581,16 +637,20 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sess
   // e-mail+código (ver 'aguardando_codigo_cadastro'). cliente_nome só existe como campo de texto
   // livre pra agendamentos sem conta de verdade (ex: cadastrado direto pelo admin sem usuário);
   // mantido aqui só como rede de segurança caso usuario_id venha vazio por algum motivo.
-  const { error } = await supabase.from('agendamentos').insert({
-    usuario_id: dados.usuario_id || null,
-    empresa_id: empresaId,
-    barbeiro_id: dados.barbeiro_id,
-    data_hora: dataHora,
-    status: 'confirmado',
-    valor_total: dados.servico_valor,
-    duracao_total: dados.servico_duracao,
-    cliente_nome: dados.usuario_id ? null : nomeCliente
-  });
+  const { data: novoAgendamento, error } = await supabase
+    .from('agendamentos')
+    .insert({
+      usuario_id: dados.usuario_id || null,
+      empresa_id: empresaId,
+      barbeiro_id: dados.barbeiro_id,
+      data_hora: dataHora,
+      status: 'confirmado',
+      valor_total: dados.servico_valor,
+      duracao_total: dados.servico_duracao,
+      cliente_nome: dados.usuario_id ? null : nomeCliente
+    })
+    .select('id')
+    .single();
 
   if (error) {
     console.error('Erro ao criar agendamento via WhatsApp:', error);
@@ -599,11 +659,18 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sess
     return;
   }
 
-  await enviarMensagem(
-    instancia,
-    telefone,
-    `✅ Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}\n\nDigite *MENU* para agendar outro horário.`
-  );
+  const confirmacao = `✅ Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}`;
+
+  // Oferece adiantar o pagamento via Pix só quando a empresa tem Mercado Pago conectado (ver
+  // routes/mercadopago.js) — sem conta conectada não tem pra onde gerar a cobrança.
+  const { data: empresaPix } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', empresaId).maybeSingle();
+  if (empresaPix?.mercadopago_access_token) {
+    await enviarMensagem(instancia, telefone, `${confirmacao}\n\nQuer adiantar o pagamento agora via Pix? Responda *SIM* ou *NAO*.`);
+    await salvarSessao(sessao, 'aguardando_pix', { agendamento_id: novoAgendamento.id, valor_pix: dados.servico_valor });
+    return;
+  }
+
+  await enviarMensagem(instancia, telefone, `${confirmacao}\n\nDigite *MENU* para agendar outro horário.`);
   await salvarSessao(sessao, 'inicio', {});
 }
 

@@ -50,6 +50,39 @@ async function enviarMensagem(instancia, telefone, texto) {
   return { enviado: true, id: dados.key?.id };
 }
 
+// Envia imagem (usado hoje só pro QR Code do Pix de agendamento, ver services/whatsapp/bot.js).
+// Diferente dos botões/lista nativos (ver comentário de enviarMensagem acima), mídia comum
+// (imagem/documento) é um recurso básico do protocolo Baileys, não uma extensão do WhatsApp
+// Business — funciona normalmente em conta pessoal.
+async function enviarImagem(instancia, telefone, base64, legenda) {
+  if (!instancia || !estaConfigurado()) {
+    console.log(`[WhatsApp simulado] imagem para ${telefone}: ${legenda || '(sem legenda)'}`);
+    return { enviado: false, simulado: true };
+  }
+
+  const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/message/sendMedia/${instancia}`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({
+      number: telefone.replace(/\D/g, ''),
+      mediatype: 'image',
+      mimetype: 'image/png',
+      fileName: 'pix.png',
+      caption: legenda || '',
+      media: base64,
+    }),
+  });
+
+  const dados = await resposta.json();
+
+  if (!resposta.ok) {
+    console.error('Erro ao enviar imagem via Evolution API:', dados);
+    return { enviado: false, erro: dados };
+  }
+
+  return { enviado: true, id: dados.key?.id };
+}
+
 // Cria a instância na Evolution API pra uma empresa e já registra o webhook de recebimento
 // (ver routes/whatsapp.js). `qrcode: true` faz a Evolution já devolver o QR Code de pareamento
 // na própria resposta de criação, sem precisar de uma segunda chamada.
@@ -120,4 +153,4 @@ async function removerInstancia(instancia) {
   }
 }
 
-module.exports = { estaConfigurado, enviarMensagem, criarInstancia, obterQrCode, obterStatusConexao, removerInstancia };
+module.exports = { estaConfigurado, enviarMensagem, enviarImagem, criarInstancia, obterQrCode, obterStatusConexao, removerInstancia };
