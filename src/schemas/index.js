@@ -368,8 +368,18 @@ const assinarAssinaturaSchema = z.object({
 // --- cobrancaAssinatura.js ---
 
 const baixaManualAssinaturaSchema = z.object({
-  forma_pagamento: z.enum(['dinheiro', 'pix', 'cartao', 'outro']),
+  // Mesmas formas de pagamento do checkout normal (formaPagamentoEnum) — permite aplicar a
+  // mesma taxa de maquineta cadastrada (taxas_pagamento) e contar essa cobrança nos relatórios
+  // de faturamento/receita líquida junto com o resto (ver routes/relatorios.js).
+  forma_pagamento: formaPagamentoEnum,
   observacoes: textoOpcionalNullable
+});
+
+const cobrarAgoraAssinaturaSchema = z.object({
+  // Só usado quando o cliente ainda não tem cobrança automática configurada — permite ao admin
+  // configurar Pix na hora (gera e mostra o QR Code ali mesmo). Cartão não pode ser configurado
+  // pelo admin: precisa da autorização do próprio dono do cartão na página do Mercado Pago.
+  forma_pagamento: z.enum(['pix']).optional()
 });
 
 // --- apiPublica.js ---
@@ -512,6 +522,7 @@ module.exports = {
   mercadoPagoPixSchema,
   assinarAssinaturaSchema,
   baixaManualAssinaturaSchema,
+  cobrarAgoraAssinaturaSchema,
   apiPublicaAgendamentoSchema,
   whatsappTesteSchema,
   dominioCustomizadoSchema,

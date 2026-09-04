@@ -83,15 +83,42 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
     const cancelados = (agendamentos || []).filter((a) => a.status === 'cancelado');
     const total = (agendamentos || []).length;
 
-    const faturamentoTotal = concluidos.reduce((acc, a) => acc + Number(a.valor_total || 0), 0);
+    const faturamentoAtendimentos = concluidos.reduce((acc, a) => acc + Number(a.valor_total || 0), 0);
     // Receita líquida: desconta a taxa de maquineta cadastrada (ver routes/financeiro.js) pra
     // cada agendamento, de acordo com a(s) forma(s) de pagamento usada(s). Agendamentos sem
     // forma_pagamento registrada (histórico antigo, ou fechado sem informar) entram sem desconto.
-    const receitaLiquidaTotal = concluidos.reduce((acc, a) => (
+    const receitaLiquidaAtendimentos = concluidos.reduce((acc, a) => (
       acc + receitaLiquidaComTaxas(a.valor_total, a.forma_pagamento, a.formas_pagamento, a.pagamento_status, taxas)
     ), 0);
-    const ticketMedio = concluidos.length > 0 ? faturamentoTotal / concluidos.length : 0;
+    // Ticket médio é só de atendimento (mensalidade de assinatura não é um "corte", incluir ela
+    // aqui inflaria o número sem sentido) — por isso usa o subtotal de atendimentos, não o total.
+    const ticketMedio = concluidos.length > 0 ? faturamentoAtendimentos / concluidos.length : 0;
     const taxaCancelamento = total > 0 ? (cancelados.length / total) * 100 : 0;
+
+    // Mensalidade de assinatura de cliente final (ver services/cobrancaAssinatura.js) é uma
+    // receita separada de atendimento — conta pro faturamento/receita líquida do período, mas
+    // fora do ticket médio e dos rankings por profissional/serviço (mensalidade não é atribuída
+    // a nenhum dos dois). baixado_manualmente=true (cliente pagou por fora, ex: chave Pix da
+    // própria barbearia) não passou pelo gateway, então não desconta taxa — mesmo princípio já
+    // usado em receitaLiquidaComTaxas pro Pix avulso.
+    const { data: cobrancasAssinatura, error: erroCobrancas } = await supabase
+      .from('assinatura_cobrancas')
+      .select('valor, forma_pagamento, baixado_manualmente')
+      .eq('empresa_id', empresaId)
+      .eq('status', 'pago')
+      .gte('pago_em', `${dataInicio}T00:00:00`)
+      .lte('pago_em', `${dataFim}T23:59:59`);
+    if (erroCobrancas) throw erroCobrancas;
+
+    const faturamentoAssinaturas = (cobrancasAssinatura || []).reduce((acc, c) => acc + Number(c.valor || 0), 0);
+    const receitaLiquidaAssinaturas = (cobrancasAssinatura || []).reduce((acc, c) => {
+      if (c.baixado_manualmente) return acc + Number(c.valor || 0);
+      const taxaPct = taxas[c.forma_pagamento] || 0;
+      return acc + Number(c.valor || 0) * (1 - taxaPct / 100);
+    }, 0);
+
+    const faturamentoTotal = faturamentoAtendimentos + faturamentoAssinaturas;
+    const receitaLiquidaTotal = receitaLiquidaAtendimentos + receitaLiquidaAssinaturas;
 
     // Série diária de faturamento (só agendamentos concluídos contam como receita real).
     const porDia = {};
@@ -147,7 +174,17 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
 
     if (erroAnterior) throw erroAnterior;
 
-    const faturamentoAnterior = (agendamentosAnteriores || []).reduce((acc, a) => acc + Number(a.valor_total || 0), 0);
+    const { data: cobrancasAnteriores, error: erroCobrancasAnteriores } = await supabase
+      .from('assinatura_cobrancas')
+      .select('valor')
+      .eq('empresa_id', empresaId)
+      .eq('status', 'pago')
+      .gte('pago_em', `${anterior.inicio}T00:00:00`)
+      .lte('pago_em', `${anterior.fim}T23:59:59`);
+    if (erroCobrancasAnteriores) throw erroCobrancasAnteriores;
+
+    const faturamentoAnterior = (agendamentosAnteriores || []).reduce((acc, a) => acc + Number(a.valor_total || 0), 0)
+      + (cobrancasAnteriores || []).reduce((acc, c) => acc + Number(c.valor || 0), 0);
     const variacaoFaturamentoPct = faturamentoAnterior > 0
       ? ((faturamentoTotal - faturamentoAnterior) / faturamentoAnterior) * 100
       : (faturamentoTotal > 0 ? 100 : 0);
@@ -176,6 +213,10 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
       resumo: {
         faturamento_total: faturamentoTotal,
         receita_liquida: Number(receitaLiquidaTotal.toFixed(2)),
+        // Quebra entre atendimento (corte/produto) e mensalidade de assinatura — os dois já
+        // somados em faturamento_total/receita_liquida acima, aqui só pra abrir o detalhe.
+        faturamento_atendimentos: faturamentoAtendimentos,
+        faturamento_assinaturas: faturamentoAssinaturas,
         ticket_medio: ticketMedio,
         quantidade_concluidos: concluidos.length,
         taxa_cancelamento: Number(taxaCancelamento.toFixed(1)),

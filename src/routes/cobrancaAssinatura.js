@@ -5,7 +5,7 @@ const transporter = require('../config/mailer');
 const { emailHtml } = require('../utils/emailTemplate');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 const validate = require('../middleware/validate');
-const { baixaManualAssinaturaSchema } = require('../schemas');
+const { baixaManualAssinaturaSchema, cobrarAgoraAssinaturaSchema } = require('../schemas');
 const { permiteWhatsappBot } = require('../utils/limitesPlano');
 const {
   obterOuCriarCobrancaCicloAtual,
@@ -66,11 +66,14 @@ router.post('/admin/clientes/:id/assinatura/baixa-manual', validate(baixaManualA
   }
 });
 
-// Cobrança/lembrete sob demanda — usado quando a cobrança automática do ciclo falhou (ou o
-// admin só quer reforçar). Pix gera um QR Code novo e reenvia por e-mail/WhatsApp; cartão não
-// aceita cobrança avulsa fora do ciclo do preapproval (limitação do Mercado Pago), então só
-// reenvia um lembrete apontando pra tela de assinatura do cliente.
-router.post('/admin/clientes/:id/assinatura/cobrar-agora', async (req, res) => {
+// Cobrança/lembrete sob demanda — usado quando a cobrança automática do ciclo falhou, ou pra
+// CONFIGURAR a cobrança automática de Pix pela primeira vez direto pelo admin (o cliente também
+// pode configurar sozinho pelo próprio perfil — ver POST /usuario/:id/assinatura-cobranca/assinar
+// em routes/mercadopago.js). Cartão não pode ser configurado nem cobrado avulso pelo admin: o
+// preapproval exige a autorização do próprio dono do cartão na página do Mercado Pago, e não
+// aceita cobrança fora do ciclo já agendado — só reenvia um lembrete apontando pra tela de
+// assinatura do cliente.
+router.post('/admin/clientes/:id/assinatura/cobrar-agora', validate(cobrarAgoraAssinaturaSchema), async (req, res) => {
   const empresaId = req.empresaId;
 
   const { data: cliente } = await supabase
@@ -80,8 +83,14 @@ router.post('/admin/clientes/:id/assinatura/cobrar-agora', async (req, res) => {
     .maybeSingle();
   if (!cliente || cliente.empresa_id !== empresaId) return res.status(404).json({ error: 'Cliente não encontrado.' });
   if (!cliente.plano_id) return res.status(400).json({ error: 'Este cliente não tem um plano de assinatura vinculado.' });
-  if (!cliente.assinatura_forma_pagamento) {
-    return res.status(400).json({ error: 'Este cliente não tem cobrança automática configurada. Use a baixa manual quando ele pagar.' });
+
+  // Ainda sem forma de cobrança configurada: só dá pra configurar Pix por aqui (cartão precisa
+  // ser o próprio cliente autorizando no Mercado Pago, pelo perfil dele).
+  const formaPagamento = cliente.assinatura_forma_pagamento || (req.body.forma_pagamento === 'pix' ? 'pix' : null);
+  if (!formaPagamento) {
+    return res.status(400).json({
+      error: 'Este cliente não tem cobrança automática configurada. Envie forma_pagamento:"pix" pra configurar agora, ou peça pra ele configurar cartão pelo próprio perfil. Pra pagamento avulso/presencial, use a baixa manual.'
+    });
   }
 
   const { data: empresa } = await supabase.from('empresas').select('id, nome, mercadopago_access_token, whatsapp_phone_number_id').eq('id', empresaId).maybeSingle();
@@ -89,12 +98,15 @@ router.post('/admin/clientes/:id/assinatura/cobrar-agora', async (req, res) => {
   if (!plano) return res.status(404).json({ error: 'Plano não encontrado.' });
 
   try {
-    if (cliente.assinatura_forma_pagamento === 'pix') {
+    if (formaPagamento === 'pix') {
       if (!empresa?.mercadopago_access_token) {
-        return res.status(400).json({ error: 'Conecte o Mercado Pago antes de gerar uma nova cobrança Pix.' });
+        return res.status(400).json({ error: 'Conecte o Mercado Pago antes de gerar uma cobrança Pix.' });
       }
       const { qr_code, qr_code_base64 } = await gerarCobrancaPix({ usuario: cliente, empresa, plano });
       await enviarNotificacaoCobrancaPix({ usuario: cliente, empresa, plano, qrCode: qr_code, qrCodeBase64: qr_code_base64 });
+      if (!cliente.assinatura_forma_pagamento) {
+        await supabase.from('usuarios').update({ assinatura_forma_pagamento: 'pix' }).eq('id', cliente.id);
+      }
       return res.json({ success: true, forma_pagamento: 'pix', qr_code, qr_code_base64 });
     }
 
