@@ -12,7 +12,7 @@ const router = express.Router();
 router.get('/admin/clientes/:empresaId', async (req, res) => {
   const { data: clientes, error } = await supabase
     .from('usuarios')
-    .select('id, nome_completo, email, telefone, data_nascimento, assinante, assinante_desde, plano_id, notas, data_cadastro')
+    .select('id, nome_completo, email, telefone, data_nascimento, assinante, assinante_desde, plano_id, status_assinatura, assinatura_forma_pagamento, notas, data_cadastro')
     .eq('empresa_id', req.empresaId)
     .eq('tipo', 'cliente')
     .order('nome_completo', { ascending: true });

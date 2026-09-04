@@ -8,9 +8,16 @@ const { emailHtml } = require('../utils/emailTemplate');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 const validate = require('../middleware/validate');
 const verificarTokenCliente = require('../middleware/clienteAuth');
-const { mercadoPagoPixSchema } = require('../schemas');
+const { mercadoPagoPixSchema, assinarAssinaturaSchema } = require('../schemas');
 const { obterTaxaMarketplace, permiteWhatsappBot } = require('../utils/limitesPlano');
 const { calcularValorFinalCheckout } = require('../services/pagamentoAgendamento');
+const {
+  gerarCobrancaPix,
+  enviarNotificacaoCobrancaPix,
+  confirmarCicloCartao,
+  marcarInadimplente,
+  marcarEmDia
+} = require('../services/cobrancaAssinatura');
 const {
   montarUrlAutorizacao,
   trocarCodigoPorToken,
@@ -335,12 +342,16 @@ router.get('/usuario/:id/assinatura-cobranca', verificarTokenCliente, async (req
   }
 });
 
-router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, async (req, res) => {
+// forma_pagamento (opcional, default 'cartao'): 'cartao' mantém o fluxo de preapproval de
+// sempre; 'pix' gera uma cobrança Pix avulsa pro ciclo atual (Mercado Pago não tem Pix
+// recorrente — cada ciclo seguinte é gerado pelo cron, ver cron/cobrancaAssinaturas.js).
+router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, validate(assinarAssinaturaSchema), async (req, res) => {
   if (req.params.id !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
+  const formaPagamento = req.body.forma_pagamento || 'cartao';
 
   const { data: usuario, error } = await supabase
     .from('usuarios')
-    .select('empresa_id, plano_id, email')
+    .select('id, empresa_id, plano_id, nome_completo, email, telefone, assinante_desde')
     .eq('id', req.params.id)
     .maybeSingle();
   if (error) return res.status(500).json({ error: 'Erro ao buscar cliente.' });
@@ -348,12 +359,25 @@ router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, a
     return res.status(400).json({ error: 'Você ainda não tem um plano atribuído. Fale com a barbearia.' });
   }
 
-  const { data: plano } = await supabase.from('planos_assinatura').select('nome, preco').eq('id', usuario.plano_id).maybeSingle();
+  const { data: plano } = await supabase.from('planos_assinatura').select('id, nome, preco').eq('id', usuario.plano_id).maybeSingle();
   if (!plano) return res.status(404).json({ error: 'Plano não encontrado.' });
 
-  const { data: empresa } = await supabase.from('empresas').select('nome, mercadopago_access_token').eq('id', usuario.empresa_id).maybeSingle();
+  const { data: empresa } = await supabase.from('empresas').select('id, nome, mercadopago_access_token, whatsapp_phone_number_id').eq('id', usuario.empresa_id).maybeSingle();
   if (!empresa?.mercadopago_access_token) {
     return res.status(400).json({ error: 'Esta barbearia ainda não conectou o Mercado Pago para cobrança automática.' });
+  }
+
+  if (formaPagamento === 'pix') {
+    try {
+      const { qr_code, qr_code_base64 } = await gerarCobrancaPix({ usuario, empresa, plano });
+      await enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode: qr_code, qrCodeBase64: qr_code_base64 });
+      await supabase.from('usuarios').update({ assinatura_forma_pagamento: 'pix' }).eq('id', req.params.id);
+      res.json({ qr_code, qr_code_base64 });
+    } catch (err) {
+      console.error('Erro ao gerar Pix da assinatura do cliente:', err);
+      res.status(500).json({ error: 'Não foi possível gerar o Pix da assinatura agora. Tente novamente em instantes.' });
+    }
+    return;
   }
 
   try {
@@ -369,7 +393,7 @@ router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, a
       applicationFee: plano.preco * (taxaPercentual / 100)
     });
 
-    await supabase.from('usuarios').update({ mercadopago_preapproval_id: preapproval.id }).eq('id', req.params.id);
+    await supabase.from('usuarios').update({ mercadopago_preapproval_id: preapproval.id, assinatura_forma_pagamento: 'cartao' }).eq('id', req.params.id);
 
     res.json({ checkoutUrl: preapproval.init_point });
   } catch (err) {
@@ -378,29 +402,67 @@ router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, a
   }
 });
 
+// Polling do Pix da assinatura pelo cliente — mesmo padrão de GET /pix/:agendamentoId/status,
+// só que a "posse" é confirmada batendo o usuario_id da cobrança com o token do cliente.
+router.get('/usuario/:id/assinatura-cobranca/pix/status', verificarTokenCliente, async (req, res) => {
+  if (req.params.id !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
+
+  const { data: cobranca, error } = await supabase
+    .from('assinatura_cobrancas')
+    .select('id, empresa_id, mercadopago_payment_id, status')
+    .eq('usuario_id', req.params.id)
+    .eq('forma_pagamento', 'pix')
+    .order('criado_em', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: 'Erro ao buscar cobrança.' });
+  if (!cobranca?.mercadopago_payment_id) return res.json({ status: null });
+  if (cobranca.status !== 'pendente') return res.json({ status: cobranca.status });
+
+  const { data: empresa } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', cobranca.empresa_id).maybeSingle();
+  if (!empresa?.mercadopago_access_token) return res.json({ status: cobranca.status });
+
+  try {
+    const pagamento = await buscarPagamento({ accessTokenVendedor: empresa.mercadopago_access_token, paymentId: cobranca.mercadopago_payment_id });
+    if (pagamento.status === 'approved') {
+      await supabase.from('assinatura_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString() }).eq('id', cobranca.id);
+      await marcarEmDia(req.params.id);
+      return res.json({ status: 'pago' });
+    }
+    if (pagamento.status === 'rejected' || pagamento.status === 'cancelled') {
+      await supabase.from('assinatura_cobrancas').update({ status: 'falhou' }).eq('id', cobranca.id);
+      return res.json({ status: 'falhou' });
+    }
+  } catch (err) {
+    console.error('Erro ao reconfirmar Pix da assinatura:', err);
+  }
+  res.json({ status: 'pendente' });
+});
+
 router.post('/usuario/:id/assinatura-cobranca/cancelar', verificarTokenCliente, async (req, res) => {
   if (req.params.id !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
 
   const { data: usuario } = await supabase
     .from('usuarios')
-    .select('empresa_id, mercadopago_preapproval_id')
+    .select('empresa_id, mercadopago_preapproval_id, assinatura_forma_pagamento')
     .eq('id', req.params.id)
     .maybeSingle();
-  if (!usuario?.mercadopago_preapproval_id) return res.json({ success: true });
 
-  const { data: empresa } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', usuario.empresa_id).maybeSingle();
-
-  try {
-    if (empresa?.mercadopago_access_token) {
-      await cancelarPreapproval({ accessToken: empresa.mercadopago_access_token, preapprovalId: usuario.mercadopago_preapproval_id });
+  if (usuario?.mercadopago_preapproval_id) {
+    const { data: empresa } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', usuario.empresa_id).maybeSingle();
+    try {
+      if (empresa?.mercadopago_access_token) {
+        await cancelarPreapproval({ accessToken: empresa.mercadopago_access_token, preapprovalId: usuario.mercadopago_preapproval_id });
+      }
+    } catch (err) {
+      console.error('Erro ao cancelar assinatura do cliente no Mercado Pago:', err);
     }
-  } catch (err) {
-    console.error('Erro ao cancelar assinatura do cliente no Mercado Pago:', err);
   }
 
   // Não mexe em `assinante`/`plano_id` — isso continua sob controle do admin (ver
-  // routes/assinaturas.js). Só desliga a cobrança automática.
-  await supabase.from('usuarios').update({ mercadopago_preapproval_id: null }).eq('id', req.params.id);
+  // routes/assinaturas.js). Só desliga a cobrança automática (cartão ou Pix).
+  await supabase.from('usuarios').update({ mercadopago_preapproval_id: null, assinatura_forma_pagamento: null }).eq('id', req.params.id);
   res.json({ success: true });
 });
 
@@ -511,16 +573,31 @@ async function processarNotificacaoAssinatura(preapprovalId) {
 
   const { data: usuario } = await supabase
     .from('usuarios')
-    .select('id, empresa_id')
+    .select('id, empresa_id, nome_completo, email, telefone, assinante_desde, status_assinatura')
     .eq('mercadopago_preapproval_id', preapprovalId)
     .maybeSingle();
   if (!usuario) return;
 
-  const { data: empresaCliente } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', usuario.empresa_id).maybeSingle();
+  const { data: empresaCliente } = await supabase.from('empresas').select('id, nome, mercadopago_access_token, whatsapp_phone_number_id').eq('id', usuario.empresa_id).maybeSingle();
   if (!empresaCliente?.mercadopago_access_token) return;
 
   const preapproval = await buscarPreapproval({ accessToken: empresaCliente.mercadopago_access_token, preapprovalId });
-  await supabase.from('usuarios').update({ assinante: preapproval.status === 'authorized' }).eq('id', usuario.id);
+
+  // Diferente da assinatura da plataforma, `assinante`/`plano_id` NÃO são tocados aqui — o
+  // vínculo do cliente com o plano continua sob controle do admin (routes/assinaturas.js). Só o
+  // status de inadimplência (que suspende preço/cota, ver utils/limitesAssinatura.js) reage ao
+  // preapproval.
+  if (preapproval.status === 'authorized') {
+    await marcarEmDia(usuario.id);
+    await confirmarCicloCartao(usuario);
+  } else {
+    await marcarInadimplente(usuario, empresaCliente);
+    // 'cancelled' é terminal pro preapproval (não dá pra reabrir, só criar um novo) — desliga a
+    // cobrança automática pra não deixar o cliente crendo que ainda está configurada.
+    if (preapproval.status === 'cancelled') {
+      await supabase.from('usuarios').update({ mercadopago_preapproval_id: null, assinatura_forma_pagamento: null }).eq('id', usuario.id);
+    }
+  }
 }
 
 router.post('/webhooks/mercadopago', async (req, res) => {
@@ -604,7 +681,35 @@ router.post('/webhooks/mercadopago', async (req, res) => {
     .eq('mercadopago_payment_id', dataId)
     .maybeSingle();
 
-  if (!agendamento) return res.json({ recebido: true, agendamentoNaoEncontrado: true });
+  if (!agendamento) {
+    // Não é Pix de atendimento — tenta como Pix de mensalidade de assinatura de cliente final
+    // (ver services/cobrancaAssinatura.js). Mesmo princípio de nunca confiar só no payload: só
+    // marca pago depois de reconfirmar direto na API.
+    const { data: cobranca } = await supabase
+      .from('assinatura_cobrancas')
+      .select('id, usuario_id, empresa_id, status')
+      .eq('mercadopago_payment_id', dataId)
+      .maybeSingle();
+
+    if (!cobranca) return res.json({ recebido: true, agendamentoNaoEncontrado: true });
+    if (cobranca.status !== 'pendente') return res.json({ recebido: true });
+
+    const { data: empresaCobranca } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', cobranca.empresa_id).maybeSingle();
+    if (empresaCobranca?.mercadopago_access_token) {
+      try {
+        const pagamento = await buscarPagamento({ accessTokenVendedor: empresaCobranca.mercadopago_access_token, paymentId: dataId });
+        if (pagamento.status === 'approved') {
+          await supabase.from('assinatura_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString() }).eq('id', cobranca.id);
+          await marcarEmDia(cobranca.usuario_id);
+        } else if (pagamento.status === 'rejected' || pagamento.status === 'cancelled') {
+          await supabase.from('assinatura_cobrancas').update({ status: 'falhou' }).eq('id', cobranca.id);
+        }
+      } catch (err) {
+        console.error('Erro ao reconfirmar Pix de assinatura via webhook:', err);
+      }
+    }
+    return res.json({ recebido: true });
+  }
 
   const { data: empresa } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', agendamento.empresa_id).maybeSingle();
 

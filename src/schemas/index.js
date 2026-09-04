@@ -359,6 +359,19 @@ const mercadoPagoPixSchema = z.object({
   valor: z.coerce.number().positive().optional()
 });
 
+const assinarAssinaturaSchema = z.object({
+  // 'cartao' (padrão, mantém o fluxo de preapproval de sempre) ou 'pix' (gera uma cobrança Pix
+  // avulsa pro ciclo atual — Mercado Pago não tem Pix recorrente, ver cron/cobrancaAssinaturas.js).
+  forma_pagamento: z.enum(['cartao', 'pix']).optional()
+});
+
+// --- cobrancaAssinatura.js ---
+
+const baixaManualAssinaturaSchema = z.object({
+  forma_pagamento: z.enum(['dinheiro', 'pix', 'cartao', 'outro']),
+  observacoes: textoOpcionalNullable
+});
+
 // --- apiPublica.js ---
 
 const apiPublicaAgendamentoSchema = z.object({
@@ -497,6 +510,8 @@ module.exports = {
   apiKeyCriarSchema,
   taxasPagamentoSchema,
   mercadoPagoPixSchema,
+  assinarAssinaturaSchema,
+  baixaManualAssinaturaSchema,
   apiPublicaAgendamentoSchema,
   whatsappTesteSchema,
   dominioCustomizadoSchema,

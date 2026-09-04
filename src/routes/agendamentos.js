@@ -865,7 +865,7 @@ router.get('/admin/agendamento-usuario/:id', async (req, res) => {
   try {
     const { data: ag } = await supabase
       .from('agendamentos')
-      .select('usuario_id, valor_total, empresa_id, unidade_id, usuarios(id, assinante, plano_id, assinante_desde)')
+      .select('usuario_id, valor_total, empresa_id, unidade_id, usuarios(id, assinante, plano_id, assinante_desde, status_assinatura)')
       .eq('id', req.params.id)
       .maybeSingle();
 
@@ -881,10 +881,11 @@ router.get('/admin/agendamento-usuario/:id', async (req, res) => {
     const servicosAgendadosIds = [...new Set((asvRows || []).map((r) => r.servico_id))];
 
     const usuario = ag.usuarios || {};
-    if (!usuario.assinante || !usuario.plano_id) {
+    if (!usuario.assinante || !usuario.plano_id || usuario.status_assinatura === 'inadimplente') {
       return res.json({
         usuario_id: ag.usuario_id,
         assinante: false,
+        inadimplente: usuario.status_assinatura === 'inadimplente',
         servicos_ids: [],
         servicos_agendados_ids: servicosAgendadosIds,
         restantes: {}

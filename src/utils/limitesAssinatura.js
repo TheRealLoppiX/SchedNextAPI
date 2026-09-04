@@ -124,11 +124,14 @@ async function calcularValorComLimiteAssinante(usuarioId, servicos, { registrarC
 
   const { data: usuario } = await supabase
     .from('usuarios')
-    .select('assinante, plano_id, assinante_desde')
+    .select('assinante, plano_id, assinante_desde, status_assinatura')
     .eq('id', usuarioId)
     .maybeSingle();
 
-  if (!usuario?.assinante || !usuario.plano_id) return resultado;
+  // Mensalidade em atraso (ver services/cobrancaAssinatura.js) suspende o benefício do plano
+  // sem tirar o vínculo — assinante/plano_id continuam intactos, só volta a cobrar preço cheio
+  // até o pagamento ser confirmado (automático ou baixa manual do admin).
+  if (!usuario?.assinante || !usuario.plano_id || usuario.status_assinatura === 'inadimplente') return resultado;
 
   const idsServicos = servicos.map((s) => s.id);
   const { data: psRows } = await supabase

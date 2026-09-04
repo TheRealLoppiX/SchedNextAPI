@@ -10,11 +10,13 @@ async function calcularValorComDescontoAssinante(usuarioId, servicos) {
 
   const { data: usuario } = await supabase
     .from('usuarios')
-    .select('assinante, plano_id')
+    .select('assinante, plano_id, status_assinatura')
     .eq('id', usuarioId)
     .maybeSingle();
 
-  if (!usuario?.assinante || !usuario.plano_id) return valorCheio;
+  // Mensalidade em atraso suspende o benefício do plano (ver services/cobrancaAssinatura.js) —
+  // sem isso a estimativa de /agendar prometia preço de assinante que o checkout ia recusar.
+  if (!usuario?.assinante || !usuario.plano_id || usuario.status_assinatura === 'inadimplente') return valorCheio;
 
   const { data: planoServicos } = await supabase
     .from('plano_servicos')

@@ -221,7 +221,7 @@ router.get('/usuario/:id/assinante', verificarTokenCliente, async (req, res) => 
 
   const { data: usuario, error } = await supabase
     .from('usuarios')
-    .select('assinante, plano_id, assinante_desde')
+    .select('assinante, plano_id, assinante_desde, status_assinatura, assinatura_forma_pagamento')
     .eq('id', req.params.id)
     .maybeSingle();
 
@@ -257,6 +257,8 @@ router.get('/usuario/:id/assinante', verificarTokenCliente, async (req, res) => 
   res.json({
     assinante: !!usuario.assinante,
     plano_id: usuario.plano_id,
+    status_assinatura: usuario.status_assinatura,
+    assinatura_forma_pagamento: usuario.assinatura_forma_pagamento,
     servicos_ids: servicosIds,
     pendentes,
     restantes
