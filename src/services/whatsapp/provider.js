@@ -98,7 +98,18 @@ async function obterStatusConexao(instancia) {
 
 // Apaga de vez a instância na Evolution (não só desconecta) — desvincular e reconectar depois
 // com outro número passa a exigir escanear QR de novo, o que é o comportamento esperado.
+//
+// A Evolution recusa apagar uma instância ainda com o WhatsApp conectado (o delete falha em
+// silêncio do ponto de vista do admin, já que o caller só loga o erro e segue limpando nosso
+// banco mesmo assim — ver routes/whatsappInstancia.js) — por isso desloga primeiro. Erro no
+// logout é ignorado de propósito: se já estiver desconectada (ex: caiu sozinha), o logout falha
+// mas o delete em seguida funciona normalmente.
 async function removerInstancia(instancia) {
+  await fetch(`${process.env.EVOLUTION_API_URL}/instance/logout/${instancia}`, {
+    method: 'DELETE',
+    headers: headers(),
+  }).catch(() => {});
+
   const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/instance/delete/${instancia}`, {
     method: 'DELETE',
     headers: headers(),
