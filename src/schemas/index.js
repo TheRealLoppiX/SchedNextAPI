@@ -375,13 +375,6 @@ const baixaManualAssinaturaSchema = z.object({
   observacoes: textoOpcionalNullable
 });
 
-const cobrarAgoraAssinaturaSchema = z.object({
-  // Só usado quando o cliente ainda não tem cobrança automática configurada — permite ao admin
-  // configurar Pix na hora (gera e mostra o QR Code ali mesmo). Cartão não pode ser configurado
-  // pelo admin: precisa da autorização do próprio dono do cartão na página do Mercado Pago.
-  forma_pagamento: z.enum(['pix']).optional()
-});
-
 // --- apiPublica.js ---
 
 const apiPublicaAgendamentoSchema = z.object({
@@ -522,7 +515,6 @@ module.exports = {
   mercadoPagoPixSchema,
   assinarAssinaturaSchema,
   baixaManualAssinaturaSchema,
-  cobrarAgoraAssinaturaSchema,
   apiPublicaAgendamentoSchema,
   whatsappTesteSchema,
   dominioCustomizadoSchema,
