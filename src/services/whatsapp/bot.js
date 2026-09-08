@@ -5,7 +5,7 @@ const { enviarMensagem, enviarImagem } = require('./provider');
 const { criarPagamentoPix } = require('../mercadopago');
 const { limiteAgendamentosMesAtingido, obterTaxaMarketplace } = require('../../utils/limitesPlano');
 const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
-const { gerarTexto, estaConfigurado: iaConfigurada } = require('../groq');
+const { gerarTexto, estaConfigurado: iaConfigurada, MODELO_CLASSIFICACAO } = require('../groq');
 const {
   EMAIL_REGEX,
   obterOuCriarSessao,
@@ -31,10 +31,18 @@ const { processar: processarComAgente } = require('./agente');
 async function interpretarIntencaoMenu(texto) {
   if (!iaConfigurada()) return null;
   try {
+    // Modelo diferente do resto do bot (Qwen) de propósito — a Groq limita tokens/minuto por
+    // modelo, não por chave, então isolar essa chamada (disparada toda vez que o cliente escreve
+    // fora do menu numérico) numa cota separada evita que ela compita com o tool calling do modo
+    // livre e a reescrita de personalidade. reasoning_effort:'low' e maxTokens com folga porque
+    // esse modelo "pensa" antes de responder e o raciocínio consome do mesmo teto de tokens —
+    // com maxTokens baixo demais ele corta o pensamento na metade e devolve resposta vazia.
     const resposta = await gerarTexto({
       sistema: 'Você classifica a intenção de uma mensagem de WhatsApp enviada a um bot de agendamento de barbearia/salão. Responda APENAS uma destas palavras, sem mais nada: AGENDAR (a pessoa quer marcar/remarcar um horário), AGENDAMENTOS (a pessoa quer ver ou cancelar um agendamento que já tem), ou NENHUM (não deu pra saber).',
       prompt: texto,
-      maxTokens: 6,
+      modelo: MODELO_CLASSIFICACAO,
+      reasoningEffort: 'low',
+      maxTokens: 60,
       temperatura: 0
     });
     const intencao = resposta.trim().toUpperCase();

@@ -7,12 +7,21 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 // substituto recomendado por eles pra workloads de produção.
 // Qwen3.6 27B também foi descontinuado, na data 02/09/2026, seguimos com Qwen3.8 27B
 const MODELO_PADRAO = 'qwen/qwen3.8-27b';
+// Groq limita tokens/minuto por modelo (não por chave de API — testado: gerar uma chave nova não
+// dá cota separada). gpt-oss-20b só é usado pra classificação de intenção (interpretarIntencaoMenu
+// em whatsapp/bot.js): tarefa curta e disciplinada (responde uma palavra), que testamos e ele
+// acerta bem com reasoning_effort:'low' — assim essa chamada (que dispara toda vez que o cliente
+// escreve fora do menu numérico) não compete pela mesma cota do Qwen usado no tool calling do modo
+// livre e na reescrita de personalidade. NÃO testado como confiável pra reescrever texto livre
+// (ver services/whatsapp/agente.js — histórico de tentativas com groq/compound e reasoning_effort
+// no Qwen que pareciam boas ideias e não eram): não usar pra mais nada sem testar de novo.
+const MODELO_CLASSIFICACAO = 'openai/gpt-oss-20b';
 
 function estaConfigurado() {
   return Boolean(process.env.GROQ_API_KEY);
 }
 
-async function gerarTexto({ prompt, sistema, maxTokens = 400, temperatura = 0.6, reasoningEffort }) {
+async function gerarTexto({ prompt, sistema, maxTokens = 400, temperatura = 0.6, reasoningEffort, modelo = MODELO_PADRAO }) {
   if (!estaConfigurado()) {
     const erro = new Error('GROQ_API_KEY não configurada.');
     erro.naoConfigurado = true;
@@ -26,7 +35,7 @@ async function gerarTexto({ prompt, sistema, maxTokens = 400, temperatura = 0.6,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      model: MODELO_PADRAO,
+      model: modelo,
       messages: [
         ...(sistema ? [{ role: 'system', content: sistema }] : []),
         { role: 'user', content: prompt }
@@ -98,4 +107,4 @@ async function chat({ mensagens, sistema, temperatura = 0.6, maxTokens = 700, to
   return { content: conteudo, toolCalls: mensagem.tool_calls || null };
 }
 
-module.exports = { estaConfigurado, gerarTexto, chat };
+module.exports = { estaConfigurado, gerarTexto, chat, MODELO_CLASSIFICACAO };
