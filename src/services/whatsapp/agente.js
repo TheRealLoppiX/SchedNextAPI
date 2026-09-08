@@ -30,24 +30,21 @@ const {
   inserirAgendamento
 } = require('./helpers');
 
-const MAX_RODADAS_FERRAMENTA = 6; // tetos de chamadas de ferramenta por mensagem recebida — evita loop indefinido se o modelo insistir em chamar ferramentas sem nunca responder
-const MAX_HISTORICO = 16; // mensagens (user+assistant) guardadas entre uma mensagem e outra
+const MAX_RODADAS_FERRAMENTA = 4; // tetos de chamadas de ferramenta por mensagem recebida — evita loop indefinido se o modelo insistir em chamar ferramentas sem nunca responder
+const MAX_HISTORICO = 8; // mensagens (user+assistant) guardadas entre uma mensagem e outra
 
+// Descrições enxutas de propósito: esse array inteiro é reenviado à Groq em TODA rodada de TODA
+// mensagem — é o maior custo fixo de tokens do modo livre (ver comentário em groq.js sobre
+// reasoning_effort). listar_barbeiros e listar_servicos viraram um "listar_opcoes" só porque na
+// prática são sempre pedidos juntos no início de um agendamento; separados, custavam uma rodada
+// inteira (prompt+ferramentas completos reenviados) a mais por atendimento à toa.
 function definirFerramentas() {
   return [
     {
       type: 'function',
       function: {
-        name: 'listar_barbeiros',
-        description: 'Lista os profissionais ativos disponíveis para agendamento, com seus ids.',
-        parameters: { type: 'object', properties: {} }
-      }
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'listar_servicos',
-        description: 'Lista os serviços ativos, com id, preço e duração.',
+        name: 'listar_opcoes',
+        description: 'Lista profissionais e serviços ativos, com ids, preços e duração.',
         parameters: { type: 'object', properties: {} }
       }
     },
@@ -55,12 +52,12 @@ function definirFerramentas() {
       type: 'function',
       function: {
         name: 'listar_horarios',
-        description: 'Lista horários livres de um profissional numa data. Sempre chame antes de sugerir ou confirmar um horário.',
+        description: 'Horários livres de um profissional numa data. Chame antes de confirmar um horário.',
         parameters: {
           type: 'object',
           properties: {
-            barbeiro_id: { type: 'integer', description: 'id do profissional, de listar_barbeiros' },
-            data: { type: 'string', description: 'data pedida pelo cliente em texto livre: "hoje", "amanha", ou "dd/mm"' }
+            barbeiro_id: { type: 'integer' },
+            data: { type: 'string', description: '"hoje", "amanha" ou "dd/mm"' }
           },
           required: ['barbeiro_id', 'data']
         }
@@ -70,7 +67,7 @@ function definirFerramentas() {
       type: 'function',
       function: {
         name: 'verificar_cliente',
-        description: 'Verifica se o telefone do cliente atual já tem cadastro nesta empresa.',
+        description: 'Verifica se o telefone atual já tem cadastro.',
         parameters: { type: 'object', properties: {} }
       }
     },
@@ -78,13 +75,13 @@ function definirFerramentas() {
       type: 'function',
       function: {
         name: 'iniciar_cadastro',
-        description: 'Inicia o cadastro de um cliente novo e envia um código de confirmação de 6 dígitos por e-mail. Use antes de criar_agendamento sempre que verificar_cliente disser que o cliente não tem cadastro.',
+        description: 'Cadastra cliente novo e envia código de confirmação por e-mail. Use se verificar_cliente disser que não tem cadastro.',
         parameters: {
           type: 'object',
           properties: {
-            nome: { type: 'string', description: 'nome completo' },
+            nome: { type: 'string' },
             email: { type: 'string' },
-            senha: { type: 'string', description: 'mínimo 6 caracteres, escolhida pelo cliente' }
+            senha: { type: 'string', description: 'mínimo 6 caracteres' }
           },
           required: ['nome', 'email', 'senha']
         }
@@ -94,13 +91,10 @@ function definirFerramentas() {
       type: 'function',
       function: {
         name: 'confirmar_codigo_cadastro',
-        description: 'Confirma o código de 6 dígitos que o cliente recebeu por e-mail (de iniciar_cadastro) e conclui o cadastro.',
+        description: 'Confirma o código de 6 dígitos recebido por e-mail e conclui o cadastro.',
         parameters: {
           type: 'object',
-          properties: {
-            email: { type: 'string', description: 'o mesmo e-mail usado em iniciar_cadastro' },
-            codigo: { type: 'string' }
-          },
+          properties: { email: { type: 'string' }, codigo: { type: 'string' } },
           required: ['email', 'codigo']
         }
       }
@@ -109,14 +103,14 @@ function definirFerramentas() {
       type: 'function',
       function: {
         name: 'criar_agendamento',
-        description: 'Cria de fato o agendamento. Só chame depois de confirmar profissional, serviço, data e horário com o cliente (com listar_horarios) e depois de garantir que ele tem cadastro (verificar_cliente / iniciar_cadastro+confirmar_codigo_cadastro).',
+        description: 'Cria o agendamento. Só depois de confirmar tudo com listar_horarios e o cliente ter cadastro.',
         parameters: {
           type: 'object',
           properties: {
             barbeiro_id: { type: 'integer' },
             servico_id: { type: 'integer' },
-            data: { type: 'string', description: 'mesma data usada em listar_horarios' },
-            hora: { type: 'string', description: 'HH:MM, um dos horários devolvidos por listar_horarios' }
+            data: { type: 'string', description: 'mesma data de listar_horarios' },
+            hora: { type: 'string', description: 'HH:MM, de listar_horarios' }
           },
           required: ['barbeiro_id', 'servico_id', 'data', 'hora']
         }
@@ -126,7 +120,7 @@ function definirFerramentas() {
       type: 'function',
       function: {
         name: 'listar_meus_agendamentos',
-        description: 'Lista os agendamentos futuros do cliente atual (pendentes ou confirmados).',
+        description: 'Agendamentos futuros do cliente atual.',
         parameters: { type: 'object', properties: {} }
       }
     },
@@ -146,7 +140,7 @@ function definirFerramentas() {
       type: 'function',
       function: {
         name: 'gerar_pix',
-        description: 'Gera a cobrança Pix de um agendamento recém-criado. O QR Code e o código copia-e-cola já são enviados automaticamente ao WhatsApp do cliente por esta ferramenta — nunca repita o código na sua resposta de texto, só confirme que foi enviado.',
+        description: 'Gera Pix de um agendamento e já manda o QR Code e o código pro cliente — nunca repita o código na sua resposta.',
         parameters: {
           type: 'object',
           properties: { agendamento_id: { type: 'integer' } },
@@ -157,30 +151,24 @@ function definirFerramentas() {
   ];
 }
 
+// Enxuto de propósito: reenviado por inteiro em toda rodada de toda mensagem (ver comentário
+// em definirFerramentas sobre o custo fixo de tokens do modo livre).
 function montarSistema(config, primeiraMensagem) {
   const partes = [
-    `Você é${config.nome ? ` ${config.nome},` : ''} o assistente virtual de agendamento de um estabelecimento (barbearia/salão) que usa o SchedNext, conversando por WhatsApp.`
+    `Você é${config.nome ? ` ${config.nome},` : ''} assistente de agendamento (barbearia/salão) via WhatsApp, sistema SchedNext.`
   ];
-  if (config.personalidade) {
-    partes.push(`Personalidade e tom definidos pelo dono do negócio (siga à risca): ${config.personalidade}`);
-  }
+  if (config.personalidade) partes.push(`Tom (siga à risca): ${config.personalidade}`);
   partes.push(
-    'Ajude o cliente a agendar um horário, ver ou cancelar agendamentos existentes, e opcionalmente pagar via Pix. ' +
-    'Regras que você NUNCA pode quebrar: nunca invente profissionais, serviços, preços, horários livres ou dados de cadastro — ' +
-    'sempre confira com as ferramentas antes de afirmar algo sobre disponibilidade. Nunca diga que um agendamento foi confirmado ' +
-    'sem ter chamado criar_agendamento e recebido sucesso. Se o cliente ainda não tem cadastro (verifique com verificar_cliente ' +
-    'antes de criar_agendamento), colete nome, e-mail e uma senha, chame iniciar_cadastro, peça o código de 6 dígitos que chega ' +
-    'por e-mail, e chame confirmar_codigo_cadastro antes de tentar criar_agendamento de novo. Depois de um agendamento criado com ' +
-    'sucesso, se a ferramenta indicar que Pix está disponível, pergunte se o cliente quer adiantar o pagamento; se ele topar, ' +
-    'chame gerar_pix (o QR Code e o código já saem sozinhos, não os repita em texto). Seja breve, direto e natural, como uma ' +
-    'conversa real de WhatsApp — evite parágrafos longos ou listas com marcadores excessivos. Responda sempre em português do ' +
-    'Brasil. Se o cliente quiser encerrar a conversa, se despeça educadamente sem insistir em mais nada.'
+    'Nunca invente profissional, serviço, preço, horário ou cadastro — sempre confira com as ferramentas. Nunca confirme ' +
+    'agendamento sem chamar criar_agendamento com sucesso. Sem cadastro (verificar_cliente), colete nome/e-mail/senha, chame ' +
+    'iniciar_cadastro, depois confirmar_codigo_cadastro antes de agendar. Se pix_disponivel vier true após agendar, ofereça Pix ' +
+    '(gerar_pix já envia o código, não repita em texto). Seja breve, natural, em português do Brasil.'
   );
   if (primeiraMensagem) {
     partes.push(
       config.boasVindas
-        ? `Esta é a primeira mensagem da conversa — abra com um cumprimento no espírito de "${config.boasVindas}", adaptado ao seu tom, antes de perguntar como pode ajudar.`
-        : 'Esta é a primeira mensagem da conversa — cumprimente o cliente antes de perguntar como pode ajudar.'
+        ? `Primeira mensagem — abra no espírito de "${config.boasVindas}", no seu tom.`
+        : 'Primeira mensagem — cumprimente antes de ajudar.'
     );
   }
   return partes.join('\n\n');
@@ -197,16 +185,17 @@ function parseArgsSeguro(argsStr) {
 async function executarFerramenta(nome, args, ctx) {
   try {
     switch (nome) {
-      case 'listar_barbeiros': {
-        const barbeiros = await listarBarbeirosAtivos(ctx.empresaId);
+      case 'listar_opcoes': {
+        const [barbeiros, servicos] = await Promise.all([
+          listarBarbeirosAtivos(ctx.empresaId),
+          listarServicosAtivos(ctx.empresaId)
+        ]);
         if (barbeiros.length === 0) return { erro: 'Nenhum profissional disponível no momento.' };
-        return { barbeiros: barbeiros.map((b) => ({ id: b.id, nome: b.nome })) };
-      }
-
-      case 'listar_servicos': {
-        const servicos = await listarServicosAtivos(ctx.empresaId);
         if (servicos.length === 0) return { erro: 'Nenhum serviço cadastrado no momento.' };
-        return { servicos: servicos.map((s) => ({ id: s.id, nome: s.nome, valor: Number(s.valor), duracao_minutos: s.duracao })) };
+        return {
+          barbeiros: barbeiros.map((b) => ({ id: b.id, nome: b.nome })),
+          servicos: servicos.map((s) => ({ id: s.id, nome: s.nome, valor: Number(s.valor), duracao_minutos: s.duracao }))
+        };
       }
 
       case 'listar_horarios': {
@@ -405,7 +394,7 @@ async function processar({ empresaId, telefone, texto, instancia, config }) {
   for (let rodada = 0; rodada < MAX_RODADAS_FERRAMENTA; rodada++) {
     let resultado;
     try {
-      resultado = await chat({ mensagens, sistema, temperatura: config.temperatura, maxTokens: 500, tools: ferramentas });
+      resultado = await chat({ mensagens, sistema, temperatura: config.temperatura, maxTokens: 300, tools: ferramentas });
     } catch (err) {
       console.error('Erro ao chamar a Groq no modo livre do bot de WhatsApp:', err);
       respostaFinal = 'Desculpe, tive um problema técnico agora. Pode repetir o que você precisa?';

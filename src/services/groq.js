@@ -12,7 +12,7 @@ function estaConfigurado() {
   return Boolean(process.env.GROQ_API_KEY);
 }
 
-async function gerarTexto({ prompt, sistema, maxTokens = 400, temperatura = 0.6 }) {
+async function gerarTexto({ prompt, sistema, maxTokens = 400, temperatura = 0.6, reasoningEffort }) {
   if (!estaConfigurado()) {
     const erro = new Error('GROQ_API_KEY não configurada.');
     erro.naoConfigurado = true;
@@ -35,7 +35,8 @@ async function gerarTexto({ prompt, sistema, maxTokens = 400, temperatura = 0.6 
       temperature: temperatura,
       // Qwen3 é um modelo de raciocínio: sem isso ele devolve o <think>...</think>
       // junto no content e vaza pro usuário final.
-      reasoning_format: 'hidden'
+      reasoning_format: 'hidden',
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
     })
   });
 
@@ -56,7 +57,7 @@ async function gerarTexto({ prompt, sistema, maxTokens = 400, temperatura = 0.6 
 // devolve texto), aqui o chamador precisa do array de tool_calls cru pra decidir o que executar.
 // `mensagens` já vem no formato OpenAI (role/content, incluindo role:'tool' das respostas de
 // chamadas anteriores) — quem monta o histórico é o chamador.
-async function chat({ mensagens, sistema, temperatura = 0.6, maxTokens = 700, tools }) {
+async function chat({ mensagens, sistema, temperatura = 0.6, maxTokens = 700, tools, reasoningEffort }) {
   if (!estaConfigurado()) {
     const erro = new Error('GROQ_API_KEY não configurada.');
     erro.naoConfigurado = true;
@@ -75,6 +76,13 @@ async function chat({ mensagens, sistema, temperatura = 0.6, maxTokens = 700, to
       max_tokens: maxTokens,
       temperature: temperatura,
       reasoning_format: 'hidden',
+      // NÃO force reasoning_effort aqui sem testar de novo com tool calling: medimos direto na
+      // API que passar "none" (ou mesmo "low") faz esse modelo parar de chamar ferramenta antes
+      // de responder — ele chegou a inventar um serviço que não existe no banco em vez de checar
+      // com listar_opcoes. O padrão (sem passar o parâmetro) é o único testado que mantém o
+      // tool calling confiável, então só passa reasoningEffort se o chamador pedir explicitamente
+      // e tiver validado com tools.
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       ...(tools ? { tools, tool_choice: 'auto' } : {})
     })
   });
