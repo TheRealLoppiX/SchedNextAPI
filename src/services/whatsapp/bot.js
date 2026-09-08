@@ -5,7 +5,7 @@ const { enviarMensagem, enviarImagem } = require('./provider');
 const { criarPagamentoPix } = require('../mercadopago');
 const { limiteAgendamentosMesAtingido, obterTaxaMarketplace } = require('../../utils/limitesPlano');
 const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
-const { gerarTexto, estaConfigurado: iaConfigurada, MODELO_CLASSIFICACAO } = require('../groq');
+const { gerarTexto, estaConfigurado: iaConfigurada, MODELOS_CLASSIFICACAO } = require('../groq');
 const {
   EMAIL_REGEX,
   obterOuCriarSessao,
@@ -40,7 +40,7 @@ async function interpretarIntencaoMenu(texto) {
     const resposta = await gerarTexto({
       sistema: 'Você classifica a intenção de uma mensagem de WhatsApp enviada a um bot de agendamento de barbearia/salão. Responda APENAS uma destas palavras, sem mais nada: AGENDAR (a pessoa quer marcar/remarcar um horário), AGENDAMENTOS (a pessoa quer ver ou cancelar um agendamento que já tem), ou NENHUM (não deu pra saber).',
       prompt: texto,
-      modelo: MODELO_CLASSIFICACAO,
+      modelos: MODELOS_CLASSIFICACAO,
       reasoningEffort: 'low',
       maxTokens: 60,
       temperatura: 0

@@ -15,7 +15,7 @@ const { criarPagamentoPix } = require('../mercadopago');
 const { criarPendente, buscarPendenteValido, removerPendente } = require('../cadastroPendente');
 const { obterTaxaMarketplace, limiteAgendamentosMesAtingido } = require('../../utils/limitesPlano');
 const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
-const { chat } = require('../groq');
+const { chat, MODELOS_TOOL_CALLING } = require('../groq');
 const {
   EMAIL_REGEX,
   obterOuCriarSessao,
@@ -394,7 +394,7 @@ async function processar({ empresaId, telefone, texto, instancia, config }) {
   for (let rodada = 0; rodada < MAX_RODADAS_FERRAMENTA; rodada++) {
     let resultado;
     try {
-      resultado = await chat({ mensagens, sistema, temperatura: config.temperatura, maxTokens: 300, tools: ferramentas });
+      resultado = await chat({ mensagens, sistema, temperatura: config.temperatura, maxTokens: 300, tools: ferramentas, modelos: MODELOS_TOOL_CALLING });
     } catch (err) {
       console.error('Erro ao chamar a Groq no modo livre do bot de WhatsApp:', err);
       respostaFinal = 'Desculpe, tive um problema técnico agora. Pode repetir o que você precisa?';
