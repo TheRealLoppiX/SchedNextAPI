@@ -34,7 +34,7 @@ async function criarCheckout({ empresaId, planoNome, precoMensal, email }) {
 
   const preapproval = await mercadopago.criarPreapproval({
     accessToken: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
-    reason: `SchedNext — plano ${planoNome}`,
+    reason: `SchedNext: plano ${planoNome}`,
     valor: precoMensal,
     payerEmail: email,
     externalReference: empresaId,
@@ -76,7 +76,7 @@ async function reativarAssinaturaNoGateway({ empresaId, email, planoNome, precoM
 
   const preapproval = await mercadopago.criarPreapproval({
     accessToken: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
-    reason: `SchedNext — plano ${planoNome}`,
+    reason: `SchedNext: plano ${planoNome}`,
     valor: precoMensal,
     payerEmail: email,
     externalReference: empresaId,

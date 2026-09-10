@@ -133,7 +133,7 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
       const cobranca = await criarPagamentoPix({
         accessTokenVendedor: emp.mercadopago_access_token,
         valor: valorTotal,
-        descricao: `SchedNext — agendamento em ${emp.nome}`,
+        descricao: `SchedNext: agendamento em ${emp.nome}`,
         externalReference: novoAgendamento.id,
         applicationFee: valorTotal * (taxaPercentual / 100)
       });
@@ -174,7 +174,7 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
       enviarMensagem(
         emp.whatsapp_phone_number_id,
         `55${usuario.telefone.replace(/\D/g, '')}`,
-        `✅ Agendamento confirmado! ${emp.nome}, ${dataFormatada}. Valor: R$ ${valorTotal}.`
+        `Agendamento confirmado! ${emp.nome}, ${dataFormatada}. Valor: R$ ${valorTotal}.`
       ).catch((err) => console.error('Erro ao enviar WhatsApp de confirmação de agendamento:', err));
     }
   }
@@ -560,7 +560,7 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
         }
         const { data: empresaPix } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', req.empresaId).maybeSingle();
         if (!empresaPix?.mercadopago_access_token) {
-          return res.status(400).json({ error: 'Conta Mercado Pago não conectada — não é possível confirmar a perna Pix.' });
+          return res.status(400).json({ error: 'Conta Mercado Pago não conectada, não é possível confirmar a perna Pix.' });
         }
         let pagamentoPix;
         try {

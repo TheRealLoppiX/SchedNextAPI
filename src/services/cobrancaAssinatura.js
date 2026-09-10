@@ -4,7 +4,8 @@ const { emailHtml } = require('../utils/emailTemplate');
 const { enviarMensagem } = require('./whatsapp/provider');
 const { obterTaxaMarketplace, permiteWhatsappBot } = require('../utils/limitesPlano');
 const { calcularInicioCiclo } = require('../utils/limitesAssinatura');
-const { criarPagamentoPix, buscarPreapproval } = require('./mercadopago');
+const { montarUrlTenant } = require('../utils/tenantContext');
+const { criarPagamentoPix, criarPreapproval, buscarPreapproval } = require('./mercadopago');
 
 // Núcleo da cobrança recorrente de ASSINATURA DO CLIENTE FINAL (mensalidade que ele paga pra
 // própria barbearia — não confundir com a assinatura da plataforma SchedNext, ver
@@ -58,7 +59,7 @@ async function gerarCobrancaPix({ usuario, empresa, plano }) {
   const cobranca = await criarPagamentoPix({
     accessTokenVendedor: empresa.mercadopago_access_token,
     valor: plano.preco,
-    descricao: `${empresa.nome} — assinatura ${plano.nome}`,
+    descricao: `${empresa.nome}: assinatura ${plano.nome}`,
     externalReference: `assinatura-${usuario.id}-${cicloRef}`,
     payerEmail: usuario.email,
     applicationFee: plano.preco * (taxaPercentual / 100)
@@ -112,9 +113,31 @@ async function enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode, q
     enviarMensagem(
       empresa.whatsapp_phone_number_id,
       `55${usuario.telefone.replace(/\D/g, '')}`,
-      `💈 Mensalidade do plano ${plano.nome} na ${empresa.nome}: R$ ${Number(plano.preco).toFixed(2)}.\n\nPix copia e cola:\n${qrCode}`
+      `Mensalidade do plano ${plano.nome} na ${empresa.nome}: R$ ${Number(plano.preco).toFixed(2)}.\n\nPix copia e cola:\n${qrCode}`
     ).catch((err) => console.error('Erro ao enviar WhatsApp de cobrança de assinatura:', err));
   }
+}
+
+// Cria uma assinatura de cartão (preapproval) no Mercado Pago pro ciclo atual do cliente e
+// devolve o link de checkout pra ele autorizar o cartão. Reaproveitado tanto pelo endpoint que o
+// próprio cliente chama do perfil dele (routes/mercadopago.js) quanto pelo endpoint do admin que
+// manda esse link direto por WhatsApp/e-mail (routes/cobrancaAssinatura.js) — a criação do
+// preapproval em si é sempre a mesma, só muda quem dispara.
+async function criarPreapprovalAssinatura({ usuario, empresa, plano }) {
+  const taxaPercentual = await obterTaxaMarketplace(empresa.id);
+  const preapproval = await criarPreapproval({
+    accessToken: empresa.mercadopago_access_token,
+    reason: `${empresa.nome} - plano ${plano.nome}`,
+    valor: plano.preco,
+    payerEmail: usuario.email,
+    externalReference: String(usuario.id),
+    backUrl: montarUrlTenant(empresa, '/assinatura'),
+    startDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+    applicationFee: plano.preco * (taxaPercentual / 100)
+  });
+
+  await supabase.from('usuarios').update({ mercadopago_preapproval_id: preapproval.id, assinatura_forma_pagamento: 'cartao' }).eq('id', usuario.id);
+  return preapproval.init_point;
 }
 
 // Confirma o status do preapproval de cartão do cliente. Não existe webhook confiável por ciclo
@@ -180,7 +203,7 @@ async function marcarInadimplente(usuario, empresa) {
     enviarMensagem(
       empresa.whatsapp_phone_number_id,
       `55${usuario.telefone.replace(/\D/g, '')}`,
-      `⚠️ Não identificamos o pagamento da sua mensalidade na ${empresa?.nome || 'barbearia'}. Os benefícios do seu plano ficam suspensos até regularizar.`
+      `Não identificamos o pagamento da sua mensalidade na ${empresa?.nome || 'barbearia'}. Os benefícios do seu plano ficam suspensos até regularizar.`
     ).catch((err) => console.error('Erro ao enviar WhatsApp de inadimplência:', err));
   }
 }
@@ -196,6 +219,7 @@ module.exports = {
   obterOuCriarCobrancaCicloAtual,
   gerarCobrancaPix,
   enviarNotificacaoCobrancaPix,
+  criarPreapprovalAssinatura,
   verificarCobrancaCartao,
   confirmarCicloCartao,
   marcarInadimplente,

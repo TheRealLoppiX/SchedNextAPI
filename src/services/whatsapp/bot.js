@@ -148,7 +148,7 @@ async function construirRespostaVerAgendamentos(empresaId, telefone) {
     const horaFmt = `${String(dh.getUTCHours()).padStart(2, '0')}:${String(dh.getUTCMinutes()).padStart(2, '0')}`;
     return { dataFmt, horaFmt, nome: a.barbeiros?.nome || 'profissional' };
   });
-  const lista = futurosFmt.map((f, i) => `${i + 1}. ${f.dataFmt} às ${f.horaFmt} — ${f.nome}`).join('\n');
+  const lista = futurosFmt.map((f, i) => `${i + 1}. ${f.dataFmt} às ${f.horaFmt}, ${f.nome}`).join('\n');
 
   return {
     texto: `Seus próximos agendamentos:\n${lista}\n\nDigite o número de um deles para cancelar, ou *MENU* para voltar.`,
@@ -193,7 +193,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   // "Digite MENU"), e não havia nenhuma forma de abortar um fluxo de agendamento no meio (ex: o
   // cliente errou o profissional e queria recomeçar sem esperar toda a conversa expirar sozinha).
   if (sessao.estado_atual !== 'inicio' && msgLower === 'sair') {
-    return responder('Até logo! 👋 Quando quiser, é só chamar de novo.', 'inicio', {});
+    return responder('Até logo! Quando quiser, é só chamar de novo.', 'inicio', {});
   }
   if (sessao.estado_atual !== 'inicio' && sessao.estado_atual !== 'menu' && msgLower === 'cancelar') {
     return responder(
@@ -204,7 +204,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
 
   // A saudação ("Olá! 👋") é customizável por empresa (whatsapp_bot_boas_vindas); o resto do menu
   // continua fixo, já que é uma lista numerada (ver comPersonalidade acima).
-  const saudacao = config.boasVindas || 'Olá! 👋';
+  const saudacao = config.boasVindas || 'Olá!';
   const MENSAGEM_MENU = `${saudacao} O que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.`;
 
   // "menu" digitado explicitamente sempre mostra o menu, em qualquer estado — é um pedido
@@ -278,7 +278,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
       console.error('Erro ao cancelar agendamento via WhatsApp:', erroCancelar);
       return responder('Não consegui cancelar agora. Tente novamente em instantes.', 'inicio', {});
     }
-    return responder(`✅ Agendamento de ${dados.agendamento_cancelar_texto} cancelado. Digite *MENU* para ver as opções.`, 'inicio', {});
+    return responder(`Agendamento de ${dados.agendamento_cancelar_texto} cancelado. Digite *MENU* para ver as opções.`, 'inicio', {});
   }
 
   if (sessao.estado_atual === 'aguardando_barbeiro') {
@@ -370,7 +370,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
     }
 
     return responder(
-      'Show! Agora escolha uma senha (mínimo 6 caracteres) — pode usar depois pra entrar no site como cliente.',
+      'Show! Agora escolha uma senha (mínimo 6 caracteres), pode usar depois pra entrar no site como cliente.',
       'aguardando_senha',
       { ...dados, email_cadastro: emailNormalizado }
     );
@@ -498,7 +498,7 @@ async function gerarPixEEnviar({ empresaId, telefone, instancia, sessao, dados }
     const cobranca = await criarPagamentoPix({
       accessTokenVendedor: empresa.mercadopago_access_token,
       valor,
-      descricao: `SchedNext — atendimento em ${empresa.nome}`,
+      descricao: `SchedNext: atendimento em ${empresa.nome}`,
       externalReference: dados.agendamento_id,
       applicationFee: valor * (taxaPercentual / 100)
     });
@@ -514,7 +514,7 @@ async function gerarPixEEnviar({ empresaId, telefone, instancia, sessao, dados }
     if (!qrCode) throw new Error('Mercado Pago não devolveu o código Pix.');
 
     if (qrBase64) await enviarImagem(instancia, telefone, qrBase64, `Pix de R$ ${valor.toFixed(2)}`);
-    await enviarMensagem(instancia, telefone, `Código Pix Copia e Cola:\n${qrCode}\n\nAssim que o pagamento cair, te aviso por aqui. ✅`);
+    await enviarMensagem(instancia, telefone, `Código Pix Copia e Cola:\n${qrCode}\n\nAssim que o pagamento cair, te aviso por aqui.`);
   } catch (err) {
     console.error('Erro ao gerar Pix via bot do WhatsApp:', err);
     await enviarMensagem(instancia, telefone, 'Não consegui gerar o Pix agora. Pode pagar direto no local.');
@@ -549,7 +549,7 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sess
     return;
   }
 
-  const confirmacao = `✅ Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}`;
+  const confirmacao = `Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}`;
 
   // Oferece adiantar o pagamento via Pix só quando a empresa tem Mercado Pago conectado (ver
   // routes/mercadopago.js) — sem conta conectada não tem pra onde gerar a cobrança.

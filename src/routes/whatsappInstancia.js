@@ -97,9 +97,9 @@ router.post('/admin/whatsapp/testar', validate(whatsappTesteSchema), async (req,
   const numeroCompleto = telefone.startsWith('55') ? telefone : `55${telefone}`;
 
   try {
-    const resultado = await enviarMensagem(empresa.whatsapp_phone_number_id, numeroCompleto, 'Mensagem de teste do SchedNext: se você recebeu isso, seu bot de agendamento está pronto para responder clientes por aqui. ✅');
+    const resultado = await enviarMensagem(empresa.whatsapp_phone_number_id, numeroCompleto, 'Mensagem de teste do SchedNext: se você recebeu isso, seu bot de agendamento está pronto para responder clientes por aqui.');
     if (resultado.simulado) {
-      return res.status(503).json({ error: 'Integração de WhatsApp não configurada no servidor — mensagem não enviada de verdade.' });
+      return res.status(503).json({ error: 'Integração de WhatsApp não configurada no servidor, mensagem não enviada de verdade.' });
     }
     if (!resultado.enviado) {
       return res.status(502).json({ error: 'Não foi possível enviar a mensagem de teste. Confira se o número ainda está conectado.' });
@@ -162,7 +162,7 @@ router.get('/admin/whatsapp/qrcode', async (req, res) => {
 
   try {
     const qrcode = await obterQrCode(empresa.whatsapp_phone_number_id);
-    if (!qrcode?.base64) return res.status(409).json({ error: 'Sem QR Code pendente — o WhatsApp já deve estar conectado.' });
+    if (!qrcode?.base64) return res.status(409).json({ error: 'Sem QR Code pendente. O WhatsApp já deve estar conectado.' });
     res.json({ qrcode: qrcode.base64 });
   } catch (err) {
     console.error('Erro ao buscar novo QR Code:', err);

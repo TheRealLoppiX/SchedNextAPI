@@ -12,6 +12,7 @@ const {
   obterOuCriarCobrancaCicloAtual,
   gerarCobrancaPix,
   enviarNotificacaoCobrancaPix,
+  criarPreapprovalAssinatura,
   marcarEmDia
 } = require('../services/cobrancaAssinatura');
 
@@ -162,7 +163,7 @@ router.post('/admin/clientes/:id/assinatura/cobrar-agora', async (req, res) => {
       enviarMensagem(
         empresa.whatsapp_phone_number_id,
         `55${cliente.telefone.replace(/\D/g, '')}`,
-        `💈 Lembrete: sua mensalidade do plano ${plano.nome} na ${empresa.nome} está pendente. Confira os dados de cobrança do seu cartão.`
+        `Lembrete: sua mensalidade do plano ${plano.nome} na ${empresa.nome} está pendente. Confira os dados de cobrança do seu cartão.`
       ).catch((err) => console.error('Erro ao enviar WhatsApp de lembrete de mensalidade:', err));
     }
     res.json({ success: true, forma_pagamento: 'cartao', lembrete_enviado: true });
@@ -172,12 +173,12 @@ router.post('/admin/clientes/:id/assinatura/cobrar-agora', async (req, res) => {
   }
 });
 
-// Manda pro cliente (e-mail + WhatsApp) o link da área dele pra cadastrar o cartão (ou escolher
-// Pix) e ligar a cobrança automática por conta própria — o admin não consegue autorizar um
-// cartão em nome do cliente (o preapproval do Mercado Pago exige o dono do cartão), então esse
-// endpoint só entrega o convite; quem efetivamente assina é o cliente, na tela dele
-// (frontend/src/pages/Assinatura.js, rota /:empresaSlug/assinatura). Exige plano já vinculado
-// pra a tela do cliente não cair em "sem plano atribuído".
+// Manda pro cliente (e-mail + WhatsApp) o link direto do Mercado Pago pra cadastrar o cartão. O
+// admin não consegue autorizar um cartão em nome do cliente (o preapproval exige o dono do
+// cartão), mas quem cria o preapproval é o backend, com os dados do plano já vinculado, então o
+// cliente recebe o link pronto e não precisa passar pelo login da área dele antes (fluxo mais
+// curto que só oferecer o link da tela de assinatura). A área de cliente ainda é mandada junto,
+// como alternativa pra quem preferir entrar e acompanhar por lá (também dá pra escolher Pix).
 router.post('/admin/clientes/:id/assinatura/enviar-link-cartao', async (req, res) => {
   const empresaId = req.empresaId;
 
@@ -190,10 +191,22 @@ router.post('/admin/clientes/:id/assinatura/enviar-link-cartao', async (req, res
   if (!cliente.plano_id) return res.status(400).json({ error: 'Vincule um plano de assinatura ao cliente antes de enviar o link.' });
   if (!cliente.email && !cliente.telefone) return res.status(400).json({ error: 'Este cliente não tem e-mail nem telefone cadastrados.' });
 
-  const { data: empresa } = await supabase.from('empresas').select('id, nome, slug, dominio_customizado, dominio_verificado, whatsapp_phone_number_id').eq('id', empresaId).maybeSingle();
+  const { data: empresa } = await supabase.from('empresas').select('id, nome, slug, dominio_customizado, dominio_verificado, mercadopago_access_token, whatsapp_phone_number_id').eq('id', empresaId).maybeSingle();
   if (!empresa?.slug) return res.status(500).json({ error: 'Não foi possível montar o link agora.' });
+  if (!empresa.mercadopago_access_token) return res.status(400).json({ error: 'Conecte o Mercado Pago antes de enviar o link de cadastro de cartão.' });
 
-  const link = montarUrlTenant(empresa, '/assinatura');
+  const { data: plano } = await supabase.from('planos_assinatura').select('id, nome, preco').eq('id', cliente.plano_id).maybeSingle();
+  if (!plano) return res.status(404).json({ error: 'Plano não encontrado.' });
+
+  let checkoutUrl;
+  try {
+    checkoutUrl = await criarPreapprovalAssinatura({ usuario: cliente, empresa, plano });
+  } catch (err) {
+    console.error('Erro ao criar link de cadastro de cartão:', err);
+    return res.status(500).json({ error: 'Não foi possível gerar o link de cadastro agora.' });
+  }
+
+  const linkArea = montarUrlTenant(empresa, '/assinatura');
   let enviado = false;
 
   try {
@@ -202,10 +215,11 @@ router.post('/admin/clientes/:id/assinatura/enviar-link-cartao', async (req, res
         to: cliente.email,
         subject: `Cadastre seu cartão para a mensalidade - ${empresa.nome}`,
         html: emailHtml({
-          titulo: `Olá, ${cliente.nome_completo}!`,
+          titulo: `Olá, ${cliente.nome_completo}`,
           mensagemHtml: `
-            <p style="margin: 0 0 12px;">Pra deixar sua mensalidade na <strong>${empresa.nome}</strong> no automático, cadastre seu cartão (ou escolha pagar por Pix todo mês) direto na sua área de cliente.</p>
-            <p style="margin: 12px 0;"><a href="${link}">${link}</a></p>
+            <p style="margin: 0 0 12px;">Pra deixar sua mensalidade do plano ${plano.nome} na <strong>${empresa.nome}</strong> no automático, cadastre seu cartão pelo link abaixo.</p>
+            <p style="margin: 12px 0;"><a href="${checkoutUrl}">${checkoutUrl}</a></p>
+            <p style="margin: 12px 0; font-size: 12px; color: #6b7280;">Prefere pagar por Pix ou acompanhar pela sua área de cliente? Acesse ${linkArea}</p>
           `
         })
       });
@@ -215,7 +229,7 @@ router.post('/admin/clientes/:id/assinatura/enviar-link-cartao', async (req, res
       await enviarMensagem(
         empresa.whatsapp_phone_number_id,
         `55${cliente.telefone.replace(/\D/g, '')}`,
-        `💈 Pra deixar sua mensalidade na ${empresa.nome} no automático, cadastre seu cartão (ou escolha Pix) por aqui:\n${link}`
+        `Pra deixar sua mensalidade do plano ${plano.nome} na ${empresa.nome} no automático, cadastre seu cartão por aqui:\n${checkoutUrl}\n\nPrefere pagar por Pix ou acompanhar pela sua área de cliente? Acesse ${linkArea}`
       );
       enviado = true;
     }

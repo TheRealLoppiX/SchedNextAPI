@@ -11,7 +11,7 @@ function emailHtml({ titulo, mensagemHtml }) {
         ${mensagemHtml}
       </div>
       <p style="text-align: center; color: #8a8fa3; font-size: 12px; margin-top: 20px;">
-        SchedNext — plataforma de agendamento online
+        SchedNext, plataforma de agendamento online
       </p>
     </div>
   `;

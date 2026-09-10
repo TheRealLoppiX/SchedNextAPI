@@ -10,11 +10,11 @@ const validate = require('../middleware/validate');
 const verificarTokenCliente = require('../middleware/clienteAuth');
 const { mercadoPagoPixSchema, assinarAssinaturaSchema } = require('../schemas');
 const { obterTaxaMarketplace, permiteWhatsappBot } = require('../utils/limitesPlano');
-const { montarUrlTenant } = require('../utils/tenantContext');
 const { calcularValorFinalCheckout } = require('../services/pagamentoAgendamento');
 const {
   gerarCobrancaPix,
   enviarNotificacaoCobrancaPix,
+  criarPreapprovalAssinatura,
   confirmarCicloCartao,
   marcarInadimplente,
   marcarEmDia
@@ -24,7 +24,6 @@ const {
   trocarCodigoPorToken,
   criarPagamentoPix,
   buscarPagamento,
-  criarPreapproval,
   cancelarPreapproval,
   buscarPreapproval,
   buscarPagamentoAutorizado
@@ -111,7 +110,7 @@ async function notificarPagamentoConfirmado(agendamentoId) {
     enviarMensagem(
       agendamento.empresas?.whatsapp_phone_number_id,
       `55${agendamento.usuarios.telefone.replace(/\D/g, '')}`,
-      `✅ Pagamento confirmado! ${nomeEmpresa}, ${dataFormatada}. Valor: R$ ${agendamento.valor_total}.`
+      `Pagamento confirmado! ${nomeEmpresa}, ${dataFormatada}. Valor: R$ ${agendamento.valor_total}.`
     ).catch((err) => console.error('Erro ao enviar WhatsApp de confirmação de pagamento:', err));
   }
 }
@@ -233,7 +232,7 @@ router.post('/admin/mercadopago/pix/:agendamentoId', validate(mercadoPagoPixSche
     const cobranca = await criarPagamentoPix({
       accessTokenVendedor: empresa.mercadopago_access_token,
       valor: valorCobranca,
-      descricao: `SchedNext — atendimento em ${empresa.nome}`,
+      descricao: `SchedNext: atendimento em ${empresa.nome}`,
       externalReference: req.params.agendamentoId,
       applicationFee: valorCobranca * (taxaPercentual / 100)
     });
@@ -382,21 +381,8 @@ router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, v
   }
 
   try {
-    const taxaPercentual = await obterTaxaMarketplace(usuario.empresa_id);
-    const preapproval = await criarPreapproval({
-      accessToken: empresa.mercadopago_access_token,
-      reason: `${empresa.nome} — plano ${plano.nome}`,
-      valor: plano.preco,
-      payerEmail: usuario.email,
-      externalReference: req.params.id,
-      backUrl: montarUrlTenant(empresa, '/assinatura'),
-      startDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
-      applicationFee: plano.preco * (taxaPercentual / 100)
-    });
-
-    await supabase.from('usuarios').update({ mercadopago_preapproval_id: preapproval.id, assinatura_forma_pagamento: 'cartao' }).eq('id', req.params.id);
-
-    res.json({ checkoutUrl: preapproval.init_point });
+    const checkoutUrl = await criarPreapprovalAssinatura({ usuario, empresa, plano });
+    res.json({ checkoutUrl });
   } catch (err) {
     console.error('Erro ao criar assinatura do cliente:', err);
     res.status(500).json({ error: 'Não foi possível iniciar a cobrança automática agora.' });

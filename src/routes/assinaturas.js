@@ -157,7 +157,7 @@ router.put('/admin/clientes/:id/plano', validate(clientePlanoSchema), async (req
   const { plano_id } = req.body;
   const empresa_id = req.empresaId;
 
-  const { data: cliente } = await supabase.from('usuarios').select('empresa_id, assinante, assinante_desde').eq('id', req.params.id).maybeSingle();
+  const { data: cliente } = await supabase.from('usuarios').select('empresa_id, assinante, assinante_desde, plano_id').eq('id', req.params.id).maybeSingle();
   if (!cliente || cliente.empresa_id !== empresa_id) return res.status(404).json({ error: 'Cliente não encontrado.' });
 
   if (plano_id) {
@@ -165,17 +165,24 @@ router.put('/admin/clientes/:id/plano', validate(clientePlanoSchema), async (req
     if (!plano || plano.empresa_id !== empresa_id) return res.status(404).json({ error: 'Plano não encontrado.' });
   }
 
-  // assinante_desde ancora o ciclo rolante de uso mensal (ver utils/limitesAssinatura.js).
-  // Só seta na primeira ativação: trocar de plano com o cliente já assinante não deve
-  // resetar o ciclo/consumo em andamento. Na primeira ativação também força
-  // status_assinatura='pendente' (em vez de deixar cair no default 'em_dia' da coluna) — sem
-  // isso o cliente nascia com o benefício de assinante (preço/cota, ver
-  // calcularValorComLimiteAssinante) liberado no mesmo instante em que o admin vincula o plano,
-  // sem nenhuma cobrança de verdade ter acontecido ainda. Só uma baixa real (manual ou pagamento
-  // confirmado — ver marcarEmDia em services/cobrancaAssinatura.js) muda isso pra 'em_dia'.
+  // assinante_desde ancora o ciclo rolante de uso mensal (ver utils/limitesAssinatura.js). Só
+  // seta na primeira ativação: trocar de plano com o cliente já assinante não deve resetar o
+  // ciclo/consumo em andamento.
   const primeiraAtivacao = !!plano_id && (!cliente.assinante || !cliente.assinante_desde);
+
+  // status_assinatura só pode virar 'em_dia' com uma baixa real (manual ou pagamento
+  // confirmado, ver marcarEmDia em services/cobrancaAssinatura.js). Qualquer vínculo novo de
+  // plano volta pra 'pendente': tanto a primeira ativação (sem isso o cliente nascia com o
+  // default 'em_dia' da coluna, sem cobrança nenhuma) quanto uma troca de plano num cliente já
+  // assinante (o 'em_dia' que ele tinha valia pro preço do plano ANTERIOR, não pro novo).
+  const trocouDePlano = !!plano_id && cliente.plano_id !== plano_id;
   const update = plano_id
-    ? { plano_id, assinante: true, ...(primeiraAtivacao && { assinante_desde: new Date().toISOString().split('T')[0], status_assinatura: 'pendente' }) }
+    ? {
+        plano_id,
+        assinante: true,
+        ...(primeiraAtivacao && { assinante_desde: new Date().toISOString().split('T')[0] }),
+        ...(trocouDePlano && { status_assinatura: 'pendente' })
+      }
     : { plano_id: null, assinante: false };
 
   const { error } = await supabase.from('usuarios').update(update).eq('id', req.params.id);

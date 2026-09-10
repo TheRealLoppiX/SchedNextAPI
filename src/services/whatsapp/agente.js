@@ -346,7 +346,7 @@ async function executarFerramenta(nome, args, ctx) {
         const cobranca = await criarPagamentoPix({
           accessTokenVendedor: empresa.mercadopago_access_token,
           valor,
-          descricao: `SchedNext — atendimento em ${empresa.nome}`,
+          descricao: `SchedNext: atendimento em ${empresa.nome}`,
           externalReference: agendamento.id,
           applicationFee: valor * (taxaPercentual / 100)
         });
@@ -380,7 +380,7 @@ async function processar({ empresaId, telefone, texto, instancia, config }) {
   // Saída de emergência: nunca decidida pela IA, sempre disponível — garante que o cliente
   // sempre consegue zerar a conversa mesmo se o agente estiver travado ou se comportando mal.
   if (msg.toLowerCase() === 'sair') {
-    await enviarMensagem(instancia, telefone, 'Até logo! 👋 Quando quiser, é só chamar de novo.');
+    await enviarMensagem(instancia, telefone, 'Até logo! Quando quiser, é só chamar de novo.');
     await salvarSessao(sessao, 'ia_livre', { historico: [] });
     return;
   }
@@ -415,7 +415,7 @@ async function processar({ empresaId, telefone, texto, instancia, config }) {
     }
 
     if (rodada === MAX_RODADAS_FERRAMENTA - 1) {
-      respostaFinal = 'Deixa eu confirmar isso direitinho — pode me dizer de novo o que você precisa?';
+      respostaFinal = 'Deixa eu confirmar isso direitinho, pode me dizer de novo o que você precisa?';
     }
   }
 

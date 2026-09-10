@@ -70,7 +70,7 @@ async function verificarEDispararPremioFidelidade(usuarioId, empresaId) {
         to: usuario.email,
         subject: `Parabéns, ${primeiroNome}! Você ganhou ${textoPremio}`,
         html: emailHtml({
-          titulo: `Parabéns, ${primeiroNome}! 🎉`,
+          titulo: `Parabéns, ${primeiroNome}!`,
           mensagemHtml: `
             <p style="margin: 0 0 4px;">Você completou a campanha <strong>${campanha.nome}</strong> da <strong>${nomeEmpresa}</strong>!</p>
             <p style="margin: 12px 0;">Seu prêmio: <strong>${textoPremio}</strong>. Aproveite no seu próximo atendimento.</p>
