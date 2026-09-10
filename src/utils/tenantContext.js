@@ -24,4 +24,19 @@ async function resolverEmpresaPorSlug(slug, campos = 'id, nome, nome_fantasia, l
   return { empresa: data, error };
 }
 
-module.exports = { obterSlugTenant, resolverEmpresaPorSlug };
+// Monta uma URL absoluta e navegável (pra WhatsApp, e-mail, backUrl de checkout) pro site do
+// tenant. Não é `${FRONTEND_URL}/${slug}/...` — esse caminho no domínio raiz foi desativado (ver
+// App.js/AppRoutes: as rotas /:empresaSlug só existem quando o acesso já veio de um subdomínio
+// ou domínio próprio, senão caem no catch-all pra Landing). Cada empresa vive em
+// `{slug}.{DOMINIO_RAIZ_PLATAFORMA}`, ou no domínio próprio dela quando o Enterprise
+// (dominio_customizado) já foi verificado (ver routes/dominioCustomizado.js).
+const DOMINIO_RAIZ_PLATAFORMA = process.env.DOMINIO_RAIZ_PLATAFORMA || 'schednext.com.br';
+
+function montarUrlTenant(empresa, caminho = '/') {
+  const base = (empresa.dominio_customizado && empresa.dominio_verificado)
+    ? `https://${empresa.dominio_customizado}`
+    : `https://${empresa.slug}.${DOMINIO_RAIZ_PLATAFORMA}`;
+  return `${base}${caminho}`;
+}
+
+module.exports = { obterSlugTenant, resolverEmpresaPorSlug, montarUrlTenant };

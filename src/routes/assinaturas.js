@@ -167,9 +167,15 @@ router.put('/admin/clientes/:id/plano', validate(clientePlanoSchema), async (req
 
   // assinante_desde ancora o ciclo rolante de uso mensal (ver utils/limitesAssinatura.js).
   // Só seta na primeira ativação: trocar de plano com o cliente já assinante não deve
-  // resetar o ciclo/consumo em andamento.
+  // resetar o ciclo/consumo em andamento. Na primeira ativação também força
+  // status_assinatura='pendente' (em vez de deixar cair no default 'em_dia' da coluna) — sem
+  // isso o cliente nascia com o benefício de assinante (preço/cota, ver
+  // calcularValorComLimiteAssinante) liberado no mesmo instante em que o admin vincula o plano,
+  // sem nenhuma cobrança de verdade ter acontecido ainda. Só uma baixa real (manual ou pagamento
+  // confirmado — ver marcarEmDia em services/cobrancaAssinatura.js) muda isso pra 'em_dia'.
+  const primeiraAtivacao = !!plano_id && (!cliente.assinante || !cliente.assinante_desde);
   const update = plano_id
-    ? { plano_id, assinante: true, ...((!cliente.assinante || !cliente.assinante_desde) && { assinante_desde: new Date().toISOString().split('T')[0] }) }
+    ? { plano_id, assinante: true, ...(primeiraAtivacao && { assinante_desde: new Date().toISOString().split('T')[0], status_assinatura: 'pendente' }) }
     : { plano_id: null, assinante: false };
 
   const { error } = await supabase.from('usuarios').update(update).eq('id', req.params.id);

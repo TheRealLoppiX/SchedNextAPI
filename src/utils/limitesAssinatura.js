@@ -128,10 +128,15 @@ async function calcularValorComLimiteAssinante(usuarioId, servicos, { registrarC
     .eq('id', usuarioId)
     .maybeSingle();
 
-  // Mensalidade em atraso (ver services/cobrancaAssinatura.js) suspende o benefício do plano
-  // sem tirar o vínculo — assinante/plano_id continuam intactos, só volta a cobrar preço cheio
-  // até o pagamento ser confirmado (automático ou baixa manual do admin).
-  if (!usuario?.assinante || !usuario.plano_id || usuario.status_assinatura === 'inadimplente') return resultado;
+  // Mensalidade em atraso ou ainda sem nenhuma cobrança confirmada (ver
+  // services/cobrancaAssinatura.js) suspende o benefício do plano sem tirar o vínculo —
+  // assinante/plano_id continuam intactos, só volta a cobrar preço cheio. Checagem por
+  // allowlist (exige 'em_dia' explícito) de propósito, não por blocklist de 'inadimplente': um
+  // cliente recém-vinculado ao plano nasce com status_assinatura='pendente' (ver PUT
+  // /admin/clientes/:id/plano em routes/assinaturas.js) e só vira 'em_dia' com uma baixa real
+  // (manual ou pagamento confirmado) — sem essa allowlist ele ganharia o preço de assinante
+  // antes de qualquer cobrança de verdade acontecer.
+  if (!usuario?.assinante || !usuario.plano_id || usuario.status_assinatura !== 'em_dia') return resultado;
 
   const idsServicos = servicos.map((s) => s.id);
   const { data: psRows } = await supabase

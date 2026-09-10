@@ -881,7 +881,7 @@ router.get('/admin/agendamento-usuario/:id', async (req, res) => {
     const servicosAgendadosIds = [...new Set((asvRows || []).map((r) => r.servico_id))];
 
     const usuario = ag.usuarios || {};
-    if (!usuario.assinante || !usuario.plano_id || usuario.status_assinatura === 'inadimplente') {
+    if (!usuario.assinante || !usuario.plano_id || usuario.status_assinatura !== 'em_dia') {
       return res.json({
         usuario_id: ag.usuario_id,
         assinante: false,

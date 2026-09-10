@@ -7,6 +7,7 @@ const { enviarMensagem } = require('../services/whatsapp/provider');
 const validate = require('../middleware/validate');
 const { baixaManualAssinaturaSchema } = require('../schemas');
 const { permiteWhatsappBot } = require('../utils/limitesPlano');
+const { montarUrlTenant } = require('../utils/tenantContext');
 const {
   obterOuCriarCobrancaCicloAtual,
   gerarCobrancaPix,
@@ -189,10 +190,10 @@ router.post('/admin/clientes/:id/assinatura/enviar-link-cartao', async (req, res
   if (!cliente.plano_id) return res.status(400).json({ error: 'Vincule um plano de assinatura ao cliente antes de enviar o link.' });
   if (!cliente.email && !cliente.telefone) return res.status(400).json({ error: 'Este cliente não tem e-mail nem telefone cadastrados.' });
 
-  const { data: empresa } = await supabase.from('empresas').select('id, nome, slug, whatsapp_phone_number_id').eq('id', empresaId).maybeSingle();
-  if (!empresa?.slug || !process.env.FRONTEND_URL) return res.status(500).json({ error: 'Não foi possível montar o link agora.' });
+  const { data: empresa } = await supabase.from('empresas').select('id, nome, slug, dominio_customizado, dominio_verificado, whatsapp_phone_number_id').eq('id', empresaId).maybeSingle();
+  if (!empresa?.slug) return res.status(500).json({ error: 'Não foi possível montar o link agora.' });
 
-  const link = `${process.env.FRONTEND_URL}/${empresa.slug}/assinatura`;
+  const link = montarUrlTenant(empresa, '/assinatura');
   let enviado = false;
 
   try {

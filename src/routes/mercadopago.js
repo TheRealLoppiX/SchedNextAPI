@@ -10,6 +10,7 @@ const validate = require('../middleware/validate');
 const verificarTokenCliente = require('../middleware/clienteAuth');
 const { mercadoPagoPixSchema, assinarAssinaturaSchema } = require('../schemas');
 const { obterTaxaMarketplace, permiteWhatsappBot } = require('../utils/limitesPlano');
+const { montarUrlTenant } = require('../utils/tenantContext');
 const { calcularValorFinalCheckout } = require('../services/pagamentoAgendamento');
 const {
   gerarCobrancaPix,
@@ -362,7 +363,7 @@ router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, v
   const { data: plano } = await supabase.from('planos_assinatura').select('id, nome, preco').eq('id', usuario.plano_id).maybeSingle();
   if (!plano) return res.status(404).json({ error: 'Plano não encontrado.' });
 
-  const { data: empresa } = await supabase.from('empresas').select('id, nome, slug, mercadopago_access_token, whatsapp_phone_number_id').eq('id', usuario.empresa_id).maybeSingle();
+  const { data: empresa } = await supabase.from('empresas').select('id, nome, slug, dominio_customizado, dominio_verificado, mercadopago_access_token, whatsapp_phone_number_id').eq('id', usuario.empresa_id).maybeSingle();
   if (!empresa?.mercadopago_access_token) {
     return res.status(400).json({ error: 'Esta barbearia ainda não conectou o Mercado Pago para cobrança automática.' });
   }
@@ -388,7 +389,7 @@ router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, v
       valor: plano.preco,
       payerEmail: usuario.email,
       externalReference: req.params.id,
-      backUrl: `${process.env.FRONTEND_URL}/${empresa.slug}/assinatura`,
+      backUrl: montarUrlTenant(empresa, '/assinatura'),
       startDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
       applicationFee: plano.preco * (taxaPercentual / 100)
     });
