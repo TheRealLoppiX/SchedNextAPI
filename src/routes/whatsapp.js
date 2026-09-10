@@ -20,6 +20,11 @@ router.post('/whatsapp/webhook', async (req, res) => {
     const key = dadoMsg?.key;
     if (!key || key.fromMe) return; // ignora eco das mensagens que a própria instância envia
 
+    // Mensagem de grupo tem remoteJid terminando em "@g.us" (não "@s.whatsapp.net") — sem esse
+    // filtro, o .replace('@s.whatsapp.net', '') abaixo não batia em nada, e o JID do grupo inteiro
+    // virava "telefone" de uma sessão do bot, tratando o grupo como se fosse um único cliente.
+    if ((key.remoteJid || '').endsWith('@g.us')) return;
+
     // Além de texto normal, também trata toques em botão/lista (bot.js manda esses IDs iguais aos
     // números do menu numerado, então o resto do fluxo nem precisa saber que veio de um toque em
     // vez de o cliente digitar o número).

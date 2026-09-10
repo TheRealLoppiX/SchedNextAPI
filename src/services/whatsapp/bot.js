@@ -1,15 +1,25 @@
 const bcrypt = require('bcrypt');
 const supabase = require('../../config/supabase');
-const transporter = require('../../config/mailer');
-const { emailHtml, blocoCodigo } = require('../../utils/emailTemplate');
 const { criarPendente, buscarPendenteValido, removerPendente } = require('../cadastroPendente');
-const { enviarMensagem } = require('./provider');
-const { limiteAgendamentosMesAtingido } = require('../../utils/limitesPlano');
-const { variantesTelefoneBR } = require('../../utils/telefone');
+const { enviarMensagem, enviarImagem } = require('./provider');
+const { criarPagamentoPix } = require('../mercadopago');
+const { limiteAgendamentosMesAtingido, obterTaxaMarketplace } = require('../../utils/limitesPlano');
 const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
-const { gerarTexto, estaConfigurado: iaConfigurada } = require('../groq');
-
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const { gerarTexto, estaConfigurado: iaConfigurada, MODELOS_CLASSIFICACAO } = require('../groq');
+const {
+  EMAIL_REGEX,
+  obterOuCriarSessao,
+  salvarSessao,
+  listarBarbeirosAtivos,
+  listarServicosAtivos,
+  encontrarClientePorTelefone,
+  enviarEmailCodigoCadastro,
+  gerarCodigoConfirmacao,
+  parseDataFalada,
+  horariosDisponiveis,
+  inserirAgendamento
+} = require('./helpers');
+const { processar: processarComAgente } = require('./agente');
 
 // Interpreta texto livre (ex: "quero cortar amanhã de tarde") e mapeia pra uma das opções do
 // menu. Usado tanto na primeira mensagem de uma conversa nova quanto como uma última tentativa
@@ -21,10 +31,18 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 async function interpretarIntencaoMenu(texto) {
   if (!iaConfigurada()) return null;
   try {
+    // Modelo diferente do resto do bot (Qwen) de propósito — a Groq limita tokens/minuto por
+    // modelo, não por chave, então isolar essa chamada (disparada toda vez que o cliente escreve
+    // fora do menu numérico) numa cota separada evita que ela compita com o tool calling do modo
+    // livre e a reescrita de personalidade. reasoning_effort:'low' e maxTokens com folga porque
+    // esse modelo "pensa" antes de responder e o raciocínio consome do mesmo teto de tokens —
+    // com maxTokens baixo demais ele corta o pensamento na metade e devolve resposta vazia.
     const resposta = await gerarTexto({
       sistema: 'Você classifica a intenção de uma mensagem de WhatsApp enviada a um bot de agendamento de barbearia/salão. Responda APENAS uma destas palavras, sem mais nada: AGENDAR (a pessoa quer marcar/remarcar um horário), AGENDAMENTOS (a pessoa quer ver ou cancelar um agendamento que já tem), ou NENHUM (não deu pra saber).',
       prompt: texto,
-      maxTokens: 6,
+      modelos: MODELOS_CLASSIFICACAO,
+      reasoningEffort: 'low',
+      maxTokens: 60,
       temperatura: 0
     });
     const intencao = resposta.trim().toUpperCase();
@@ -48,161 +66,45 @@ async function resolverIntencaoGlobal(msg, msgLower, { atalhosNumericos = false 
   return interpretarIntencaoMenu(msg);
 }
 
-// Encontra o cliente cadastrado dono deste número, tolerando os formatos diferentes em que
-// `usuarios.telefone` pode estar salvo (com máscara, sem DDI, com/sem o 9º dígito; ver
-// utils/telefone.js). Sem isso, clientes já cadastrados pelo site quase nunca eram
-// reconhecidos vindo do WhatsApp, caindo sempre no fluxo de "não te encontrei no cadastro".
-async function encontrarClientePorTelefone(empresaId, waId) {
-  const variantes = variantesTelefoneBR(waId);
-  const sufixo = variantes[0].slice(-8);
-  if (!sufixo) return null;
-
+// Busca a configuração de personalidade/modo do bot (ver sql/2026_whatsapp_bot_personalidade.sql
+// e o painel em AdminWhatsapp.js). Modo livre/personalidade/nome/temperatura só valem de fato com
+// IA liberada no plano (Profissional/Enterprise) — sem isso a empresa sempre roda no guiado com
+// textos fixos, mesma regra já usada pra classificação de intenção acima. boas_vindas é a exceção:
+// é só troca de texto fixo por outro texto fixo, sem custo de IA, então vale pra qualquer plano.
+async function obterConfigBot(empresaId) {
   const { data } = await supabase
-    .from('usuarios')
-    .select('id, nome_completo, telefone')
-    .eq('empresa_id', empresaId)
-    .ilike('telefone', `%${sufixo}%`);
-
-  return (data || []).find((u) => variantesTelefoneBR(u.telefone).some((v) => variantes.includes(v))) || null;
-}
-
-// Máquina de estados simples do bot de agendamento via WhatsApp (ver §8/§10 do plano de
-// plataforma). Reaproveita as mesmas tabelas/regras da agenda web (agendamentos, barbeiros,
-// servicos) em vez de manter uma lógica de disponibilidade paralela: o bot é só mais um
-// "cliente" dessas regras, igual o plano recomenda.
-//
-// Fluxo: inicio -> menu -> aguardando_barbeiro -> aguardando_data -> aguardando_horario ->
-// aguardando_servico -> [aguardando_nome, se telefone não é de um cliente já cadastrado] -> confirmado
-
-const EXPIRACAO_SESSAO_MIN = 30;
-
-async function obterOuCriarSessao(empresaId, telefone) {
-  const { data: existente } = await supabase
-    .from('whatsapp_sessoes')
-    .select('*')
-    .eq('empresa_id', empresaId)
-    .eq('telefone', telefone)
+    .from('empresas')
+    .select('whatsapp_bot_modo, whatsapp_bot_nome, whatsapp_bot_personalidade, whatsapp_bot_boas_vindas, whatsapp_bot_temperatura, plano_plataforma:plano_plataforma_id(permite_ia)')
+    .eq('id', empresaId)
     .maybeSingle();
 
-  const expirada = existente && new Date(existente.expira_em) < new Date();
+  const permiteIa = !!data?.plano_plataforma?.permite_ia;
+  return {
+    permiteIa,
+    modo: permiteIa ? (data?.whatsapp_bot_modo || 'guiado') : 'guiado',
+    nome: permiteIa ? (data?.whatsapp_bot_nome || null) : null,
+    personalidade: permiteIa ? (data?.whatsapp_bot_personalidade || null) : null,
+    boasVindas: data?.whatsapp_bot_boas_vindas || null,
+    temperatura: data?.whatsapp_bot_temperatura != null ? Number(data.whatsapp_bot_temperatura) : 0.6
+  };
+}
 
-  if (!existente || expirada) {
-    const nova = {
-      empresa_id: empresaId,
-      telefone,
-      estado_atual: 'inicio',
-      dados_temporarios: {},
-      expira_em: new Date(Date.now() + EXPIRACAO_SESSAO_MIN * 60000).toISOString()
-    };
-    const { data: criada } = await supabase
-      .from('whatsapp_sessoes')
-      .upsert(nova, { onConflict: 'empresa_id,telefone' })
-      .select('*')
-      .single();
-    return criada;
+// Reescreve uma mensagem do bot no tom/estilo configurado pela empresa, preservando o
+// significado. Nunca aplicada a mensagens com lista numerada (regex abaixo) — ali o número
+// precisa continuar batendo exatamente com o índice que a máquina de estados vai interpretar na
+// resposta do cliente, e deixar a IA "só ajustar o tom" de uma lista é arriscar ela reescrever,
+// reordenar ou remover um item. Falha silenciosa (volta o texto original) se a Groq cair ou não
+// estiver configurada — personalidade é tempero, nunca pode ser motivo do bot não responder.
+async function comPersonalidade(texto, config) {
+  if (!config.personalidade || !iaConfigurada() || /^\s*\d+[.)]\s/m.test(texto)) return texto;
+  try {
+    const sistema = `Você é${config.nome ? ` ${config.nome},` : ''} assistente virtual de agendamento de um estabelecimento que usa o SchedNext, respondendo por WhatsApp. Personalidade definida pelo dono do negócio: ${config.personalidade}\n\nReescreva a MENSAGEM abaixo mantendo exatamente o mesmo significado e as mesmas informações — nunca invente, remova ou altere dados, valores, datas, horários, nomes ou emojis de status (✅❌). Ajuste só o tom/estilo. Responda só com a mensagem final, sem aspas, sem comentários.`;
+    const reescrita = await gerarTexto({ sistema, prompt: texto, maxTokens: 350, temperatura: config.temperatura });
+    return reescrita || texto;
+  } catch (err) {
+    console.error('Erro ao aplicar personalidade do bot (Groq):', err);
+    return texto;
   }
-
-  return existente;
-}
-
-async function salvarSessao(sessao, estado, dadosTemporarios) {
-  await supabase
-    .from('whatsapp_sessoes')
-    .update({
-      estado_atual: estado,
-      dados_temporarios: dadosTemporarios,
-      expira_em: new Date(Date.now() + EXPIRACAO_SESSAO_MIN * 60000).toISOString()
-    })
-    .eq('id', sessao.id);
-}
-
-async function listarBarbeirosAtivos(empresaId) {
-  const { data } = await supabase.from('barbeiros').select('id, nome').eq('empresa_id', empresaId).eq('ativo', true);
-  return data || [];
-}
-
-async function listarServicosAtivos(empresaId) {
-  const { data } = await supabase.from('servicos').select('id, nome, duracao, valor').eq('empresa_id', empresaId).eq('ativo', true);
-  return data || [];
-}
-
-// Manda o e-mail de código de confirmação de cadastro — mesmo template/assunto usado em
-// POST /registrar (routes/auth.js), só pra manter a identidade visual consistente entre o
-// cadastro pelo site e pelo WhatsApp.
-function enviarEmailCodigoCadastro(email, nome, codigo) {
-  transporter.sendMail({
-    to: email,
-    subject: 'Confirme seu cadastro - SchedNext',
-    html: emailHtml({
-      titulo: `Olá, ${nome}!`,
-      mensagemHtml: `
-        <p style="margin: 0 0 4px;">Use o código abaixo para confirmar seu cadastro:</p>
-        ${blocoCodigo(codigo)}
-        <p style="margin: 0; color: #666; font-size: 13px;">Esse código expira em 30 minutos.</p>
-      `
-    })
-  }, (mailErr) => {
-    if (mailErr) console.error('Erro ao enviar e-mail de código de cadastro (bot do WhatsApp):', mailErr);
-  });
-}
-
-function gerarCodigoConfirmacao() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
-// hoje.toISOString() usaria o dia em UTC, não em Brasília: alguém digitando "hoje" entre ~21h e
-// meia-noite (horário de Brasília) cairia no dia seguinte, já virado em UTC. paraConvencaoDoBanco
-// desloca pro mesmo "horário de parede" que o resto do projeto usa pra ler data local (ver
-// utils/horarioBrasilia.js).
-function dataLocalISO(instanteReal) {
-  const d = paraConvencaoDoBanco(instanteReal);
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
-}
-
-function parseDataFalada(texto) {
-  const hoje = new Date();
-  const t = texto.trim().toLowerCase();
-  if (t === 'hoje') return dataLocalISO(hoje);
-  if (t === 'amanha' || t === 'amanhã') {
-    return dataLocalISO(new Date(hoje.getTime() + 24 * 60 * 60 * 1000));
-  }
-  const m = t.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
-  if (m) {
-    const dia = m[1].padStart(2, '0');
-    const mes = m[2].padStart(2, '0');
-    const ano = m[3] ? (m[3].length === 2 ? `20${m[3]}` : m[3]) : String(hoje.getFullYear());
-    return `${ano}-${mes}-${dia}`;
-  }
-  return null;
-}
-
-// Mesma lógica de janela de funcionamento usada em routes/apiPublica.js (GET /disponibilidade) —
-// sem isso, o bot oferecia horário das 8h às 20h todo santo dia, mesmo em dias marcados como
-// fechados ou fora do horário de funcionamento configurado pela empresa.
-async function horariosDisponiveis(empresaId, barbeiroId, dataStr) {
-  const { data: empresa } = await supabase.from('empresas').select('horarios_funcionamento').eq('id', empresaId).maybeSingle();
-  const diaSemana = new Date(`${dataStr}T00:00:00Z`).getUTCDay();
-  const horarioDia = JSON.parse(empresa?.horarios_funcionamento || '{}')[diaSemana];
-  if (!horarioDia || !horarioDia.aberto) return [];
-
-  const { data: ocupados } = await supabase
-    .from('agendamentos')
-    .select('data_hora')
-    .eq('barbeiro_id', barbeiroId)
-    .gte('data_hora', `${dataStr}T00:00:00`)
-    .lte('data_hora', `${dataStr}T23:59:59`)
-    .neq('status', 'cancelado');
-
-  const horasOcupadas = new Set((ocupados || []).map((a) => new Date(a.data_hora).toISOString().slice(11, 16)));
-
-  const [horaAbre, minAbre] = horarioDia.abre.split(':').map(Number);
-  const [horaFecha, minFecha] = horarioDia.fecha.split(':').map(Number);
-  const slots = [];
-  for (let min = horaAbre * 60 + minAbre; min < horaFecha * 60 + minFecha; min += 30) {
-    const hStr = `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
-    if (!horasOcupadas.has(hStr)) slots.push(hStr);
-  }
-  return slots;
 }
 
 // As duas construções abaixo (agendar / ver-agendamentos) ficam à parte de processarMensagem
@@ -268,13 +170,21 @@ async function tentarInterceptarGlobal(msg, msgLower, empresaId, telefone) {
 }
 
 async function processarMensagem({ empresaId, telefone, texto, instancia }) {
+  const config = await obterConfigBot(empresaId);
+
+  // Modo livre: a Groq conduz a conversa de ponta a ponta via tool calling (ver agente.js). O
+  // guiado abaixo é a máquina de estados de sempre, só com a personalidade/boas-vindas por cima.
+  if (config.modo === 'livre' && iaConfigurada()) {
+    return processarComAgente({ empresaId, telefone, texto, instancia, config });
+  }
+
   const sessao = await obterOuCriarSessao(empresaId, telefone);
   const dados = sessao.dados_temporarios || {};
   const msg = (texto || '').trim();
   const msgLower = msg.toLowerCase();
 
   const responder = async (resposta, novoEstado, novosDados) => {
-    await enviarMensagem(instancia, telefone, resposta);
+    await enviarMensagem(instancia, telefone, await comPersonalidade(resposta, config));
     await salvarSessao(sessao, novoEstado, novosDados !== undefined ? novosDados : dados);
   };
 
@@ -292,7 +202,10 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
     );
   }
 
-  const MENSAGEM_MENU = 'Olá! 👋 O que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.';
+  // A saudação ("Olá! 👋") é customizável por empresa (whatsapp_bot_boas_vindas); o resto do menu
+  // continua fixo, já que é uma lista numerada (ver comPersonalidade acima).
+  const saudacao = config.boasVindas || 'Olá! 👋';
+  const MENSAGEM_MENU = `${saudacao} O que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.`;
 
   // "menu" digitado explicitamente sempre mostra o menu, em qualquer estado — é um pedido
   // direto, não faz sentido reinterpretar via IA.
@@ -424,7 +337,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
     const novosDados = { ...dados, servico_id: servicoEscolhido.id, servico_nome: servicoEscolhido.nome, servico_valor: servicoEscolhido.valor, servico_duracao: servicoEscolhido.duracao, usuario_id: usuarioExistente?.id || null };
 
     if (usuarioExistente) {
-      return criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados: novosDados, nomeCliente: usuarioExistente.nome_completo });
+      return criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados: novosDados, nomeCliente: usuarioExistente.nome_completo, config });
     }
 
     return responder('Não te encontrei no cadastro. Qual seu nome completo?', 'aguardando_nome', novosDados);
@@ -549,61 +462,105 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
     }
 
     await removerPendente(pendente.id);
-    return criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados: { ...dados, usuario_id: novoUsuario.id }, nomeCliente: nome });
+    return criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados: { ...dados, usuario_id: novoUsuario.id }, nomeCliente: nome, config });
+  }
+
+  // Pergunta feita logo após confirmar o agendamento, só quando a empresa tem Mercado Pago
+  // conectado (ver criarAgendamentoEConfirmar) — pagamento antecipado é opcional, então "não"
+  // (ou qualquer coisa que não seja "sim") só encerra normalmente, sem travar o fluxo.
+  if (sessao.estado_atual === 'aguardando_pix') {
+    if (msgLower !== 'sim') {
+      return responder('Sem problema, é só pagar direto no local. Digite *MENU* para agendar outro horário.', 'inicio', {});
+    }
+    return gerarPixEEnviar({ empresaId, telefone, instancia, sessao, dados });
   }
 
   return responder('Digite *MENU* para ver as opções.', 'inicio', {});
 }
 
-async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados, nomeCliente }) {
+// Gera a mesma cobrança Pix usada no PDV (ver POST /admin/mercadopago/pix/:agendamentoId), só que
+// disparada pelo próprio bot em vez de um clique do admin. A confirmação do pagamento continua
+// 100% pelo webhook do Mercado Pago já existente (routes/mercadopago.js -> reconfirmarPagamento ->
+// notificarPagamentoConfirmado) — daqui só sai o convite pra pagar, o aviso de "pago" chega depois
+// por conta própria, de forma assíncrona.
+async function gerarPixEEnviar({ empresaId, telefone, instancia, sessao, dados }) {
+  const finalizar = () => salvarSessao(sessao, 'inicio', {});
+
+  const { data: empresa } = await supabase.from('empresas').select('nome, mercadopago_access_token').eq('id', empresaId).maybeSingle();
+  if (!empresa?.mercadopago_access_token) {
+    await enviarMensagem(instancia, telefone, 'Não consegui gerar o Pix agora. Digite *MENU* para agendar outro horário.');
+    return finalizar();
+  }
+
+  try {
+    const valor = Number(dados.valor_pix);
+    const taxaPercentual = await obterTaxaMarketplace(empresaId);
+    const cobranca = await criarPagamentoPix({
+      accessTokenVendedor: empresa.mercadopago_access_token,
+      valor,
+      descricao: `SchedNext — atendimento em ${empresa.nome}`,
+      externalReference: dados.agendamento_id,
+      applicationFee: valor * (taxaPercentual / 100)
+    });
+
+    await supabase
+      .from('agendamentos')
+      .update({ mercadopago_payment_id: String(cobranca.id), pagamento_status: 'pendente' })
+      .eq('id', dados.agendamento_id)
+      .eq('empresa_id', empresaId);
+
+    const qrBase64 = cobranca.point_of_interaction?.transaction_data?.qr_code_base64;
+    const qrCode = cobranca.point_of_interaction?.transaction_data?.qr_code;
+    if (!qrCode) throw new Error('Mercado Pago não devolveu o código Pix.');
+
+    if (qrBase64) await enviarImagem(instancia, telefone, qrBase64, `Pix de R$ ${valor.toFixed(2)}`);
+    await enviarMensagem(instancia, telefone, `Código Pix Copia e Cola:\n${qrCode}\n\nAssim que o pagamento cair, te aviso por aqui. ✅`);
+  } catch (err) {
+    console.error('Erro ao gerar Pix via bot do WhatsApp:', err);
+    await enviarMensagem(instancia, telefone, 'Não consegui gerar o Pix agora. Pode pagar direto no local.');
+  }
+
+  return finalizar();
+}
+
+async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados, nomeCliente, config }) {
   const dataHora = `${dados.data}T${dados.hora}:00`;
 
-  // Reduz a corrida entre listar horários livres (horariosDisponiveis, alguns passos atrás na
-  // conversa) e confirmar de fato: sem reconferir aqui, duas conversas simultâneas escolhendo o
-  // mesmo profissional+horário nessa janela resultavam em dois agendamentos confirmados pro
-  // mesmo slot (não há UNIQUE(barbeiro_id, data_hora) no banco).
-  const { data: conflito } = await supabase
-    .from('agendamentos')
-    .select('id')
-    .eq('barbeiro_id', dados.barbeiro_id)
-    .eq('data_hora', dataHora)
-    .neq('status', 'cancelado')
-    .maybeSingle();
-
-  if (conflito) {
-    await enviarMensagem(instancia, telefone, 'Esse horário acabou de ser reservado por outra pessoa. Digite *MENU* para tentar outro horário.');
-    await salvarSessao(sessao, 'inicio', {});
-    return;
-  }
-
-  // Chegando aqui, dados.usuario_id já está sempre preenchido — ou era um cliente já cadastrado
-  // (achado por telefone lá em 'aguardando_servico'), ou acabou de completar o cadastro por
-  // e-mail+código (ver 'aguardando_codigo_cadastro'). cliente_nome só existe como campo de texto
-  // livre pra agendamentos sem conta de verdade (ex: cadastrado direto pelo admin sem usuário);
-  // mantido aqui só como rede de segurança caso usuario_id venha vazio por algum motivo.
-  const { error } = await supabase.from('agendamentos').insert({
-    usuario_id: dados.usuario_id || null,
-    empresa_id: empresaId,
-    barbeiro_id: dados.barbeiro_id,
-    data_hora: dataHora,
-    status: 'confirmado',
-    valor_total: dados.servico_valor,
-    duracao_total: dados.servico_duracao,
-    cliente_nome: dados.usuario_id ? null : nomeCliente
+  const resultado = await inserirAgendamento({
+    empresaId,
+    usuarioId: dados.usuario_id,
+    barbeiroId: dados.barbeiro_id,
+    dataHora,
+    servicoValor: dados.servico_valor,
+    servicoDuracao: dados.servico_duracao,
+    clienteNome: nomeCliente
   });
 
-  if (error) {
-    console.error('Erro ao criar agendamento via WhatsApp:', error);
-    await enviarMensagem(instancia, telefone, 'Não consegui concluir o agendamento agora. Tente novamente em instantes.');
+  if (resultado.conflito) {
+    await enviarMensagem(instancia, telefone, await comPersonalidade('Esse horário acabou de ser reservado por outra pessoa. Digite *MENU* para tentar outro horário.', config));
     await salvarSessao(sessao, 'inicio', {});
     return;
   }
 
-  await enviarMensagem(
-    instancia,
-    telefone,
-    `✅ Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}\n\nDigite *MENU* para agendar outro horário.`
-  );
+  if (!resultado.ok) {
+    console.error('Erro ao criar agendamento via WhatsApp:', resultado.erro);
+    await enviarMensagem(instancia, telefone, await comPersonalidade('Não consegui concluir o agendamento agora. Tente novamente em instantes.', config));
+    await salvarSessao(sessao, 'inicio', {});
+    return;
+  }
+
+  const confirmacao = `✅ Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}`;
+
+  // Oferece adiantar o pagamento via Pix só quando a empresa tem Mercado Pago conectado (ver
+  // routes/mercadopago.js) — sem conta conectada não tem pra onde gerar a cobrança.
+  const { data: empresaPix } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', empresaId).maybeSingle();
+  if (empresaPix?.mercadopago_access_token) {
+    await enviarMensagem(instancia, telefone, await comPersonalidade(`${confirmacao}\n\nQuer adiantar o pagamento agora via Pix? Responda *SIM* ou *NAO*.`, config));
+    await salvarSessao(sessao, 'aguardando_pix', { agendamento_id: resultado.id, valor_pix: dados.servico_valor });
+    return;
+  }
+
+  await enviarMensagem(instancia, telefone, await comPersonalidade(`${confirmacao}\n\nDigite *MENU* para agendar outro horário.`, config));
   await salvarSessao(sessao, 'inicio', {});
 }
 

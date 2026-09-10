@@ -1,8 +1,8 @@
 const express = require('express');
 const supabase = require('../config/supabase');
 const validate = require('../middleware/validate');
-const { whatsappTesteSchema } = require('../schemas');
-const { permiteWhatsappBot } = require('../utils/limitesPlano');
+const { whatsappTesteSchema, whatsappBotConfigSchema } = require('../schemas');
+const { permiteWhatsappBot, permiteIA } = require('../utils/limitesPlano');
 const { estaConfigurado, criarInstancia, obterQrCode, obterStatusConexao, removerInstancia, enviarMensagem } = require('../services/whatsapp/provider');
 
 const router = express.Router();
@@ -21,14 +21,26 @@ router.get('/admin/whatsapp', async (req, res) => {
 
   const { data: empresa, error } = await supabase
     .from('empresas')
-    .select('whatsapp_phone_number_id')
+    .select('whatsapp_phone_number_id, whatsapp_bot_modo, whatsapp_bot_nome, whatsapp_bot_personalidade, whatsapp_bot_boas_vindas, whatsapp_bot_temperatura')
     .eq('id', empresa_id)
     .maybeSingle();
 
   if (error) return res.status(500).json({ error: 'Erro ao buscar configuração de WhatsApp.' });
 
+  // Modo livre/personalidade/temperatura são recurso de IA (plano Profissional/Enterprise, ver
+  // permiteIA) — boas_vindas fica liberado pra qualquer plano com o bot ligado, já que é só um
+  // texto fixo substituindo outro texto fixo, sem custo de IA envolvido.
+  const botConfig = {
+    permiteIa: await permiteIA(empresa_id),
+    modo: empresa?.whatsapp_bot_modo || 'guiado',
+    nome: empresa?.whatsapp_bot_nome || '',
+    personalidade: empresa?.whatsapp_bot_personalidade || '',
+    boasVindas: empresa?.whatsapp_bot_boas_vindas || '',
+    temperatura: empresa?.whatsapp_bot_temperatura != null ? Number(empresa.whatsapp_bot_temperatura) : 0.6
+  };
+
   const instancia = empresa?.whatsapp_phone_number_id || null;
-  if (!instancia) return res.json({ permitido: true, conectado: false, instancia: null, estado: null });
+  if (!instancia) return res.json({ permitido: true, conectado: false, instancia: null, estado: null, botConfig });
 
   // Esta rota é consultada pelo front a cada poucos segundos (tela de conexão do WhatsApp) —
   // sem o try/catch, uma falha/lentidão pontual da Evolution API/VPS derrubava o polling com um
@@ -36,11 +48,40 @@ router.get('/admin/whatsapp', async (req, res) => {
   // próximo ciclo.
   try {
     const status = await obterStatusConexao(instancia);
-    res.json({ permitido: true, instancia, estado: status.state, conectado: status.state === 'open' });
+    res.json({ permitido: true, instancia, estado: status.state, conectado: status.state === 'open', botConfig });
   } catch (err) {
     console.error('Erro ao consultar status da conexão de WhatsApp:', err);
-    res.json({ permitido: true, instancia, estado: null, conectado: false, erroConsulta: true });
+    res.json({ permitido: true, instancia, estado: null, conectado: false, erroConsulta: true, botConfig });
   }
+});
+
+// Personalidade/comportamento do bot (ver services/whatsapp/bot.js e services/whatsapp/agente.js).
+// Fica numa rota própria (em vez de dentro de /admin/whatsapp/conectar) porque é editável a
+// qualquer momento, conectado ou não — não depende de ter QR Code escaneado.
+router.put('/admin/whatsapp/bot-config', validate(whatsappBotConfigSchema), async (req, res) => {
+  const empresa_id = req.empresaId;
+  if (!(await permiteWhatsappBot(empresa_id))) return res.status(403).json({ error: 'Recurso não disponível no seu plano.' });
+
+  const iaLiberada = await permiteIA(empresa_id);
+  const { modo, nome, personalidade, boas_vindas, temperatura } = req.body;
+
+  const atualizacao = { whatsapp_bot_boas_vindas: boas_vindas || null };
+
+  // Sem IA no plano, essas colunas ficam travadas nos valores padrão — mesmo que o front não
+  // devesse mandar isso pra uma empresa sem o recurso, a rota não confia só na UI.
+  if (iaLiberada) {
+    if (modo !== undefined) atualizacao.whatsapp_bot_modo = modo;
+    if (nome !== undefined) atualizacao.whatsapp_bot_nome = nome || null;
+    if (personalidade !== undefined) atualizacao.whatsapp_bot_personalidade = personalidade || null;
+    if (temperatura !== undefined) atualizacao.whatsapp_bot_temperatura = temperatura;
+  }
+
+  const { error } = await supabase.from('empresas').update(atualizacao).eq('id', empresa_id);
+  if (error) {
+    console.error('Erro ao salvar configuração do bot de WhatsApp:', error);
+    return res.status(500).json({ error: 'Erro ao salvar configuração do bot.' });
+  }
+  res.json({ success: true });
 });
 
 // Envia uma mensagem de teste pro próprio admin confirmar que o envio outbound está de fato
