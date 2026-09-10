@@ -5,7 +5,7 @@ const { enviarMensagem } = require('./whatsapp/provider');
 const { obterTaxaMarketplace, permiteWhatsappBot } = require('../utils/limitesPlano');
 const { calcularInicioCiclo } = require('../utils/limitesAssinatura');
 const { montarUrlTenant } = require('../utils/tenantContext');
-const { criarPagamentoPix, criarPreapproval, buscarPreapproval } = require('./mercadopago');
+const { criarPagamentoPix, criarPreapproval, proximoStartDateValido, buscarPreapproval } = require('./mercadopago');
 
 // Núcleo da cobrança recorrente de ASSINATURA DO CLIENTE FINAL (mensalidade que ele paga pra
 // própria barbearia — não confundir com a assinatura da plataforma SchedNext, ver
@@ -132,7 +132,7 @@ async function criarPreapprovalAssinatura({ usuario, empresa, plano }) {
     payerEmail: usuario.email,
     externalReference: String(usuario.id),
     backUrl: montarUrlTenant(empresa, '/assinatura'),
-    startDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+    startDate: proximoStartDateValido(),
     applicationFee: plano.preco * (taxaPercentual / 100)
   });
 

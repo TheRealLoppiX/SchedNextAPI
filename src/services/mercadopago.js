@@ -101,8 +101,15 @@ async function buscarPagamento({ accessTokenVendedor, paymentId }) {
 // Cobrança recorrente (assinatura da plataforma OU do cliente final, ver services/pagamento.js
 // e routes/mercadopago.js). accessToken aqui pode ser o da própria SchedNext (cobrança da
 // plataforma) ou o de uma empresa conectada via OAuth (assinatura do cliente final dela) —
-// quem decide isso é o chamador. Só funciona com cartão (débito automático); Pix recorrente é
-// uma API separada, fora de escopo por enquanto.
+// quem decide isso é o chamador. Checkout do preapproval só oferece cartão de crédito de fato
+// (confirmado na prática — o formulário não mostra opção de débito). Pix recorrente é uma API
+// separada, fora de escopo por enquanto.
+//
+// startDate precisa vir como timestamp ISO-8601 completo (não só a data) e nunca no passado —
+// o Mercado Pago rejeita auto_recurring.start_date que já passou. Quem chama decide o instante:
+// "agora" (com uma folga de alguns minutos) pra cobrar assim que autorizado, ou uma data/hora
+// futura de verdade pra reativações com ciclo já prometido (ver reativarAssinaturaNoGateway em
+// services/pagamento.js).
 async function criarPreapproval({ accessToken, reason, valor, payerEmail, externalReference, backUrl, startDate, applicationFee }) {
   return request('/preapproval', {
     method: 'POST',
@@ -118,11 +125,22 @@ async function criarPreapproval({ accessToken, reason, valor, payerEmail, extern
         frequency_type: 'months',
         transaction_amount: Number(valor),
         currency_id: 'BRL',
-        start_date: `${startDate}T00:00:00.000-03:00`
+        start_date: startDate
       },
       ...(applicationFee > 0 ? { application_fee: Number(applicationFee.toFixed(2)) } : {})
     }
   });
+}
+
+// Timestamp ISO pra usar como criarPreapproval.startDate: "agora" (com uma folga de alguns
+// minutos, cobrindo o tempo entre montar a requisição e o Mercado Pago processá-la) quando não
+// há uma data futura já prometida, ou a própria dataAlvo quando ela é de fato futura. Cobrar uma
+// assinatura NOVA "amanhã" em vez de agora dava a impressão de um dia grátis que não devia
+// existir; datas futuras reais (reativação com ciclo já combinado) continuam respeitadas.
+function proximoStartDateValido(dataAlvo) {
+  const agora = new Date(Date.now() + 5 * 60 * 1000);
+  const alvo = dataAlvo ? new Date(dataAlvo) : null;
+  return (alvo && alvo > agora ? alvo : agora).toISOString();
 }
 
 // Preapproval cancelado no Mercado Pago é terminal — não dá pra "reativar", só criar um novo
@@ -161,6 +179,7 @@ module.exports = {
   criarPagamentoPix,
   buscarPagamento,
   criarPreapproval,
+  proximoStartDateValido,
   cancelarPreapproval,
   buscarPreapproval,
   buscarPagamentoAutorizado

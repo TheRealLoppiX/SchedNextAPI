@@ -14,11 +14,6 @@ function estaConfigurado() {
   return Boolean(process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN);
 }
 
-function amanha() {
-  const data = new Date(Date.now() + 24 * 60 * 60 * 1000);
-  return data.toISOString().slice(0, 10);
-}
-
 // Cria um preapproval (assinatura recorrente por cartão) e devolve a URL de checkout hospedada
 // pelo Mercado Pago (pagador autoriza o cartão lá, nós nunca tocamos em dado de cartão).
 // gatewayCustomerIdExistente/cpfCnpj não são usados pelo Mercado Pago (ele não tem conceito de
@@ -39,7 +34,7 @@ async function criarCheckout({ empresaId, planoNome, precoMensal, email }) {
     payerEmail: email,
     externalReference: empresaId,
     backUrl: `${process.env.FRONTEND_URL}/admin/conta`,
-    startDate: amanha()
+    startDate: mercadopago.proximoStartDateValido()
   });
 
   return {
@@ -70,9 +65,7 @@ async function cancelarAssinaturaNoGateway(gatewaySubscriptionId) {
 async function reativarAssinaturaNoGateway({ empresaId, email, planoNome, precoMensal, proximaCobrancaEm }) {
   if (!estaConfigurado()) return null;
 
-  const startDate = proximaCobrancaEm
-    ? new Date(proximaCobrancaEm).toISOString().slice(0, 10)
-    : amanha();
+  const startDate = mercadopago.proximoStartDateValido(proximaCobrancaEm);
 
   const preapproval = await mercadopago.criarPreapproval({
     accessToken: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
