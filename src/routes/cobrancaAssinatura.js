@@ -8,6 +8,7 @@ const validate = require('../middleware/validate');
 const { baixaManualAssinaturaSchema } = require('../schemas');
 const { permiteWhatsappBot } = require('../utils/limitesPlano');
 const { montarUrlTenant } = require('../utils/tenantContext');
+const { cancelarPreapproval } = require('../services/mercadopago');
 const {
   obterOuCriarCobrancaCicloAtual,
   gerarCobrancaPix,
@@ -107,19 +108,33 @@ router.post('/admin/clientes/:id/assinatura/gerar-pix', async (req, res) => {
 // cobrança nenhuma agora (ver gerar-pix acima pra isso). Só Pix pode ser ativado por aqui: o
 // cliente já autoriza a cobrança avulsa passivamente (é o próprio Pix gerado a cada ciclo);
 // cartão exige o dono do cartão autorizando o preapproval na página do Mercado Pago, então só o
-// próprio cliente configura, pelo perfil dele.
+// próprio cliente configura, pelo perfil dele. Funciona mesmo se o cliente já tinha um cadastro
+// de cartão em andamento (mercadopago_preapproval_id setado, ver enviar-link-cartao acima) — se
+// esse preapproval já tiver sido autorizado, cancela ele antes de trocar pra Pix, senão o
+// cliente ficaria pagando duas cobranças automáticas todo mês (cartão E Pix).
 router.post('/admin/clientes/:id/assinatura/ativar-recorrente', async (req, res) => {
   const empresaId = req.empresaId;
 
   const { data: cliente } = await supabase
     .from('usuarios')
-    .select('id, empresa_id, plano_id')
+    .select('id, empresa_id, plano_id, mercadopago_preapproval_id')
     .eq('id', req.params.id)
     .maybeSingle();
   if (!cliente || cliente.empresa_id !== empresaId) return res.status(404).json({ error: 'Cliente não encontrado.' });
   if (!cliente.plano_id) return res.status(400).json({ error: 'Este cliente não tem um plano de assinatura vinculado. Vincule e salve antes de ativar a cobrança automática.' });
 
-  const { error } = await supabase.from('usuarios').update({ assinatura_forma_pagamento: 'pix' }).eq('id', cliente.id);
+  if (cliente.mercadopago_preapproval_id) {
+    const { data: empresa } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', empresaId).maybeSingle();
+    if (empresa?.mercadopago_access_token) {
+      try {
+        await cancelarPreapproval({ accessToken: empresa.mercadopago_access_token, preapprovalId: cliente.mercadopago_preapproval_id });
+      } catch (err) {
+        console.error('Erro ao cancelar preapproval de cartão ao trocar pra Pix:', err);
+      }
+    }
+  }
+
+  const { error } = await supabase.from('usuarios').update({ assinatura_forma_pagamento: 'pix', mercadopago_preapproval_id: null }).eq('id', cliente.id);
   if (error) return res.status(500).json({ error: 'Não foi possível ativar a cobrança automática agora.' });
   res.json({ success: true });
 });
