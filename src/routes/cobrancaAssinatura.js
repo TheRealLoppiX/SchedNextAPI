@@ -171,4 +171,59 @@ router.post('/admin/clientes/:id/assinatura/cobrar-agora', async (req, res) => {
   }
 });
 
+// Manda pro cliente (e-mail + WhatsApp) o link da área dele pra cadastrar o cartão (ou escolher
+// Pix) e ligar a cobrança automática por conta própria — o admin não consegue autorizar um
+// cartão em nome do cliente (o preapproval do Mercado Pago exige o dono do cartão), então esse
+// endpoint só entrega o convite; quem efetivamente assina é o cliente, na tela dele
+// (frontend/src/pages/Assinatura.js, rota /:empresaSlug/assinatura). Exige plano já vinculado
+// pra a tela do cliente não cair em "sem plano atribuído".
+router.post('/admin/clientes/:id/assinatura/enviar-link-cartao', async (req, res) => {
+  const empresaId = req.empresaId;
+
+  const { data: cliente } = await supabase
+    .from('usuarios')
+    .select('id, empresa_id, plano_id, nome_completo, email, telefone')
+    .eq('id', req.params.id)
+    .maybeSingle();
+  if (!cliente || cliente.empresa_id !== empresaId) return res.status(404).json({ error: 'Cliente não encontrado.' });
+  if (!cliente.plano_id) return res.status(400).json({ error: 'Vincule um plano de assinatura ao cliente antes de enviar o link.' });
+  if (!cliente.email && !cliente.telefone) return res.status(400).json({ error: 'Este cliente não tem e-mail nem telefone cadastrados.' });
+
+  const { data: empresa } = await supabase.from('empresas').select('id, nome, slug, whatsapp_phone_number_id').eq('id', empresaId).maybeSingle();
+  if (!empresa?.slug || !process.env.FRONTEND_URL) return res.status(500).json({ error: 'Não foi possível montar o link agora.' });
+
+  const link = `${process.env.FRONTEND_URL}/${empresa.slug}/assinatura`;
+  let enviado = false;
+
+  try {
+    if (cliente.email) {
+      await transporter.sendMail({
+        to: cliente.email,
+        subject: `Cadastre seu cartão para a mensalidade - ${empresa.nome}`,
+        html: emailHtml({
+          titulo: `Olá, ${cliente.nome_completo}!`,
+          mensagemHtml: `
+            <p style="margin: 0 0 12px;">Pra deixar sua mensalidade na <strong>${empresa.nome}</strong> no automático, cadastre seu cartão (ou escolha pagar por Pix todo mês) direto na sua área de cliente.</p>
+            <p style="margin: 12px 0;"><a href="${link}">${link}</a></p>
+          `
+        })
+      });
+      enviado = true;
+    }
+    if (cliente.telefone && empresa.whatsapp_phone_number_id && (await permiteWhatsappBot(empresaId))) {
+      await enviarMensagem(
+        empresa.whatsapp_phone_number_id,
+        `55${cliente.telefone.replace(/\D/g, '')}`,
+        `💈 Pra deixar sua mensalidade na ${empresa.nome} no automático, cadastre seu cartão (ou escolha Pix) por aqui:\n${link}`
+      );
+      enviado = true;
+    }
+    if (!enviado) return res.status(400).json({ error: 'Não foi possível enviar: confira e-mail/telefone do cliente e o WhatsApp da empresa.' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Erro ao enviar link de cadastro de cartão:', err);
+    res.status(500).json({ error: 'Não foi possível enviar o link agora.' });
+  }
+});
+
 module.exports = router;
