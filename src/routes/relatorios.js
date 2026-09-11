@@ -116,10 +116,12 @@ async function anotarTipoEServicos(agendamentos) {
 
   const idsClientes = [...new Set(agendamentos.map((a) => a.usuario_id).filter(Boolean))];
   let temPlanoPorCliente = {};
+  let nomePorCliente = {};
   if (idsClientes.length > 0) {
-    const { data: usuarios, error: errU } = await supabase.from('usuarios').select('id, plano_id').in('id', idsClientes);
+    const { data: usuarios, error: errU } = await supabase.from('usuarios').select('id, nome_completo, plano_id').in('id', idsClientes);
     if (errU) throw errU;
     temPlanoPorCliente = Object.fromEntries((usuarios || []).map((u) => [u.id, !!u.plano_id]));
+    nomePorCliente = Object.fromEntries((usuarios || []).map((u) => [u.id, u.nome_completo]));
   }
 
   return agendamentos.map((a) => {
@@ -127,6 +129,9 @@ async function anotarTipoEServicos(agendamentos) {
     const valorCheio = servicos.reduce((acc, s) => acc + s.valor, 0);
     const valorTotal = Number(a.valor_total || 0);
     const assinante = !!(a.usuario_id && temPlanoPorCliente[a.usuario_id] && valorCheio > valorTotal);
+    // cliente_nome (agendamento de balcão sem usuario_id, ver GET /admin/agendamentos em
+    // routes/agendamentos.js) é o fallback pra quem não tem cadastro de cliente vinculado.
+    const clienteNome = (a.usuario_id && nomePorCliente[a.usuario_id]) || a.cliente_nome || 'Cliente avulso';
 
     let itensServico;
     if (!assinante) {
@@ -141,7 +146,7 @@ async function anotarTipoEServicos(agendamentos) {
         : servicos.map((s) => ({ nome: s.nome, valor: valorCheio > 0 ? (s.valor / valorCheio) * valorTotal : 0, coberto: false }));
     }
 
-    return { ...a, itensServico, tipo: assinante ? 'assinante' : 'avulso' };
+    return { ...a, itensServico, clienteNome, tipo: assinante ? 'assinante' : 'avulso' };
   });
 }
 
@@ -174,6 +179,10 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
   const agrupamento = ['dia', 'mes', 'ano'].includes(req.query.agrupamento) ? req.query.agrupamento : 'dia';
   const idsServicosFiltro = parseIdsServicos(req.query.servicos);
   const tipoClienteFiltro = ['assinante', 'avulso'].includes(req.query.tipoCliente) ? req.query.tipoCliente : 'todos';
+  // Detalhamento por atendimento (uma linha por serviço, com cliente e forma de pagamento) é
+  // opcional no filtro do front (mesmo checkbox que já controlava o detalhamento do
+  // comissionamento) — desligar poupa montar essa lista, que pode ter centenas de linhas num mês.
+  const incluirDetalhamento = req.query.incluirDetalhamento !== 'false';
 
   try {
     const { data: empresaRow } = await supabase.from('empresas').select('taxas_pagamento').eq('id', empresaId).maybeSingle();
@@ -181,7 +190,7 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
 
     const { data: agendamentosBrutos, error } = await supabase
       .from('agendamentos')
-      .select('id, status, data_hora, valor_total, usuario_id, barbeiro_id, forma_pagamento, formas_pagamento, pagamento_status, barbeiros(nome)')
+      .select('id, status, data_hora, valor_total, usuario_id, cliente_nome, barbeiro_id, forma_pagamento, formas_pagamento, pagamento_status, barbeiros(nome)')
       .eq('empresa_id', empresaId)
       .gte('data_hora', `${dataInicio}T00:00:00`)
       .lte('data_hora', `${dataFim}T23:59:59`);
@@ -239,6 +248,11 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
 
     const faturamentoTotal = faturamentoAtendimentos + faturamentoAssinaturas;
     const receitaLiquidaTotal = receitaLiquidaAtendimentos + receitaLiquidaAssinaturas;
+    // Descontos (taxa de maquineta/gateway) — a diferença entre o que o cliente pagou e o que
+    // sobrou de fato depois da taxa de cada forma de pagamento (ver taxas_pagamento/receitaLiquidaComTaxas
+    // acima). Substitui a taxa de cancelamento nos "big numbers" do resumo.
+    const descontosValor = faturamentoTotal - receitaLiquidaTotal;
+    const descontosPct = faturamentoTotal > 0 ? (descontosValor / faturamentoTotal) * 100 : 0;
 
     // Série de faturamento (só agendamentos concluídos contam como receita real), agrupada por
     // dia/mês/ano conforme o filtro escolhido no front (ver chaveAgrupamento acima). Usada pelo
@@ -273,6 +287,24 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
     const detalhePeriodo = Object.values(porDetalhe)
       .map((d) => ({ ...d, faturamento: Number(d.faturamento.toFixed(2)) }))
       .sort((a, b) => a.periodo.localeCompare(b.periodo) || a.servico.localeCompare(b.servico) || a.tipo.localeCompare(b.tipo));
+
+    // Uma linha por serviço de cada atendimento (não agregado por período) — pra rastrear quem
+    // foi o cliente e como pagou, ver AdminRelatorios.js. Opcional (incluirDetalhamento) porque
+    // pode virar centenas de linhas num período longo.
+    const detalhamentoAtendimentos = incluirDetalhamento
+      ? concluidos.flatMap((a) => {
+        const itens = a.itensServico.length > 0 ? a.itensServico : [{ nome: 'Sem serviço vinculado', valor: Number(a.valor_total || 0) }];
+        return itens.map((item) => ({
+          data_hora: a.data_hora,
+          cliente: a.clienteNome,
+          servico: item.nome,
+          tipo: a.tipo,
+          forma_pagamento: a.forma_pagamento,
+          formas_pagamento: a.formas_pagamento || null,
+          valor: Number(item.valor.toFixed(2))
+        }));
+      }).sort((a, b) => a.data_hora.localeCompare(b.data_hora))
+      : [];
 
     // Top profissionais por faturamento, a partir do mesmo conjunto de agendamentos concluídos.
     const porProfissional = {};
@@ -311,7 +343,7 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
     const anterior = periodoAnterior(dataInicio, dataFim);
     const { data: agendamentosAnterioresBrutos, error: erroAnterior } = await supabase
       .from('agendamentos')
-      .select('id, valor_total, status')
+      .select('id, valor_total, status, usuario_id, cliente_nome')
       .eq('empresa_id', empresaId)
       .eq('status', 'concluido')
       .gte('data_hora', `${anterior.inicio}T00:00:00`)
@@ -376,6 +408,8 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
         ticket_medio: ticketMedio,
         quantidade_concluidos: concluidos.length,
         taxa_cancelamento: Number(taxaCancelamento.toFixed(1)),
+        descontos_valor: Number(descontosValor.toFixed(2)),
+        descontos_pct: Number(descontosPct.toFixed(1)),
         // Comparação com o período anterior é só do plano Enterprise (junto com os rankings
         // abaixo) — planos menores recebem null em vez do número, pro front não exibir a
         // variação sem também mostrar de onde ela vem.
@@ -384,6 +418,7 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
       },
       serie_diaria: serieDiaria,
       detalhe_periodo: detalhePeriodo,
+      detalhamento_atendimentos: detalhamentoAtendimentos,
       top_servicos: avancado ? topServicos : [],
       top_profissionais: avancado ? topProfissionais : [],
       recorrencia: avancado ? {
