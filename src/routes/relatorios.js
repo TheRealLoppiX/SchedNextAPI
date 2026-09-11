@@ -48,6 +48,30 @@ function chaveAgrupamento(dataHoraIso, agrupamento) {
   return dataHoraIso.slice(0, 10);
 }
 
+// IDs de serviço escolhidos no filtro (ver AdminRelatorios.js) — string "3,7,12" na query vira
+// array de números; vazio/ausente = sem filtro (comportamento de sempre, todos os serviços).
+function parseIdsServicos(query) {
+  return String(query || '')
+    .split(',')
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
+}
+
+// Filtra agendamentos pra manter só quem incluiu PELO MENOS UM dos serviços escolhidos — o
+// agendamento inteiro entra (valor_total inteiro, mesmo que tenha outros serviços junto), não só
+// a fatia do serviço filtrado. Retorna a lista original sem tocar se não há filtro ativo.
+async function filtrarPorServicos(agendamentos, idsServicos) {
+  if (idsServicos.length === 0 || agendamentos.length === 0) return agendamentos;
+  const { data, error } = await supabase
+    .from('agendamento_servicos')
+    .select('agendamento_id')
+    .in('agendamento_id', agendamentos.map((a) => a.id))
+    .in('servico_id', idsServicos);
+  if (error) throw error;
+  const idsPermitidos = new Set((data || []).map((v) => v.agendamento_id));
+  return agendamentos.filter((a) => idsPermitidos.has(a.id));
+}
+
 function periodoAnterior(dataInicio, dataFim) {
   const inicio = new Date(`${dataInicio}T00:00:00`);
   const fim = new Date(`${dataFim}T00:00:00`);
@@ -75,12 +99,13 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
   const dataInicio = req.query.dataInicio || hoje;
   const dataFim = req.query.dataFim || hoje;
   const agrupamento = ['dia', 'mes', 'ano'].includes(req.query.agrupamento) ? req.query.agrupamento : 'dia';
+  const idsServicosFiltro = parseIdsServicos(req.query.servicos);
 
   try {
     const { data: empresaRow } = await supabase.from('empresas').select('taxas_pagamento').eq('id', empresaId).maybeSingle();
     const taxas = { dinheiro: 0, credito: 0, debito: 0, pix: 0, ...(empresaRow?.taxas_pagamento || {}) };
 
-    const { data: agendamentos, error } = await supabase
+    const { data: agendamentosBrutos, error } = await supabase
       .from('agendamentos')
       .select('id, status, data_hora, valor_total, usuario_id, barbeiro_id, forma_pagamento, formas_pagamento, pagamento_status, barbeiros(nome)')
       .eq('empresa_id', empresaId)
@@ -89,9 +114,11 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
 
     if (error) throw error;
 
-    const concluidos = (agendamentos || []).filter((a) => a.status === 'concluido');
-    const cancelados = (agendamentos || []).filter((a) => a.status === 'cancelado');
-    const total = (agendamentos || []).length;
+    const agendamentos = await filtrarPorServicos(agendamentosBrutos || [], idsServicosFiltro);
+
+    const concluidos = agendamentos.filter((a) => a.status === 'concluido');
+    const cancelados = agendamentos.filter((a) => a.status === 'cancelado');
+    const total = agendamentos.length;
 
     const faturamentoAtendimentos = concluidos.reduce((acc, a) => acc + Number(a.valor_total || 0), 0);
     // Receita líquida: desconta a taxa de maquineta cadastrada (ver routes/financeiro.js) pra
@@ -110,14 +137,17 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
     // fora do ticket médio e dos rankings por profissional/serviço (mensalidade não é atribuída
     // a nenhum dos dois). baixado_manualmente=true (cliente pagou por fora, ex: chave Pix da
     // própria barbearia) não passou pelo gateway, então não desconta taxa — mesmo princípio já
-    // usado em receitaLiquidaComTaxas pro Pix avulso.
-    const { data: cobrancasAssinatura, error: erroCobrancas } = await supabase
-      .from('assinatura_cobrancas')
-      .select('valor, forma_pagamento, baixado_manualmente')
-      .eq('empresa_id', empresaId)
-      .eq('status', 'pago')
-      .gte('pago_em', `${dataInicio}T00:00:00`)
-      .lte('pago_em', `${dataFim}T23:59:59`);
+    // usado em receitaLiquidaComTaxas pro Pix avulso. Com filtro de serviço ativo, a mensalidade
+    // fica de fora (não é o "serviço feito" que o admin pediu pra ver).
+    const { data: cobrancasAssinatura, error: erroCobrancas } = idsServicosFiltro.length > 0
+      ? { data: [], error: null }
+      : await supabase
+        .from('assinatura_cobrancas')
+        .select('valor, forma_pagamento, baixado_manualmente')
+        .eq('empresa_id', empresaId)
+        .eq('status', 'pago')
+        .gte('pago_em', `${dataInicio}T00:00:00`)
+        .lte('pago_em', `${dataFim}T23:59:59`);
     if (erroCobrancas) throw erroCobrancas;
 
     const faturamentoAssinaturas = (cobrancasAssinatura || []).reduce((acc, c) => acc + Number(c.valor || 0), 0);
@@ -173,11 +203,12 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
       topServicos = Object.values(porServico).sort((a, b) => b.faturamento - a.faturamento).slice(0, 10);
     }
 
-    // Comparação com o período imediatamente anterior, de mesma duração.
+    // Comparação com o período imediatamente anterior, de mesma duração — mesmo filtro de
+    // serviço do período atual, senão a variação percentual compararia coisas diferentes.
     const anterior = periodoAnterior(dataInicio, dataFim);
-    const { data: agendamentosAnteriores, error: erroAnterior } = await supabase
+    const { data: agendamentosAnterioresBrutos, error: erroAnterior } = await supabase
       .from('agendamentos')
-      .select('valor_total, status')
+      .select('id, valor_total, status')
       .eq('empresa_id', empresaId)
       .eq('status', 'concluido')
       .gte('data_hora', `${anterior.inicio}T00:00:00`)
@@ -185,13 +216,17 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
 
     if (erroAnterior) throw erroAnterior;
 
-    const { data: cobrancasAnteriores, error: erroCobrancasAnteriores } = await supabase
-      .from('assinatura_cobrancas')
-      .select('valor')
-      .eq('empresa_id', empresaId)
-      .eq('status', 'pago')
-      .gte('pago_em', `${anterior.inicio}T00:00:00`)
-      .lte('pago_em', `${anterior.fim}T23:59:59`);
+    const agendamentosAnteriores = await filtrarPorServicos(agendamentosAnterioresBrutos || [], idsServicosFiltro);
+
+    const { data: cobrancasAnteriores, error: erroCobrancasAnteriores } = idsServicosFiltro.length > 0
+      ? { data: [], error: null }
+      : await supabase
+        .from('assinatura_cobrancas')
+        .select('valor')
+        .eq('empresa_id', empresaId)
+        .eq('status', 'pago')
+        .gte('pago_em', `${anterior.inicio}T00:00:00`)
+        .lte('pago_em', `${anterior.fim}T23:59:59`);
     if (erroCobrancasAnteriores) throw erroCobrancasAnteriores;
 
     const faturamentoAnterior = (agendamentosAnteriores || []).reduce((acc, a) => acc + Number(a.valor_total || 0), 0)
@@ -201,7 +236,10 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
       : (faturamentoTotal > 0 ? 100 : 0);
 
     // Recorrência: dentre os clientes que fecharam atendimento neste período, quantos já
-    // tinham pelo menos um atendimento concluído ANTES do início do período.
+    // tinham pelo menos um atendimento concluído ANTES do início do período. `clientesNoPeriodo`
+    // já sai da lista filtrada por serviço (concluidos), mas o histórico de "já veio antes" fica
+    // de propósito SEM o filtro de serviço — é sobre a relação com o cliente no geral, não se ele
+    // já tinha feito especificamente aquele serviço antes.
     const clientesNoPeriodo = [...new Set(concluidos.map((a) => a.usuario_id).filter(Boolean))];
     let clientesRecorrentes = 0;
     if (clientesNoPeriodo.length > 0) {
@@ -261,6 +299,7 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
   // Detalhamento por atendimento (itens) é opcional no filtro do front — desligar poupa payload
   // quando o admin só quer o total por profissional, sem abrir cada atendimento.
   const incluirItens = req.query.incluirItens !== 'false';
+  const idsServicosFiltro = parseIdsServicos(req.query.servicos);
   const hoje = formatarDataLocal(new Date());
   const dataInicio = req.query.dataInicio || `${hoje.slice(0, 7)}-01`;
   const dataFim = req.query.dataFim || hoje;
@@ -278,7 +317,7 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
     const nomePorProfissional = Object.fromEntries(profissionais.map((p) => [p.id, p.nome]));
     const percentualPorProfissional = Object.fromEntries(profissionais.map((p) => [p.id, Number(p.percentual_comissao) || 0]));
 
-    const { data: agendamentos, error } = await supabase
+    const { data: agendamentosBrutos, error } = await supabase
       .from('agendamentos')
       .select('id, barbeiro_id, usuario_id, valor_total, forma_pagamento, formas_pagamento, pagamento_status, data_hora')
       .eq('empresa_id', empresaId)
@@ -286,6 +325,13 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
       .gte('data_hora', `${dataInicio}T00:00:00`)
       .lte('data_hora', `${dataFim}T23:59:59`);
     if (error) throw error;
+
+    // Mesmo filtro de serviço do relatório geral (ver filtrarPorServicos acima) — só entra no
+    // rateio/comissão quem teve o(s) serviço(s) escolhido(s) no atendimento. A janela de ciclo
+    // usada pra contar visitas do assinante (visitasPorClienteMes, mais abaixo) fica de fora do
+    // filtro de propósito: o rateio da mensalidade precisa do total real de visitas no ciclo,
+    // não só das que bateram com o serviço filtrado, senão infla a fatia por corte.
+    const agendamentos = await filtrarPorServicos(agendamentosBrutos || [], idsServicosFiltro);
 
     // Rateio de cliente assinante: o atendimento em si custa R$0 (ou menos que o preço de
     // tabela) pro assinante, já descontado no checkout (ver calcularValorComLimiteAssinante), mas
