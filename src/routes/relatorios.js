@@ -39,6 +39,15 @@ function receitaLiquidaComTaxas(valorBase, formaPagamento, formasPagamento, paga
   return Number(valorBase || 0) * (1 - taxaPct / 100);
 }
 
+// Chave de agrupamento da série de faturamento — 'dia' (padrão, sempre existiu), 'mes' ou 'ano',
+// escolhido pelo admin no filtro do relatório (ver AdminRelatorios.js). data_hora já vem em
+// ISO ('YYYY-MM-DDTHH:mm:ss'), então cada nível é só um corte de prefixo mais curto.
+function chaveAgrupamento(dataHoraIso, agrupamento) {
+  if (agrupamento === 'ano') return dataHoraIso.slice(0, 4);
+  if (agrupamento === 'mes') return dataHoraIso.slice(0, 7);
+  return dataHoraIso.slice(0, 10);
+}
+
 function periodoAnterior(dataInicio, dataFim) {
   const inicio = new Date(`${dataInicio}T00:00:00`);
   const fim = new Date(`${dataFim}T00:00:00`);
@@ -65,6 +74,7 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
   const hoje = formatarDataLocal(new Date());
   const dataInicio = req.query.dataInicio || hoje;
   const dataFim = req.query.dataFim || hoje;
+  const agrupamento = ['dia', 'mes', 'ano'].includes(req.query.agrupamento) ? req.query.agrupamento : 'dia';
 
   try {
     const { data: empresaRow } = await supabase.from('empresas').select('taxas_pagamento').eq('id', empresaId).maybeSingle();
@@ -120,15 +130,16 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
     const faturamentoTotal = faturamentoAtendimentos + faturamentoAssinaturas;
     const receitaLiquidaTotal = receitaLiquidaAtendimentos + receitaLiquidaAssinaturas;
 
-    // Série diária de faturamento (só agendamentos concluídos contam como receita real).
-    const porDia = {};
+    // Série de faturamento (só agendamentos concluídos contam como receita real), agrupada por
+    // dia/mês/ano conforme o filtro escolhido no front (ver chaveAgrupamento acima).
+    const porPeriodo = {};
     for (const a of concluidos) {
-      const dia = a.data_hora.slice(0, 10);
-      if (!porDia[dia]) porDia[dia] = { data: dia, faturamento: 0, quantidade: 0 };
-      porDia[dia].faturamento += Number(a.valor_total || 0);
-      porDia[dia].quantidade += 1;
+      const chave = chaveAgrupamento(a.data_hora, agrupamento);
+      if (!porPeriodo[chave]) porPeriodo[chave] = { data: chave, faturamento: 0, quantidade: 0 };
+      porPeriodo[chave].faturamento += Number(a.valor_total || 0);
+      porPeriodo[chave].quantidade += 1;
     }
-    const serieDiaria = Object.values(porDia).sort((a, b) => a.data.localeCompare(b.data));
+    const serieDiaria = Object.values(porPeriodo).sort((a, b) => a.data.localeCompare(b.data));
 
     // Top profissionais por faturamento, a partir do mesmo conjunto de agendamentos concluídos.
     const porProfissional = {};
@@ -210,6 +221,7 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
     res.json({
       avancado,
       periodo: { inicio: dataInicio, fim: dataFim },
+      agrupamento,
       resumo: {
         faturamento_total: faturamentoTotal,
         receita_liquida: Number(receitaLiquidaTotal.toFixed(2)),
@@ -246,6 +258,9 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
 // qualquer negócio com equipe, não um recurso premium.
 router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
   const empresaId = req.empresaId;
+  // Detalhamento por atendimento (itens) é opcional no filtro do front — desligar poupa payload
+  // quando o admin só quer o total por profissional, sem abrir cada atendimento.
+  const incluirItens = req.query.incluirItens !== 'false';
   const hoje = formatarDataLocal(new Date());
   const dataInicio = req.query.dataInicio || `${hoje.slice(0, 7)}-01`;
   const dataFim = req.query.dataFim || hoje;
@@ -450,18 +465,20 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
       porProfissional[a.barbeiro_id].receita_bruta += Number(a.valor_total || 0);
       porProfissional[a.barbeiro_id].receita_liquida += receitaLiquida;
       porProfissional[a.barbeiro_id].comissao += comissao;
-      porProfissional[a.barbeiro_id].itens.push({
-        data: a.data_hora,
-        cliente: a.usuario_id ? (nomePorCliente[a.usuario_id] || 'Cliente') : 'Cliente avulso',
-        servicos: (servicosPorAgendamento[a.id] || []).map((s) => s.nome),
-        tipo: ehAssinante ? 'assinante' : 'avulso',
-        visitas_no_mes: ehAssinante ? visitas : null,
-        valor_base: Number(a.valor_total || 0),
-        valor_atribuido: Number(receita.toFixed(2)),
-        receita_liquida: Number(receitaLiquida.toFixed(2)),
-        comissao: Number(comissao.toFixed(2)),
-        formas_pagamento: a.formas_pagamento || null
-      });
+      if (incluirItens) {
+        porProfissional[a.barbeiro_id].itens.push({
+          data: a.data_hora,
+          cliente: a.usuario_id ? (nomePorCliente[a.usuario_id] || 'Cliente') : 'Cliente avulso',
+          servicos: (servicosPorAgendamento[a.id] || []).map((s) => s.nome),
+          tipo: ehAssinante ? 'assinante' : 'avulso',
+          visitas_no_mes: ehAssinante ? visitas : null,
+          valor_base: Number(a.valor_total || 0),
+          valor_atribuido: Number(receita.toFixed(2)),
+          receita_liquida: Number(receitaLiquida.toFixed(2)),
+          comissao: Number(comissao.toFixed(2)),
+          formas_pagamento: a.formas_pagamento || null
+        });
+      }
     }
 
     const profissionaisFormatado = Object.values(porProfissional)
