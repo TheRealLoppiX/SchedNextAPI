@@ -6,7 +6,7 @@ const validate = require('../middleware/validate');
 const { clienteRapidoSchema, clienteAtualizarSchema, clienteAssinanteSchema, clienteFollowupSchema } = require('../schemas');
 const { enviarMensagemCliente } = require('../services/mensagensCliente');
 const { permiteWhatsappBot } = require('../utils/limitesPlano');
-const { calcularInicioCiclo, calcularFimCiclo } = require('../utils/limitesAssinatura');
+const { calcularProximaCobranca } = require('../utils/limitesAssinatura');
 
 const router = express.Router();
 
@@ -57,9 +57,7 @@ router.get('/admin/clientes/:empresaId', async (req, res) => {
     // utils/limitesAssinatura.js) — aqui só pra exibir a data da PRÓXIMA cobrança pro admin,
     // sem duplicar a regra de negócio de fato (cron/cobrancaAssinaturas.js continua sendo quem
     // decide quando cobrar).
-    const proxima_cobranca = c.assinante_desde
-      ? calcularFimCiclo(calcularInicioCiclo(c.assinante_desde), c.assinante_desde)
-      : null;
+    const proxima_cobranca = c.assinante_desde ? calcularProximaCobranca(c.assinante_desde) : null;
     return {
       ...c,
       agendamentos_mes: ag.mes,

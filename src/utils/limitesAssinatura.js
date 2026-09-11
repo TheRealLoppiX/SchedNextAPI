@@ -41,6 +41,17 @@ function calcularFimCiclo(cicloInicio, assinanteDesde) {
   return diaClampado(ano, mes, diaAncora).toISOString().slice(0, 10);
 }
 
+// Data que o admin vê como "próxima cobrança" (ver PUT /admin/clientes/:id/assinatura/vencimento
+// em routes/cobrancaAssinatura.js, que deixa reancorar assinante_desde pra qualquer data — passado
+// ou futuro). Se assinante_desde foi movido pra uma data futura, o ciclo atual ainda nem começou
+// (calcularInicioCiclo devolve a própria data futura nesse caso) e essa É a próxima cobrança;
+// senão, o ciclo em andamento já foi cobrado e a próxima é o fim dele (calcularFimCiclo).
+function calcularProximaCobranca(assinanteDesde, referencia = new Date()) {
+  const cicloInicio = calcularInicioCiclo(assinanteDesde, referencia);
+  const hoje = new Date(Date.UTC(referencia.getUTCFullYear(), referencia.getUTCMonth(), referencia.getUTCDate())).toISOString().slice(0, 10);
+  return cicloInicio > hoje ? cicloInicio : calcularFimCiclo(cicloInicio, assinanteDesde);
+}
+
 // Conta, por serviço, quantos agendamentos AINDA NÃO finalizados (pendente/confirmado) o
 // cliente já tem marcados dentro do ciclo atual. Diferente de obterUsoServicos (que só reflete
 // consumo já debitado no fechamento de caixa), isso avisa o cliente ANTES de finalizar que a
@@ -191,6 +202,7 @@ async function calcularValorComLimiteAssinante(usuarioId, servicos, { registrarC
 module.exports = {
   calcularInicioCiclo,
   calcularFimCiclo,
+  calcularProximaCobranca,
   obterUsoServicos,
   obterAgendamentosPendentesPorServico,
   registrarUsoServico,

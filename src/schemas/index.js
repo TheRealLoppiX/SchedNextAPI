@@ -375,6 +375,10 @@ const baixaManualAssinaturaSchema = z.object({
   observacoes: textoOpcionalNullable
 });
 
+const vencimentoAssinaturaSchema = z.object({
+  vencimento: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida')
+});
+
 // --- apiPublica.js ---
 
 const apiPublicaAgendamentoSchema = z.object({
@@ -525,6 +529,7 @@ module.exports = {
   mercadoPagoPixSchema,
   assinarAssinaturaSchema,
   baixaManualAssinaturaSchema,
+  vencimentoAssinaturaSchema,
   apiPublicaAgendamentoSchema,
   whatsappTesteSchema,
   whatsappBotConfigSchema,

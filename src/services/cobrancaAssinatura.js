@@ -122,8 +122,12 @@ async function enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode, q
 // devolve o link de checkout pra ele autorizar o cartão. Reaproveitado tanto pelo endpoint que o
 // próprio cliente chama do perfil dele (routes/mercadopago.js) quanto pelo endpoint do admin que
 // manda esse link direto por WhatsApp/e-mail (routes/cobrancaAssinatura.js) — a criação do
-// preapproval em si é sempre a mesma, só muda quem dispara.
-async function criarPreapprovalAssinatura({ usuario, empresa, plano }) {
+// preapproval em si é sempre a mesma, só muda quem dispara. dataAlvo é opcional: usado só quando
+// o admin reancora o vencimento de um cliente já no cartão (PUT .../assinatura/vencimento) — o
+// Mercado Pago não deixa "empurrar" a data de um preapproval já autorizado, então a única forma
+// de mudar o dia de cobrança do cartão é cancelar o antigo e criar um novo com o start_date
+// desejado (proximoStartDateValido cai pra "agora" se dataAlvo já passou).
+async function criarPreapprovalAssinatura({ usuario, empresa, plano, dataAlvo }) {
   const taxaPercentual = await obterTaxaMarketplace(empresa.id);
   const preapproval = await criarPreapproval({
     accessToken: empresa.mercadopago_access_token,
@@ -132,7 +136,7 @@ async function criarPreapprovalAssinatura({ usuario, empresa, plano }) {
     payerEmail: usuario.email,
     externalReference: String(usuario.id),
     backUrl: montarUrlTenant(empresa, '/assinatura'),
-    startDate: proximoStartDateValido(),
+    startDate: proximoStartDateValido(dataAlvo),
     applicationFee: plano.preco * (taxaPercentual / 100)
   });
 

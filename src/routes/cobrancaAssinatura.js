@@ -5,7 +5,7 @@ const transporter = require('../config/mailer');
 const { emailHtml } = require('../utils/emailTemplate');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 const validate = require('../middleware/validate');
-const { baixaManualAssinaturaSchema } = require('../schemas');
+const { baixaManualAssinaturaSchema, vencimentoAssinaturaSchema } = require('../schemas');
 const { permiteWhatsappBot } = require('../utils/limitesPlano');
 const { montarUrlTenant } = require('../utils/tenantContext');
 const { cancelarPreapproval } = require('../services/mercadopago');
@@ -66,6 +66,104 @@ router.post('/admin/clientes/:id/assinatura/baixa-manual', validate(baixaManualA
   } catch (err) {
     console.error('Erro ao dar baixa manual na assinatura:', err);
     res.status(500).json({ error: 'Não foi possível registrar a baixa agora.' });
+  }
+});
+
+// Reancora manualmente o dia de vencimento da mensalidade — assinante_desde É a âncora do ciclo
+// rolante (ver calcularInicioCiclo/calcularProximaCobranca em utils/limitesAssinatura.js), então
+// mudar o vencimento aqui é só sobrescrever essa data. Aceita data futura (ex: cliente pediu pra
+// vencer todo dia 5 em vez do dia 10 original — o próximo ciclo, e todos os seguintes, passam a
+// cair no novo dia-do-mês) ou passada (corrige um cadastro errado).
+//
+// Pix: só isso resolve — o cron gera o Pix de cada ciclo com base nessa data (ver
+// cron/cobrancaAssinaturas.js). Cartão: quem manda no dia da cobrança de verdade é o preapproval
+// já autorizado no Mercado Pago, e não dá pra "empurrar" a data de um preapproval em andamento —
+// a única forma é cancelar o atual e criar um novo já com o start_date desejado, o que exige o
+// cliente autorizar de novo (novo link mandado por e-mail/WhatsApp). Por isso o cliente cai de
+// volta pra 'pendente' até essa reautorização: o 'em_dia' que ele tinha valia pro preapproval
+// antigo, que deixou de existir.
+router.put('/admin/clientes/:id/assinatura/vencimento', validate(vencimentoAssinaturaSchema), async (req, res) => {
+  const { vencimento } = req.body;
+  const empresaId = req.empresaId;
+
+  if (Number.isNaN(new Date(`${vencimento}T00:00:00Z`).getTime())) {
+    return res.status(400).json({ error: 'Data inválida.' });
+  }
+
+  const { data: cliente } = await supabase
+    .from('usuarios')
+    .select('id, empresa_id, plano_id, assinante_desde, assinatura_forma_pagamento, mercadopago_preapproval_id, nome_completo, email, telefone')
+    .eq('id', req.params.id)
+    .maybeSingle();
+  if (!cliente || cliente.empresa_id !== empresaId) return res.status(404).json({ error: 'Cliente não encontrado.' });
+  if (!cliente.plano_id || !cliente.assinante_desde) return res.status(400).json({ error: 'Este cliente ainda não tem uma assinatura ativa.' });
+
+  if (cliente.assinatura_forma_pagamento !== 'cartao') {
+    const { error } = await supabase.from('usuarios').update({ assinante_desde: vencimento }).eq('id', cliente.id);
+    if (error) return res.status(500).json({ error: 'Não foi possível atualizar o vencimento agora.' });
+    return res.json({ success: true });
+  }
+
+  // Cartão: cancela o preapproval antigo e cria um novo já com o start_date desejado.
+  const { data: empresa } = await supabase
+    .from('empresas')
+    .select('id, nome, slug, dominio_customizado, dominio_verificado, mercadopago_access_token, whatsapp_phone_number_id')
+    .eq('id', empresaId)
+    .maybeSingle();
+  if (!empresa?.mercadopago_access_token) return res.status(400).json({ error: 'Conecte o Mercado Pago antes de alterar o vencimento do cartão.' });
+  if (!empresa?.slug) return res.status(500).json({ error: 'Não foi possível montar o link agora.' });
+
+  const { data: plano } = await supabase.from('planos_assinatura').select('id, nome, preco').eq('id', cliente.plano_id).maybeSingle();
+  if (!plano) return res.status(404).json({ error: 'Plano não encontrado.' });
+
+  try {
+    if (cliente.mercadopago_preapproval_id) {
+      try {
+        await cancelarPreapproval({ accessToken: empresa.mercadopago_access_token, preapprovalId: cliente.mercadopago_preapproval_id });
+      } catch (err) {
+        console.error('Erro ao cancelar preapproval antigo ao mudar vencimento:', err);
+      }
+    }
+
+    const checkoutUrl = await criarPreapprovalAssinatura({ usuario: cliente, empresa, plano, dataAlvo: vencimento });
+
+    const { error: errUpdate } = await supabase
+      .from('usuarios')
+      .update({ assinante_desde: vencimento, status_assinatura: 'pendente' })
+      .eq('id', cliente.id);
+    if (errUpdate) throw errUpdate;
+
+    const linkArea = montarUrlTenant(empresa, '/assinatura');
+    let enviado = false;
+
+    if (cliente.email) {
+      await transporter.sendMail({
+        to: cliente.email,
+        subject: `Novo vencimento da mensalidade - ${empresa.nome}`,
+        html: emailHtml({
+          titulo: `Olá, ${cliente.nome_completo}`,
+          mensagemHtml: `
+            <p style="margin: 0 0 12px;">O vencimento da sua mensalidade do plano ${plano.nome} na <strong>${empresa.nome}</strong> mudou. Como sua cobrança é por cartão, é preciso autorizar o cartão de novo pra confirmar a nova data.</p>
+            <p style="margin: 12px 0;"><a href="${checkoutUrl}">${checkoutUrl}</a></p>
+            <p style="margin: 12px 0; font-size: 12px; color: #6b7280;">Prefere pagar por Pix ou acompanhar pela sua área de cliente? Acesse ${linkArea}</p>
+          `
+        })
+      }).catch((err) => console.error('Erro ao enviar e-mail de novo vencimento:', err));
+      enviado = true;
+    }
+    if (cliente.telefone && empresa.whatsapp_phone_number_id && (await permiteWhatsappBot(empresaId))) {
+      await enviarMensagem(
+        empresa.whatsapp_phone_number_id,
+        `55${cliente.telefone.replace(/\D/g, '')}`,
+        `O vencimento da sua mensalidade do plano ${plano.nome} na ${empresa.nome} mudou. Como sua cobrança é por cartão, autorize o cartão de novo por aqui pra confirmar:\n${checkoutUrl}\n\nPrefere pagar por Pix ou acompanhar pela sua área de cliente? Acesse ${linkArea}`
+      ).catch((err) => console.error('Erro ao enviar WhatsApp de novo vencimento:', err));
+      enviado = true;
+    }
+
+    res.json({ success: true, forma_pagamento: 'cartao', link_reenviado: enviado });
+  } catch (err) {
+    console.error('Erro ao alterar vencimento do cartão:', err);
+    res.status(500).json({ error: 'Não foi possível alterar o vencimento agora.' });
   }
 });
 
