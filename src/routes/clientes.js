@@ -107,6 +107,53 @@ router.get('/admin/clientes/:id/risco-faltas', async (req, res) => {
   res.json({ risco, total, faltas, percentual: Number(percentual.toFixed(1)) });
 });
 
+// Histórico completo de um cliente pra exportação (Excel/PDF montados no front, ver
+// AdminClientes.js) — junta as duas fontes de pagamento que existem hoje: agendamentos
+// concluídos/avulsos (forma_pagamento/formas_pagamento, ver sql/2026_split_pagamento.sql) e
+// mensalidades de assinatura (assinatura_cobrancas, ver services/cobrancaAssinatura.js). Sem
+// filtro de período de propósito — é o extrato completo do cliente, não um relatório gerencial
+// por data (esse já existe em routes/relatorios.js, com escopo de empresa).
+router.get('/admin/clientes/:id/relatorio', async (req, res) => {
+  const { data: cliente } = await supabase
+    .from('usuarios')
+    .select('id, nome_completo, email, telefone')
+    .eq('id', req.params.id)
+    .eq('empresa_id', req.empresaId)
+    .eq('tipo', 'cliente')
+    .maybeSingle();
+  if (!cliente) return res.status(404).json({ error: 'Cliente não encontrado.' });
+
+  const { data: agendamentosRaw, error: errAg } = await supabase
+    .from('agendamentos')
+    .select('id, data_hora, status, valor_total, forma_pagamento, formas_pagamento, pagamento_status, barbeiros(nome), agendamento_servicos(servicos(nome))')
+    .eq('usuario_id', cliente.id)
+    .eq('empresa_id', req.empresaId)
+    .order('data_hora', { ascending: false });
+  if (errAg) { console.error('Erro relatório do cliente (agendamentos):', errAg); return res.status(500).json({ error: 'Erro ao gerar o relatório.' }); }
+
+  const agendamentos = (agendamentosRaw || []).map((a) => ({
+    id: a.id,
+    data_hora: a.data_hora,
+    status: a.status,
+    valor_total: a.valor_total,
+    forma_pagamento: a.forma_pagamento,
+    formas_pagamento: a.formas_pagamento || null,
+    pagamento_status: a.pagamento_status,
+    barbeiro_nome: a.barbeiros?.nome || null,
+    servicos: (a.agendamento_servicos || []).map((as) => as.servicos?.nome).filter(Boolean).join(' + ') || null
+  }));
+
+  const { data: pagamentosAssinatura, error: errPag } = await supabase
+    .from('assinatura_cobrancas')
+    .select('id, ciclo_ref, valor, forma_pagamento, status, pago_em, baixado_manualmente, observacoes, criado_em')
+    .eq('usuario_id', cliente.id)
+    .eq('empresa_id', req.empresaId)
+    .order('ciclo_ref', { ascending: false });
+  if (errPag) { console.error('Erro relatório do cliente (assinatura):', errPag); return res.status(500).json({ error: 'Erro ao gerar o relatório.' }); }
+
+  res.json({ cliente, agendamentos, pagamentos_assinatura: pagamentosAssinatura || [] });
+});
+
 router.put('/admin/clientes/:id', validate(clienteAtualizarSchema), async (req, res) => {
   const { id } = req.params;
   const { nome_completo, telefone, email, data_nascimento, notas } = req.body;
