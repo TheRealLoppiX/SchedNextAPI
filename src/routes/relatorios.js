@@ -72,11 +72,32 @@ async function filtrarPorServicos(agendamentos, idsServicos) {
   return agendamentos.filter((a) => idsPermitidos.has(a.id));
 }
 
-// Anota cada agendamento com `servicos` (nomes dos serviços daquele atendimento) e `tipo`
-// ('assinante'|'avulso') — mesma heurística usada no rateio de comissão (ver
-// foiCobertoPorAssinatura em GET /admin/relatorios/comissionamento/:empresaId): o cliente tem
-// plano vinculado E pagou menos que o preço de tabela somado dos serviços que levou. Usado tanto
-// pro filtro "Tipo de cliente" quanto pro detalhamento por período (ver AdminRelatorios.js).
+// Acha, por força bruta (N de serviços por atendimento é sempre pequeno), um subconjunto de
+// serviços cujo preço de tabela some exatamente o desconto do assinante (valorCheio - valorTotal)
+// — esses são os cobertos pelo plano (R$0 na prática); o resto entra pelo preço de tabela normal,
+// batendo exatamente com o valor_total pago. Sem isso, um atendimento com Corte (coberto) + Canhão
+// (extra, fora do plano) dividia o valor igualmente entre os dois, mostrando o Corte como pago e
+// subestimando o Canhão. Devolve null se nenhuma combinação bate (aí quem chama cai num fallback).
+function acharServicosCobertos(servicos, desconto) {
+  const n = servicos.length;
+  for (let mascara = 0; mascara < (1 << n); mascara++) {
+    let soma = 0;
+    for (let i = 0; i < n; i++) {
+      if (mascara & (1 << i)) soma += servicos[i].valor;
+    }
+    if (Math.abs(soma - desconto) < 0.01) {
+      return servicos.map((_, i) => !!(mascara & (1 << i)));
+    }
+  }
+  return null;
+}
+
+// Anota cada agendamento com `itensServico` ([{nome, valor, coberto}] — valor já é o que de fato
+// coube àquele serviço, não o preço de tabela cru) e `tipo` ('assinante'|'avulso') — mesma
+// heurística usada no rateio de comissão (ver foiCobertoPorAssinatura em GET
+// /admin/relatorios/comissionamento/:empresaId): o cliente tem plano vinculado E pagou menos que
+// o preço de tabela somado dos serviços que levou. Usado pelo filtro "Tipo de cliente" e pelo
+// detalhamento por período (ver AdminRelatorios.js).
 async function anotarTipoEServicos(agendamentos) {
   if (agendamentos.length === 0) return [];
 
@@ -104,8 +125,23 @@ async function anotarTipoEServicos(agendamentos) {
   return agendamentos.map((a) => {
     const servicos = servicosPorAgendamento[a.id] || [];
     const valorCheio = servicos.reduce((acc, s) => acc + s.valor, 0);
-    const assinante = !!(a.usuario_id && temPlanoPorCliente[a.usuario_id] && valorCheio > Number(a.valor_total || 0));
-    return { ...a, servicos: servicos.map((s) => s.nome), tipo: assinante ? 'assinante' : 'avulso' };
+    const valorTotal = Number(a.valor_total || 0);
+    const assinante = !!(a.usuario_id && temPlanoPorCliente[a.usuario_id] && valorCheio > valorTotal);
+
+    let itensServico;
+    if (!assinante) {
+      // Avulso: sem desconto de plano, o preço de tabela de cada serviço já é o que foi cobrado.
+      itensServico = servicos.map((s) => ({ nome: s.nome, valor: s.valor, coberto: false }));
+    } else {
+      const cobertos = acharServicosCobertos(servicos, valorCheio - valorTotal);
+      itensServico = cobertos
+        ? servicos.map((s, i) => ({ nome: s.nome, valor: cobertos[i] ? 0 : s.valor, coberto: cobertos[i] }))
+        // Não achou combinação exata (raro — ex: desconto parcial fora do padrão) — reparte
+        // proporcional ao preço de tabela, só pra soma continuar batendo com valor_total.
+        : servicos.map((s) => ({ nome: s.nome, valor: valorCheio > 0 ? (s.valor / valorCheio) * valorTotal : 0, coberto: false }));
+    }
+
+    return { ...a, itensServico, tipo: assinante ? 'assinante' : 'avulso' };
   });
 }
 
@@ -218,19 +254,19 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
 
     // Mesma série, mas aberta por período + serviço + tipo (assinante/avulso) — é a tabela que
     // acompanha o gráfico (ver AdminRelatorios.js), pra deixar claro do que cada linha se trata
-    // sem precisar abrir o comissionamento. Quando o atendimento teve mais de um serviço junto
-    // (ex: Corte + Barba), divide o valor_total em partes iguais entre eles — não temos o preço
-    // individual cobrado por serviço dentro de um combo, só o total do atendimento — assim a soma
-    // do detalhamento continua batendo com faturamento_atendimentos do resumo.
+    // sem precisar abrir o comissionamento. Cada serviço entra com o valor que de fato coube a
+    // ele (ver acharServicosCobertos/anotarTipoEServicos acima) — um serviço coberto pelo plano
+    // do assinante entra com R$0, e o serviço extra (fora do plano) entra com o valor cheio, em
+    // vez de dividir o valor_total igualmente entre os dois (o que mostraria os dois como "meio
+    // pagos", escondendo que um foi de graça e o outro não).
     const porDetalhe = {};
     for (const a of concluidos) {
       const periodo = chaveAgrupamento(a.data_hora, agrupamento);
-      const servicosDoAtendimento = a.servicos.length > 0 ? a.servicos : ['Sem serviço vinculado'];
-      const valorPorServico = Number(a.valor_total || 0) / servicosDoAtendimento.length;
-      for (const servico of servicosDoAtendimento) {
-        const chave = `${periodo}|${servico}|${a.tipo}`;
-        if (!porDetalhe[chave]) porDetalhe[chave] = { periodo, servico, tipo: a.tipo, faturamento: 0, quantidade: 0 };
-        porDetalhe[chave].faturamento += valorPorServico;
+      const itens = a.itensServico.length > 0 ? a.itensServico : [{ nome: 'Sem serviço vinculado', valor: Number(a.valor_total || 0) }];
+      for (const item of itens) {
+        const chave = `${periodo}|${item.nome}|${a.tipo}`;
+        if (!porDetalhe[chave]) porDetalhe[chave] = { periodo, servico: item.nome, tipo: a.tipo, faturamento: 0, quantidade: 0 };
+        porDetalhe[chave].faturamento += item.valor;
         porDetalhe[chave].quantidade += 1;
       }
     }
