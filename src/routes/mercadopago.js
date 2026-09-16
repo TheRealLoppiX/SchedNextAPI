@@ -27,8 +27,18 @@ const {
   buscarPagamento,
   cancelarPreapproval,
   buscarPreapproval,
-  buscarPagamentoAutorizado
+  buscarPagamentoAutorizado,
+  taxaRealDoPagamento
 } = require('../services/mercadopago');
+
+// Valor líquido real recebido num pagamento Pix confirmado (transaction_amount menos a taxa de
+// processamento do Mercado Pago, ver taxaRealDoPagamento) — mesmo princípio já usado pro cartão
+// de assinatura (services/cobrancaAssinatura.js:buscarValorLiquidoCicloCartao), só que aqui não
+// precisa buscar o pagamento de novo: quem chama já tem o objeto `pagamento` em mãos (acabou de
+// confirmar o status dele).
+function valorLiquidoDoPagamento(pagamento) {
+  return Number(pagamento.transaction_amount || 0) - taxaRealDoPagamento(pagamento);
+}
 
 const router = express.Router();
 
@@ -61,7 +71,7 @@ async function reconfirmarPagamento({ agendamentoId, accessTokenVendedor, paymen
   try {
     const pagamento = await buscarPagamento({ accessTokenVendedor, paymentId });
     if (pagamento.status === 'approved') {
-      await supabase.from('agendamentos').update({ pagamento_status: 'pago' }).eq('id', agendamentoId);
+      await supabase.from('agendamentos').update({ pagamento_status: 'pago', valor_liquido: valorLiquidoDoPagamento(pagamento) }).eq('id', agendamentoId);
       notificarPagamentoConfirmado(agendamentoId).catch((err) => console.error('Erro ao notificar pagamento confirmado:', err));
       return 'pago';
     }
@@ -414,7 +424,7 @@ router.get('/usuario/:id/assinatura-cobranca/pix/status', verificarTokenCliente,
   try {
     const pagamento = await buscarPagamento({ accessTokenVendedor: empresa.mercadopago_access_token, paymentId: cobranca.mercadopago_payment_id });
     if (pagamento.status === 'approved') {
-      await supabase.from('assinatura_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString() }).eq('id', cobranca.id);
+      await supabase.from('assinatura_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString(), valor_liquido: valorLiquidoDoPagamento(pagamento) }).eq('id', cobranca.id);
       await marcarEmDia(req.params.id);
       return res.json({ status: 'pago' });
     }
@@ -691,7 +701,7 @@ router.post('/webhooks/mercadopago', async (req, res) => {
       try {
         const pagamento = await buscarPagamento({ accessTokenVendedor: empresaCobranca.mercadopago_access_token, paymentId: dataId });
         if (pagamento.status === 'approved') {
-          await supabase.from('assinatura_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString() }).eq('id', cobranca.id);
+          await supabase.from('assinatura_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString(), valor_liquido: valorLiquidoDoPagamento(pagamento) }).eq('id', cobranca.id);
           await marcarEmDia(cobranca.usuario_id);
         } else if (pagamento.status === 'rejected' || pagamento.status === 'cancelled') {
           await supabase.from('assinatura_cobrancas').update({ status: 'falhou' }).eq('id', cobranca.id);

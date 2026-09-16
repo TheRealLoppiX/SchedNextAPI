@@ -27,7 +27,7 @@ const { calcularInicioCiclo, obterUsoServicos } = require('../utils/limitesAssin
 const { verificarEDispararPremioFidelidade } = require('../services/fidelidade');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 const { calcularValorFinalCheckout } = require('../services/pagamentoAgendamento');
-const { criarPagamentoPix, buscarPagamento } = require('../services/mercadopago');
+const { criarPagamentoPix, buscarPagamento, taxaRealDoPagamento } = require('../services/mercadopago');
 
 const MENSAGEM_LIMITE_AGENDAMENTOS = 'Este estabelecimento atingiu o limite de agendamentos do mês. Peça para o administrador fazer upgrade de plano.';
 
@@ -576,6 +576,12 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
         if (pagamentoPix.status !== 'approved' || !valorPagoConfere) {
           return res.status(400).json({ error: 'O Pix dessa perna ainda não foi confirmado como pago (ou o valor não confere). Aguarde a confirmação antes de finalizar.' });
         }
+
+        // Grava a taxa real do Mercado Pago já aqui, na perna Pix — é o único momento em que
+        // o pagamento real já foi buscado, evitando uma segunda chamada à API só pra isso
+        // depois (ver receitaLiquidaComTaxas em routes/relatorios.js, que usa esse valor_liquido
+        // por perna quando presente, em vez do percentual cadastrado).
+        pernasPix[0].valor_liquido = Number(pagamentoPix.transaction_amount || 0) - taxaRealDoPagamento(pagamentoPix);
       }
 
       formasPagamentoParaSalvar = formas_pagamento;
@@ -586,13 +592,21 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
     // pagamento dividido, formas_pagamento) é só registro informativo (dinheiro/crédito/débito/
     // pix) pro relatório de faturamento — a perna Pix é a única que já foi cobrada de verdade,
     // via gateway configurado por fora (ver PENDENCIAS.md).
+    //
+    // valor_liquido (taxa real do Mercado Pago, ver reconfirmarPagamento em routes/mercadopago.js)
+    // só faz sentido pro caso de Pix único — em pagamento dividido ele mora dentro de cada perna
+    // do JSON (setado acima), não nesta coluna; pra qualquer forma que não seja Pix único, zera
+    // explicitamente pra não deixar um valor de um Pix gerado e abandonado numa tentativa
+    // anterior deste mesmo agendamento "grudado" e sendo usado por engano no relatório.
+    const valorLiquidoParaSalvar = formasPagamentoParaSalvar || formaPagamentoParaSalvar !== 'pix' ? null : undefined;
     const { error: updError } = await supabase
       .from('agendamentos')
       .update({
         status: 'concluido',
         valor_total: valorFinal,
         forma_pagamento: formaPagamentoParaSalvar,
-        formas_pagamento: formasPagamentoParaSalvar
+        formas_pagamento: formasPagamentoParaSalvar,
+        ...(valorLiquidoParaSalvar !== undefined ? { valor_liquido: valorLiquidoParaSalvar } : {})
       })
       .eq('id', agendamento_id)
       .eq('empresa_id', req.empresaId);

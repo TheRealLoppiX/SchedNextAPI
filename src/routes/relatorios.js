@@ -28,13 +28,19 @@ function taxaParaForma(formaPagamento, pagamentoStatus, taxas) {
 // taxa 1% dá um desconto efetivo diferente de aplicar uma taxa só sobre o total de R$50. A perna
 // Pix num pagamento dividido já é sempre uma cobrança real confirmada no Mercado Pago (exigido no
 // checkout, ver routes/agendamentos.js), então não precisa do mesmo filtro de pagamento_status.
-function receitaLiquidaComTaxas(valorBase, formaPagamento, formasPagamento, pagamentoStatus, taxas) {
+// Pix (avulso ou a perna de um pagamento dividido) tem a taxa REAL do Mercado Pago gravada em
+// valor_liquido no momento da confirmação (ver reconfirmarPagamento/finalizar-servico-checkout
+// em routes/mercadopago.js e routes/agendamentos.js) — usa ela quando presente, em vez de
+// estimar por percentual cadastrado.
+function receitaLiquidaComTaxas(valorBase, formaPagamento, formasPagamento, pagamentoStatus, taxas, valorLiquido) {
   if (formasPagamento && formasPagamento.length > 0) {
     return formasPagamento.reduce((acc, perna) => {
+      if (perna.valor_liquido != null) return acc + Number(perna.valor_liquido);
       const taxaPct = taxas[perna.forma_pagamento] || 0;
       return acc + Number(perna.valor || 0) * (1 - taxaPct / 100);
     }, 0);
   }
+  if (valorLiquido != null) return Number(valorLiquido);
   const taxaPct = taxaParaForma(formaPagamento, pagamentoStatus, taxas);
   return Number(valorBase || 0) * (1 - taxaPct / 100);
 }
@@ -190,7 +196,7 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
 
     const { data: agendamentosBrutos, error } = await supabase
       .from('agendamentos')
-      .select('id, status, data_hora, valor_total, usuario_id, cliente_nome, barbeiro_id, forma_pagamento, formas_pagamento, pagamento_status, barbeiros(nome)')
+      .select('id, status, data_hora, valor_total, usuario_id, cliente_nome, barbeiro_id, forma_pagamento, formas_pagamento, pagamento_status, valor_liquido, barbeiros(nome)')
       .eq('empresa_id', empresaId)
       .gte('data_hora', `${dataInicio}T00:00:00`)
       .lte('data_hora', `${dataFim}T23:59:59`);
@@ -213,7 +219,7 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
     // cada agendamento, de acordo com a(s) forma(s) de pagamento usada(s). Agendamentos sem
     // forma_pagamento registrada (histórico antigo, ou fechado sem informar) entram sem desconto.
     const receitaLiquidaAtendimentos = concluidos.reduce((acc, a) => (
-      acc + receitaLiquidaComTaxas(a.valor_total, a.forma_pagamento, a.formas_pagamento, a.pagamento_status, taxas)
+      acc + receitaLiquidaComTaxas(a.valor_total, a.forma_pagamento, a.formas_pagamento, a.pagamento_status, taxas, a.valor_liquido)
     ), 0);
     // Ticket médio é só de atendimento (mensalidade de assinatura não é um "corte", incluir ela
     // aqui inflaria o número sem sentido) — por isso usa o subtotal de atendimentos, não o total.
@@ -467,7 +473,7 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
 
     const { data: agendamentosBrutos, error } = await supabase
       .from('agendamentos')
-      .select('id, barbeiro_id, usuario_id, valor_total, forma_pagamento, formas_pagamento, pagamento_status, data_hora')
+      .select('id, barbeiro_id, usuario_id, valor_total, forma_pagamento, formas_pagamento, pagamento_status, valor_liquido, data_hora')
       .eq('empresa_id', empresaId)
       .eq('status', 'concluido')
       .gte('data_hora', `${dataInicio}T00:00:00`)
@@ -639,7 +645,7 @@ router.get('/admin/relatorios/comissionamento/:empresaId', async (req, res) => {
       // mensalidade, cobrada em outro momento/forma), então usa a taxa única de sempre.
       const receitaLiquida = ehAssinante
         ? receita * (1 - taxaParaForma(a.forma_pagamento, a.pagamento_status, taxas) / 100)
-        : receitaLiquidaComTaxas(a.valor_total, a.forma_pagamento, a.formas_pagamento, a.pagamento_status, taxas);
+        : receitaLiquidaComTaxas(a.valor_total, a.forma_pagamento, a.formas_pagamento, a.pagamento_status, taxas, a.valor_liquido);
       const percentual = percentualPorProfissional[a.barbeiro_id] || 0;
       const comissao = receitaLiquida * (percentual / 100);
 
