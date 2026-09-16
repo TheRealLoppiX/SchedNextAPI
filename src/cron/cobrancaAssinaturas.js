@@ -5,6 +5,7 @@ const {
   gerarCobrancaPix,
   enviarNotificacaoCobrancaPix,
   verificarCobrancaCartao,
+  buscarValorLiquidoCicloCartao,
   marcarInadimplente
 } = require('../services/cobrancaAssinatura');
 
@@ -116,7 +117,13 @@ function iniciarCobrancaAssinaturas() {
             .maybeSingle();
           const status = await verificarCobrancaCartao({ usuario, empresa });
           if (status === 'authorized') {
-            await supabase.from('assinatura_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString() }).eq('id', cobranca.id);
+            const valorLiquido = await buscarValorLiquidoCicloCartao({
+              accessToken: empresa.mercadopago_access_token,
+              preapprovalId: usuario.mercadopago_preapproval_id
+            });
+            const atualizacao = { status: 'pago', pago_em: new Date().toISOString() };
+            if (valorLiquido != null) atualizacao.valor_liquido = valorLiquido;
+            await supabase.from('assinatura_cobrancas').update(atualizacao).eq('id', cobranca.id);
           } else {
             await supabase.from('assinatura_cobrancas').update({ status: 'falhou' }).eq('id', cobranca.id);
             await marcarInadimplente(usuario, empresa);

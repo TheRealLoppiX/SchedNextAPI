@@ -5,7 +5,15 @@ const { enviarMensagem } = require('./whatsapp/provider');
 const { obterTaxaMarketplace, permiteWhatsappBot } = require('../utils/limitesPlano');
 const { calcularInicioCiclo } = require('../utils/limitesAssinatura');
 const { montarUrlTenant } = require('../utils/tenantContext');
-const { criarPagamentoPix, criarPreapproval, proximoStartDateValido, buscarPreapproval } = require('./mercadopago');
+const {
+  criarPagamentoPix,
+  criarPreapproval,
+  proximoStartDateValido,
+  buscarPreapproval,
+  buscarPagamento,
+  buscarUltimoPagamentoAutorizadoProcessado,
+  taxaRealDoPagamento
+} = require('./mercadopago');
 
 // Núcleo da cobrança recorrente de ASSINATURA DO CLIENTE FINAL (mensalidade que ele paga pra
 // própria barbearia — não confundir com a assinatura da plataforma SchedNext, ver
@@ -162,8 +170,10 @@ async function verificarCobrancaCartao({ usuario, empresa }) {
 // preapproval está 'authorized') quanto pelo polling do cron do dia seguinte ao vencimento. Não
 // falha se a linha do ciclo ainda não existir (ex: webhook chegou antes do cron abrir o
 // registro do dia) — nesse caso não há o que confirmar ainda, o cron cria e já encontra a
-// próxima confirmação depois.
-async function confirmarCicloCartao(usuario) {
+// próxima confirmação depois. valorLiquido (opcional, ver buscarValorLiquidoCicloCartao) é o
+// valor real recebido depois da taxa do Mercado Pago — quando não vem (API falhou, cobrança
+// ainda não processada), fica NULL e o relatório cai pro percentual cadastrado.
+async function confirmarCicloCartao(usuario, valorLiquido) {
   if (!usuario.assinante_desde) return;
   const cicloRef = calcularInicioCiclo(usuario.assinante_desde);
 
@@ -175,7 +185,29 @@ async function confirmarCicloCartao(usuario) {
     .maybeSingle();
 
   if (linha && linha.status === 'pendente') {
-    await supabase.from('assinatura_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString() }).eq('id', linha.id);
+    const atualizacao = { status: 'pago', pago_em: new Date().toISOString() };
+    if (valorLiquido != null) atualizacao.valor_liquido = valorLiquido;
+    await supabase.from('assinatura_cobrancas').update(atualizacao).eq('id', linha.id);
+  }
+}
+
+// Busca a taxa real do Mercado Pago na cobrança pontual mais recente de um preapproval de
+// cartão e devolve o valor líquido (o que de fato sobrou depois da taxa de processamento) — pra
+// gravar em assinatura_cobrancas.valor_liquido em vez de estimar por percentual cadastrado
+// (ver routes/relatorios.js). Best-effort: qualquer falha (endpoint indisponível, cobrança do
+// ciclo ainda não processada no momento da confirmação, etc) devolve null sem propagar erro —
+// o chamador (webhook/cron) já confirma o ciclo como pago de qualquer forma, só sem o dado real.
+async function buscarValorLiquidoCicloCartao({ accessToken, preapprovalId }) {
+  if (!accessToken || !preapprovalId) return null;
+  try {
+    const autorizado = await buscarUltimoPagamentoAutorizadoProcessado({ accessToken, preapprovalId });
+    if (!autorizado?.payment?.id) return null;
+    const pagamento = await buscarPagamento({ accessTokenVendedor: accessToken, paymentId: autorizado.payment.id });
+    const taxaValor = taxaRealDoPagamento(pagamento);
+    return Number(pagamento.transaction_amount || 0) - taxaValor;
+  } catch (err) {
+    console.error('Erro ao buscar taxa real do Mercado Pago pra assinatura:', err);
+    return null;
   }
 }
 
@@ -226,6 +258,7 @@ module.exports = {
   criarPreapprovalAssinatura,
   verificarCobrancaCartao,
   confirmarCicloCartao,
+  buscarValorLiquidoCicloCartao,
   marcarInadimplente,
   marcarEmDia
 };

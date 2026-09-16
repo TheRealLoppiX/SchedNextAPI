@@ -232,7 +232,7 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
       ? { data: [], error: null }
       : await supabase
         .from('assinatura_cobrancas')
-        .select('valor, forma_pagamento, baixado_manualmente')
+        .select('valor, forma_pagamento, baixado_manualmente, valor_liquido')
         .eq('empresa_id', empresaId)
         .eq('status', 'pago')
         .gte('pago_em', `${dataInicio}T00:00:00`)
@@ -242,7 +242,13 @@ router.get('/admin/relatorios/:empresaId', async (req, res) => {
     const faturamentoAssinaturas = (cobrancasAssinatura || []).reduce((acc, c) => acc + Number(c.valor || 0), 0);
     const receitaLiquidaAssinaturas = (cobrancasAssinatura || []).reduce((acc, c) => {
       if (c.baixado_manualmente) return acc + Number(c.valor || 0);
-      const taxaPct = taxas[c.forma_pagamento] || 0;
+      // Cartão de assinatura tem taxa real do Mercado Pago (ver
+      // services/cobrancaAssinatura.js:buscarValorLiquidoCicloCartao) — usa ela quando disponível
+      // em vez de estimar por percentual. Sem valor_liquido (linha antiga, Pix, ou a busca pela
+      // taxa real falhou pontualmente), cai pro percentual cadastrado; 'cartao' usa a taxa de
+      // 'credito' cadastrada, já que o preapproval do Mercado Pago só cobra crédito de fato.
+      if (c.valor_liquido != null) return acc + Number(c.valor_liquido);
+      const taxaPct = taxas[c.forma_pagamento === 'cartao' ? 'credito' : c.forma_pagamento] || 0;
       return acc + Number(c.valor || 0) * (1 - taxaPct / 100);
     }, 0);
 

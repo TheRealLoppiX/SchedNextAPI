@@ -172,6 +172,28 @@ async function buscarPagamentoAutorizado({ accessToken, id }) {
   return request(`/authorized_payments/${id}`, { accessToken });
 }
 
+// Acha a cobrança pontual mais recente (authorized_payment) de um preapproval — usado quando só
+// se tem o preapproval_id em mãos (confirmação por polling do cron, ou pelo webhook de
+// subscription_preapproval) e não o id da cobrança específica do ciclo (esse só vem no webhook
+// separado "subscription_authorized_payment"). 'processed' é o único status que significa "essa
+// cobrança foi debitada de verdade" (mesmo critério já usado no webhook, ver routes/mercadopago.js).
+async function buscarUltimoPagamentoAutorizadoProcessado({ accessToken, preapprovalId }) {
+  const resultado = await request(
+    `/authorized_payments/search?preapproval_id=${encodeURIComponent(preapprovalId)}&sort=date_created&criteria=desc&limit=5`,
+    { accessToken }
+  );
+  return (resultado?.results || []).find((r) => r.status === 'processed' && r.payment?.id) || null;
+}
+
+// Taxa real de processamento cobrada pelo Mercado Pago num pagamento (fee_details tipo
+// 'mercadopago_fee') — deliberadamente NÃO conta 'application_fee' (nossa própria comissão de
+// marketplace, ver obterTaxaMarketplace), que é custo de usar a SchedNext, não taxa de maquineta.
+function taxaRealDoPagamento(pagamento) {
+  return (pagamento?.fee_details || [])
+    .filter((d) => d.type === 'mercadopago_fee')
+    .reduce((acc, d) => acc + Number(d.amount || 0), 0);
+}
+
 module.exports = {
   montarUrlAutorizacao,
   trocarCodigoPorToken,
@@ -182,5 +204,7 @@ module.exports = {
   proximoStartDateValido,
   cancelarPreapproval,
   buscarPreapproval,
-  buscarPagamentoAutorizado
+  buscarPagamentoAutorizado,
+  buscarUltimoPagamentoAutorizadoProcessado,
+  taxaRealDoPagamento
 };

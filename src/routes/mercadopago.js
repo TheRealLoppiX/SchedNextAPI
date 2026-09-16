@@ -16,6 +16,7 @@ const {
   enviarNotificacaoCobrancaPix,
   criarPreapprovalAssinatura,
   confirmarCicloCartao,
+  buscarValorLiquidoCicloCartao,
   marcarInadimplente,
   marcarEmDia
 } = require('../services/cobrancaAssinatura');
@@ -576,7 +577,11 @@ async function processarNotificacaoAssinatura(preapprovalId) {
   // preapproval.
   if (preapproval.status === 'authorized') {
     await marcarEmDia(usuario.id);
-    await confirmarCicloCartao(usuario);
+    const valorLiquido = await buscarValorLiquidoCicloCartao({
+      accessToken: empresaCliente.mercadopago_access_token,
+      preapprovalId
+    });
+    await confirmarCicloCartao(usuario, valorLiquido);
   } else {
     await marcarInadimplente(usuario, empresaCliente);
     // 'cancelled' é terminal pro preapproval (não dá pra reabrir, só criar um novo) — desliga a
