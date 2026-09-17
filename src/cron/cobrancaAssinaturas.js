@@ -8,6 +8,7 @@ const {
   buscarValorLiquidoCicloCartao,
   marcarInadimplente
 } = require('../services/cobrancaAssinatura');
+const { registrarTaxaMarketplace } = require('../services/receitaPlataforma');
 
 // Roda uma vez por dia: cobrança recorrente da assinatura do CLIENTE FINAL (mensalidade que ele
 // paga pra própria barbearia). Só considera quem tem assinatura_forma_pagamento configurada —
@@ -117,13 +118,20 @@ function iniciarCobrancaAssinaturas() {
             .maybeSingle();
           const status = await verificarCobrancaCartao({ usuario, empresa });
           if (status === 'authorized') {
-            const valorLiquido = await buscarValorLiquidoCicloCartao({
+            const { valorLiquido, pagamento } = await buscarValorLiquidoCicloCartao({
               accessToken: empresa.mercadopago_access_token,
               preapprovalId: usuario.mercadopago_preapproval_id
             });
             const atualizacao = { status: 'pago', pago_em: new Date().toISOString() };
             if (valorLiquido != null) atualizacao.valor_liquido = valorLiquido;
             await supabase.from('assinatura_cobrancas').update(atualizacao).eq('id', cobranca.id);
+            if (pagamento) {
+              try {
+                await registrarTaxaMarketplace({ pagamento, empresaId: empresa.id, descricao: `Mensalidade cliente final - ${empresa.nome}` });
+              } catch (err) {
+                console.error('Erro ao registrar taxa de marketplace da mensalidade:', err);
+              }
+            }
           } else {
             await supabase.from('assinatura_cobrancas').update({ status: 'falhou' }).eq('id', cobranca.id);
             await marcarInadimplente(usuario, empresa);

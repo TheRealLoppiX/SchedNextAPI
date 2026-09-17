@@ -58,6 +58,30 @@ async function cancelarAssinaturaNoGateway(gatewaySubscriptionId) {
   });
 }
 
+// Busca o pagamento de verdade (com fee_details) da cobrança mais recente de um preapproval da
+// PLATAFORMA — mesmo princípio de services/cobrancaAssinatura.js:buscarValorLiquidoCicloCartao,
+// só que com o access_token DA SCHEDNEXT em vez do de uma empresa conectada. Usado pra registrar
+// a receita real da assinatura da empresa no livro-caixa (services/receitaPlataforma.js).
+// Best-effort: qualquer falha devolve null sem propagar erro, quem chama já confirma a
+// assinatura como ativa de qualquer forma, só sem o registro de receita.
+async function buscarPagamentoCicloPlataforma(preapprovalId) {
+  if (!estaConfigurado()) return null;
+  try {
+    const autorizado = await mercadopago.buscarUltimoPagamentoAutorizadoProcessado({
+      accessToken: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
+      preapprovalId
+    });
+    if (!autorizado?.payment?.id) return null;
+    return await mercadopago.buscarPagamento({
+      accessTokenVendedor: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
+      paymentId: autorizado.payment.id
+    });
+  } catch (err) {
+    console.error('Erro ao buscar pagamento do ciclo da assinatura da plataforma:', err);
+    return null;
+  }
+}
+
 // Preapproval cancelado no Mercado Pago é terminal (não dá pra "reabrir") — reativar cobrança
 // aqui sempre cria um preapproval NOVO, com a mesma data de próxima cobrança já prometida ao
 // cliente. Precisa do e-mail da empresa (o Mercado Pago exige payer_email em todo preapproval
@@ -80,4 +104,4 @@ async function reativarAssinaturaNoGateway({ empresaId, email, planoNome, precoM
   return preapproval.id;
 }
 
-module.exports = { estaConfigurado, criarCheckout, cancelarAssinaturaNoGateway, reativarAssinaturaNoGateway };
+module.exports = { estaConfigurado, criarCheckout, cancelarAssinaturaNoGateway, reativarAssinaturaNoGateway, buscarPagamentoCicloPlataforma };
