@@ -446,6 +446,18 @@ const leadStatusSchema = z.object({
   status: z.enum(['novo', 'contatado', 'fechado'])
 });
 
+// Ajuste manual da data de próxima cobrança da assinatura DA PLATAFORMA (não confundir com
+// vencimentoAssinaturaSchema, que é do cliente final de uma barbearia) — usado pelo admin
+// absoluto pra dar carência, corrigir uma data errada, etc. nullable pra também dar pra "zerar"
+// (empresa sem cobrança recorrente ativa).
+const empresaVencimentoSchema = z.object({
+  proxima_cobranca_em: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida').nullable()
+});
+
+const empresaTrocarPlanoSchema = z.object({
+  plano_plataforma_id: idLike
+});
+
 // --- chavesAtivacao.js ---
 
 const chaveAtivacaoCriarSchema = z.object({
@@ -538,6 +550,8 @@ module.exports = {
   superAdminLoginSchema,
   superAdminCriarSchema,
   leadStatusSchema,
+  empresaVencimentoSchema,
+  empresaTrocarPlanoSchema,
   planoPlataformaSchema,
   chaveAtivacaoCriarSchema,
   chaveAtivacaoResgatarSchema

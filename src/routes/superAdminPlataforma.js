@@ -1,7 +1,8 @@
 const express = require('express');
 const supabase = require('../config/supabase');
 const validate = require('../middleware/validate');
-const { planoPlataformaSchema } = require('../schemas');
+const { cancelarAssinaturaNoGateway } = require('../services/pagamento');
+const { planoPlataformaSchema, empresaVencimentoSchema, empresaTrocarPlanoSchema } = require('../schemas');
 
 const router = express.Router();
 
@@ -90,18 +91,71 @@ router.get('/super-admin/empresas/:id', async (req, res) => {
   inicioMes.setUTCDate(1);
   const inicioMesISO = inicioMes.toISOString().slice(0, 10);
 
-  const [{ count: totalBarbeiros }, { count: totalAgendamentosMes }] = await Promise.all([
+  const [{ count: totalBarbeiros }, { count: totalAgendamentosMes }, { count: totalClientes }, { count: totalUnidades }] = await Promise.all([
     supabase.from('barbeiros').select('id', { count: 'exact', head: true }).eq('empresa_id', empresa.id),
-    supabase.from('agendamentos').select('id', { count: 'exact', head: true }).eq('empresa_id', empresa.id).gte('data_hora', `${inicioMesISO}T00:00:00`).neq('status', 'cancelado')
+    supabase.from('agendamentos').select('id', { count: 'exact', head: true }).eq('empresa_id', empresa.id).gte('data_hora', `${inicioMesISO}T00:00:00`).neq('status', 'cancelado'),
+    supabase.from('usuarios').select('id', { count: 'exact', head: true }).eq('empresa_id', empresa.id),
+    supabase.from('unidades').select('id', { count: 'exact', head: true }).eq('empresa_id', empresa.id)
   ]);
 
   res.json({
     ...empresa,
     uso: {
       barbeiros: totalBarbeiros || 0,
-      agendamentos_mes: totalAgendamentosMes || 0
+      agendamentos_mes: totalAgendamentosMes || 0,
+      clientes: totalClientes || 0,
+      unidades: totalUnidades || 0
     }
   });
+});
+
+// Ajusta manualmente a data de próxima cobrança da assinatura da PLATAFORMA (dar carência,
+// corrigir uma data errada, etc.) — não mexe em status_assinatura nem em cancelamento_agendado,
+// só na data em si.
+router.put('/super-admin/empresas/:id/vencimento', validate(empresaVencimentoSchema), async (req, res) => {
+  const { error } = await supabase
+    .from('empresas')
+    .update({ proxima_cobranca_em: req.body.proxima_cobranca_em })
+    .eq('id', req.params.id);
+
+  if (error) return res.status(500).json({ error: 'Erro ao atualizar a data de cobrança.' });
+  res.json({ success: true, message: 'Data de próxima cobrança atualizada.' });
+});
+
+// Troca o plano da empresa na marra (suporte: cortesia, correção de um webhook que não aplicou o
+// plano pendente, negociação fechada fora do sistema etc.) — mesma ideia de
+// POST /super-admin/leads-enterprise/:id/ativar-empresa, mas pra qualquer plano, não só
+// Enterprise. Cancela uma assinatura recorrente existente no Mercado Pago antes de trocar (best
+// effort): sem isso, o cliente continuaria sendo cobrado no plano ANTIGO por uma recorrência que
+// o admin não sabe mais que existe, já que o gateway_subscription_id é zerado a seguir.
+router.put('/super-admin/empresas/:id/plano', validate(empresaTrocarPlanoSchema), async (req, res) => {
+  const { data: plano } = await supabase.from('planos_plataforma').select('id').eq('id', req.body.plano_plataforma_id).maybeSingle();
+  if (!plano) return res.status(400).json({ error: 'Plano inválido.' });
+
+  const { data: empresaAtual } = await supabase.from('empresas').select('gateway_subscription_id').eq('id', req.params.id).maybeSingle();
+  if (!empresaAtual) return res.status(404).json({ error: 'Empresa não encontrada.' });
+
+  if (empresaAtual.gateway_subscription_id) {
+    try {
+      await cancelarAssinaturaNoGateway(empresaAtual.gateway_subscription_id);
+    } catch (e) {
+      console.error('Erro ao cancelar assinatura anterior no Mercado Pago (troca manual de plano pelo admin absoluto):', e);
+    }
+  }
+
+  const { error } = await supabase
+    .from('empresas')
+    .update({
+      plano_plataforma_id: plano.id,
+      plano_plataforma_pendente_id: null,
+      gateway_subscription_id: null,
+      status_assinatura: 'ativa',
+      cancelamento_agendado: false
+    })
+    .eq('id', req.params.id);
+
+  if (error) return res.status(500).json({ error: 'Erro ao trocar o plano da empresa.' });
+  res.json({ success: true, message: 'Plano da empresa atualizado. Se havia cobrança recorrente ativa, ela foi cancelada, ajuste a data de próxima cobrança se o novo plano também for pago.' });
 });
 
 router.post('/super-admin/empresas/:id/suspender', async (req, res) => {
