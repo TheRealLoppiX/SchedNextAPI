@@ -86,6 +86,7 @@ app.use('/super-admin', verificarTokenSuperAdmin);
 app.use(require('./src/routes/auth'));
 app.use(require('./src/routes/superAdmin'));
 app.use(require('./src/routes/superAdminPlataforma'));
+app.use(require('./src/routes/superAdminFinanceiro'));
 app.use(require('./src/routes/chavesAtivacao'));
 app.use(require('./src/routes/perfil'));
 app.use(require('./src/routes/barbeiros'));

@@ -30,6 +30,8 @@ const {
   buscarPagamentoAutorizado,
   taxaRealDoPagamento
 } = require('../services/mercadopago');
+const { buscarPagamentoCicloPlataforma } = require('../services/pagamento');
+const { registrarReceitaPlataforma, registrarTaxaMarketplace } = require('../services/receitaPlataforma');
 
 // Valor líquido real recebido num pagamento Pix confirmado (transaction_amount menos a taxa de
 // processamento do Mercado Pago, ver taxaRealDoPagamento) — mesmo princípio já usado pro cartão
@@ -65,7 +67,7 @@ function redirectUriCallback(req) {
 // localmente além de 'pago', que é terminal) e persiste se tiver sido aprovado. Compartilhado
 // pelas rotas de status (admin e cliente) e pelo webhook — as três precisam do mesmo
 // comportamento de "sempre rebuscar antes de confiar".
-async function reconfirmarPagamento({ agendamentoId, accessTokenVendedor, paymentId, statusAtual }) {
+async function reconfirmarPagamento({ agendamentoId, empresaId, accessTokenVendedor, paymentId, statusAtual }) {
   if (statusAtual === 'pago' || statusAtual === 'falhou' || !accessTokenVendedor) return statusAtual;
 
   try {
@@ -73,6 +75,9 @@ async function reconfirmarPagamento({ agendamentoId, accessTokenVendedor, paymen
     if (pagamento.status === 'approved') {
       await supabase.from('agendamentos').update({ pagamento_status: 'pago', valor_liquido: valorLiquidoDoPagamento(pagamento) }).eq('id', agendamentoId);
       notificarPagamentoConfirmado(agendamentoId).catch((err) => console.error('Erro ao notificar pagamento confirmado:', err));
+      if (empresaId) {
+        registrarTaxaMarketplace({ pagamento, empresaId, descricao: 'Atendimento' }).catch((err) => console.error('Erro ao registrar taxa de marketplace do atendimento:', err));
+      }
       return 'pago';
     }
     // 'rejected'/'cancelled' são terminais pro Pix (não fica tentando de novo sozinho, o
@@ -285,6 +290,7 @@ router.get('/admin/mercadopago/pix/:agendamentoId/status', async (req, res) => {
   const { data: empresa } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', req.empresaId).maybeSingle();
   const status = await reconfirmarPagamento({
     agendamentoId: req.params.agendamentoId,
+    empresaId: req.empresaId,
     accessTokenVendedor: empresa?.mercadopago_access_token,
     paymentId: agendamento.mercadopago_payment_id,
     statusAtual: agendamento.pagamento_status
@@ -311,6 +317,7 @@ router.get('/pix/:agendamentoId/status', verificarTokenCliente, async (req, res)
   const { data: empresa } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', agendamento.empresa_id).maybeSingle();
   const status = await reconfirmarPagamento({
     agendamentoId: req.params.agendamentoId,
+    empresaId: agendamento.empresa_id,
     accessTokenVendedor: empresa?.mercadopago_access_token,
     paymentId: agendamento.mercadopago_payment_id,
     statusAtual: agendamento.pagamento_status
@@ -426,6 +433,7 @@ router.get('/usuario/:id/assinatura-cobranca/pix/status', verificarTokenCliente,
     if (pagamento.status === 'approved') {
       await supabase.from('assinatura_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString(), valor_liquido: valorLiquidoDoPagamento(pagamento) }).eq('id', cobranca.id);
       await marcarEmDia(req.params.id);
+      registrarTaxaMarketplace({ pagamento, empresaId: cobranca.empresa_id, descricao: 'Mensalidade cliente final (Pix)' }).catch((err) => console.error('Erro ao registrar taxa de marketplace da mensalidade:', err));
       return res.json({ status: 'pago' });
     }
     if (pagamento.status === 'rejected' || pagamento.status === 'cancelled') {
@@ -549,6 +557,28 @@ async function processarNotificacaoAssinatura(preapprovalId) {
     }
     await supabase.from('empresas').update(atualizacao).eq('id', empresaPlataforma.id);
 
+    // Registra a receita real da assinatura da PLATAFORMA no livro-caixa (ver
+    // services/receitaPlataforma.js) — busca o pagamento de verdade desse ciclo (com
+    // fee_details) pra taxa real do Mercado Pago, não uma estimativa. Idempotente por id do
+    // pagamento, então não tem problema chamar isso em toda notificação recebida, mesmo
+    // repetida.
+    if (ativa) {
+      buscarPagamentoCicloPlataforma(preapprovalId)
+        .then((pagamento) => {
+          if (!pagamento) return;
+          return registrarReceitaPlataforma({
+            tipo: 'assinatura_plataforma',
+            empresaId: empresaPlataforma.id,
+            valorBruto: Number(pagamento.transaction_amount || 0),
+            valorLiquido: Number(pagamento.transaction_amount || 0) - taxaRealDoPagamento(pagamento),
+            formaPagamento: pagamento.payment_method_id === 'pix' ? 'pix' : 'cartao',
+            referenciaExterna: String(pagamento.id),
+            descricao: `Assinatura da plataforma - ${empresaPlataforma.nome}`
+          });
+        })
+        .catch((err) => console.error('Erro ao registrar receita da assinatura da plataforma:', err));
+    }
+
     // Avisa o dono da empresa quando a cobrança da própria plataforma falha (cartão recusado,
     // etc.) — antes disso acontecia 100% em silêncio, o admin só descobria ao perder acesso a
     // recursos do plano. Só dispara na transição pra inadimplente (evita reenviar o mesmo aviso
@@ -587,11 +617,15 @@ async function processarNotificacaoAssinatura(preapprovalId) {
   // preapproval.
   if (preapproval.status === 'authorized') {
     await marcarEmDia(usuario.id);
-    const valorLiquido = await buscarValorLiquidoCicloCartao({
+    const { valorLiquido, pagamento } = await buscarValorLiquidoCicloCartao({
       accessToken: empresaCliente.mercadopago_access_token,
       preapprovalId
     });
     await confirmarCicloCartao(usuario, valorLiquido);
+    if (pagamento) {
+      registrarTaxaMarketplace({ pagamento, empresaId: empresaCliente.id, descricao: `Mensalidade cliente final - ${empresaCliente.nome}` })
+        .catch((err) => console.error('Erro ao registrar taxa de marketplace da mensalidade:', err));
+    }
   } else {
     await marcarInadimplente(usuario, empresaCliente);
     // 'cancelled' é terminal pro preapproval (não dá pra reabrir, só criar um novo) — desliga a
@@ -703,6 +737,7 @@ router.post('/webhooks/mercadopago', async (req, res) => {
         if (pagamento.status === 'approved') {
           await supabase.from('assinatura_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString(), valor_liquido: valorLiquidoDoPagamento(pagamento) }).eq('id', cobranca.id);
           await marcarEmDia(cobranca.usuario_id);
+          registrarTaxaMarketplace({ pagamento, empresaId: cobranca.empresa_id, descricao: 'Mensalidade cliente final (Pix)' }).catch((err) => console.error('Erro ao registrar taxa de marketplace da mensalidade:', err));
         } else if (pagamento.status === 'rejected' || pagamento.status === 'cancelled') {
           await supabase.from('assinatura_cobrancas').update({ status: 'falhou' }).eq('id', cobranca.id);
         }
@@ -719,6 +754,7 @@ router.post('/webhooks/mercadopago', async (req, res) => {
   // verdade antes de marcar como pago (mesmo princípio do webhook do Asaas).
   await reconfirmarPagamento({
     agendamentoId: agendamento.id,
+    empresaId: agendamento.empresa_id,
     accessTokenVendedor: empresa?.mercadopago_access_token,
     paymentId: dataId,
     statusAtual: null

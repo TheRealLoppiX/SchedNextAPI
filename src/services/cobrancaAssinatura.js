@@ -194,20 +194,23 @@ async function confirmarCicloCartao(usuario, valorLiquido) {
 // Busca a taxa real do Mercado Pago na cobrança pontual mais recente de um preapproval de
 // cartão e devolve o valor líquido (o que de fato sobrou depois da taxa de processamento) — pra
 // gravar em assinatura_cobrancas.valor_liquido em vez de estimar por percentual cadastrado
-// (ver routes/relatorios.js). Best-effort: qualquer falha (endpoint indisponível, cobrança do
-// ciclo ainda não processada no momento da confirmação, etc) devolve null sem propagar erro —
-// o chamador (webhook/cron) já confirma o ciclo como pago de qualquer forma, só sem o dado real.
+// (ver routes/relatorios.js). Devolve também o `pagamento` cru: quem chama usa pra registrar a
+// taxa de marketplace (nossa fatia, ver services/receitaPlataforma.js) sem precisar buscar o
+// mesmo pagamento de novo. Best-effort: qualquer falha (endpoint indisponível, cobrança do
+// ciclo ainda não processada no momento da confirmação, etc) devolve valorLiquido/pagamento
+// null sem propagar erro — o chamador (webhook/cron) já confirma o ciclo como pago de qualquer
+// forma, só sem o dado real.
 async function buscarValorLiquidoCicloCartao({ accessToken, preapprovalId }) {
-  if (!accessToken || !preapprovalId) return null;
+  if (!accessToken || !preapprovalId) return { valorLiquido: null, pagamento: null };
   try {
     const autorizado = await buscarUltimoPagamentoAutorizadoProcessado({ accessToken, preapprovalId });
-    if (!autorizado?.payment?.id) return null;
+    if (!autorizado?.payment?.id) return { valorLiquido: null, pagamento: null };
     const pagamento = await buscarPagamento({ accessTokenVendedor: accessToken, paymentId: autorizado.payment.id });
     const taxaValor = taxaRealDoPagamento(pagamento);
-    return Number(pagamento.transaction_amount || 0) - taxaValor;
+    return { valorLiquido: Number(pagamento.transaction_amount || 0) - taxaValor, pagamento };
   } catch (err) {
     console.error('Erro ao buscar taxa real do Mercado Pago pra assinatura:', err);
-    return null;
+    return { valorLiquido: null, pagamento: null };
   }
 }
 
