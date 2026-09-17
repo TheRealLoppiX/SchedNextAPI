@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const supabase = require('../config/supabase');
 const validate = require('../middleware/validate');
 const { loginLimiter } = require('../middleware/rateLimiters');
-const { superAdminLoginSchema, superAdminCriarSchema, leadStatusSchema } = require('../schemas');
+const { superAdminLoginSchema, superAdminCriarSchema, superAdminEditarSchema, leadStatusSchema } = require('../schemas');
 
 const router = express.Router();
 
@@ -86,6 +86,65 @@ router.post('/super-admin/super-admins', loginLimiter, validate(superAdminCriarS
 
   if (error) return res.status(500).json({ error: 'Erro ao criar super admin.' });
   res.status(201).json(data);
+});
+
+// Identidade de quem está logado agora (pra front saber qual linha da lista é "a minha conta",
+// já que dois super admins podem existir e só cada um edita a própria — ver PUT .../me abaixo).
+// Busca fresco no banco em vez de confiar só no payload do JWT: o e-mail no token pode estar
+// desatualizado se o admin trocou de e-mail depois de logar.
+router.get('/super-admin/me', async (req, res) => {
+  const { data, error } = await supabase
+    .from('super_admins')
+    .select('id, email, foto_url')
+    .eq('id', req.superAdmin?.id)
+    .maybeSingle();
+
+  if (error || !data) return res.status(500).json({ error: 'Erro ao buscar sua conta.' });
+  res.json(data);
+});
+
+// Edição do PRÓPRIO perfil — de propósito sem :id na rota, pra nunca abrir brecha de um super
+// admin editar a conta de outro (decisão consciente: só autoedição, ver superAdminEditarSchema).
+// Mesma reautenticação da criação: mudar e-mail/senha da própria conta de dono da plataforma
+// exige confirmar a senha atual de novo, mesmo já com token válido.
+router.put('/super-admin/super-admins/me', loginLimiter, validate(superAdminEditarSchema), async (req, res) => {
+  const { email, senha, senha_atual, foto_url } = req.body;
+
+  const { data: contaAtual, error: errContaAtual } = await supabase
+    .from('super_admins')
+    .select('id, email, senha_hash')
+    .eq('id', req.superAdmin?.id)
+    .maybeSingle();
+
+  if (errContaAtual || !contaAtual) return res.status(500).json({ error: 'Erro ao confirmar sua identidade.' });
+
+  const senhaAtualValida = await bcrypt.compare(senha_atual, contaAtual.senha_hash);
+  if (!senhaAtualValida) return res.status(401).json({ error: 'Senha atual incorreta.' });
+
+  const atualizacao = {};
+  if (foto_url !== undefined) atualizacao.foto_url = foto_url || null;
+
+  if (email && email !== contaAtual.email) {
+    const { data: emailEmUso } = await supabase.from('super_admins').select('id').eq('email', email).neq('id', contaAtual.id).maybeSingle();
+    if (emailEmUso) return res.status(409).json({ error: 'Já existe um super admin com esse e-mail.' });
+    atualizacao.email = email;
+  }
+
+  if (senha) atualizacao.senha_hash = await bcrypt.hash(senha, 12);
+
+  if (Object.keys(atualizacao).length === 0) {
+    return res.status(400).json({ error: 'Nada para atualizar.' });
+  }
+
+  const { data, error } = await supabase
+    .from('super_admins')
+    .update(atualizacao)
+    .eq('id', contaAtual.id)
+    .select('id, email, ativo, criado_em, foto_url')
+    .single();
+
+  if (error) return res.status(500).json({ error: 'Erro ao atualizar seu perfil.' });
+  res.json(data);
 });
 
 // Desativa (não apaga) um super admin — mantém o histórico de quem criou quem.

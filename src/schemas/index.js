@@ -450,6 +450,19 @@ const superAdminCriarSchema = z.object({
   foto_url: z.string().trim().optional().nullable()
 });
 
+// Edição do PRÓPRIO perfil (ver PUT /super-admin/super-admins/me em routes/superAdmin.js) — um
+// super admin só edita a própria conta, nunca a de outro, então nem recebe :id na rota. email e
+// senha são opcionais (o formulário só manda o que mudou), mas senha_atual é sempre obrigatória,
+// mesma trava de reautenticação da criação.
+const superAdminEditarSchema = z.object({
+  email: z.string().trim().toLowerCase().email('E-mail inválido')
+    .refine((v) => v.endsWith('@schednext.com.br'), 'O e-mail precisa ser do domínio @schednext.com.br')
+    .optional(),
+  senha: z.string().min(8, 'A senha precisa ter pelo menos 8 caracteres').optional(),
+  senha_atual: z.string().min(1, 'Confirme sua senha atual para continuar'),
+  foto_url: z.string().trim().optional().nullable()
+});
+
 const leadStatusSchema = z.object({
   status: z.enum(['novo', 'contatado', 'fechado'])
 });
@@ -560,6 +573,7 @@ module.exports = {
   leadStatusSchema,
   empresaVencimentoSchema,
   empresaTrocarPlanoSchema,
+  superAdminEditarSchema,
   planoPlataformaSchema,
   chaveAtivacaoCriarSchema,
   chaveAtivacaoResgatarSchema
