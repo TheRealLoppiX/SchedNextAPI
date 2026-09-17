@@ -439,7 +439,12 @@ const superAdminLoginSchema = z.object({
 const superAdminCriarSchema = z.object({
   email: z.string().trim().toLowerCase().email('E-mail inválido')
     .refine((v) => v.endsWith('@schednext.com.br'), 'O e-mail precisa ser do domínio @schednext.com.br'),
-  senha: z.string().min(8, 'A senha precisa ter pelo menos 8 caracteres')
+  senha: z.string().min(8, 'A senha precisa ter pelo menos 8 caracteres'),
+  // Reautenticação de quem está criando (não da conta nova): exige a senha de QUEM ESTÁ
+  // LOGADO pra confirmar essa ação, senão um painel deixado aberto/desbloqueado por acidente
+  // vira uma porta pra qualquer um criar seu próprio acesso de dono da plataforma (ver
+  // routes/superAdmin.js, que compara isso com o hash do req.superAdmin.id).
+  senha_atual: z.string().min(1, 'Confirme sua senha atual para continuar')
 });
 
 const leadStatusSchema = z.object({

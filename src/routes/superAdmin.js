@@ -54,8 +54,25 @@ router.get('/super-admin/super-admins', async (req, res) => {
 
 // Só um super admin autenticado pode criar outro (o middleware verificarTokenSuperAdmin já
 // garante isso pra tudo sob /super-admin). Restrito ao domínio @schednext.com.br pelo schema.
-router.post('/super-admin/super-admins', validate(superAdminCriarSchema), async (req, res) => {
-  const { email, senha } = req.body;
+//
+// Reautenticação (senha_atual): um token válido no localStorage só prova que ALGUÉM logou
+// antes, não que é a mesma pessoa agora na frente da tela — um painel deixado aberto/
+// desbloqueado por descuido não pode virar uma porta pra qualquer um criar seu próprio acesso
+// de dono da plataforma. Por isso exige a senha de QUEM ESTÁ CRIANDO (não da conta nova) de
+// novo aqui, mesmo já autenticado.
+router.post('/super-admin/super-admins', loginLimiter, validate(superAdminCriarSchema), async (req, res) => {
+  const { email, senha, senha_atual } = req.body;
+
+  const { data: quemEstaCriando, error: errQuemCria } = await supabase
+    .from('super_admins')
+    .select('senha_hash')
+    .eq('id', req.superAdmin?.id)
+    .maybeSingle();
+
+  if (errQuemCria || !quemEstaCriando) return res.status(500).json({ error: 'Erro ao confirmar sua identidade.' });
+
+  const senhaAtualValida = await bcrypt.compare(senha_atual, quemEstaCriando.senha_hash);
+  if (!senhaAtualValida) return res.status(401).json({ error: 'Senha atual incorreta.' });
 
   const { data: existente } = await supabase.from('super_admins').select('id').eq('email', email).maybeSingle();
   if (existente) return res.status(409).json({ error: 'Já existe um super admin com esse e-mail.' });
