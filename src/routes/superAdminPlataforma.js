@@ -35,16 +35,21 @@ router.put('/super-admin/planos/:id', validate(planoPlataformaSchema), async (re
 });
 
 // --- Empresas cadastradas na plataforma ---
-// empresas não tem coluna de data de cadastro (ver PENDENCIAS.md), então a listagem usa id
-// decrescente como aproximação de "mais recentes primeiro" (id é SERIAL, sempre crescente).
+// criado_em existe desde sql/2026_empresas_criado_em.sql — empresas cadastradas antes dessa
+// migration ficaram com a data em que ela rodou (não dá pra recuperar a data real delas).
 
 router.get('/super-admin/empresas', async (req, res) => {
   const { busca, status, plano_id } = req.query;
 
   let query = supabase
     .from('empresas')
-    .select('id, nome, slug, email, vertical, status_assinatura, plano_plataforma_id, plano_plataforma:plano_plataforma_id(nome, preco_mensal)')
-    .order('id', { ascending: false });
+    .select(`
+      id, nome, slug, email, vertical, criado_em,
+      status_assinatura, proxima_cobranca_em, cancelamento_agendado, chave_ativacao_expira_em,
+      plano_plataforma_id, plano_plataforma:plano_plataforma_id(nome, preco_mensal, limite_profissionais, limite_agendamentos_mes),
+      plano_plataforma_pendente_id, plano_plataforma_pendente:plano_plataforma_pendente_id(nome, preco_mensal)
+    `)
+    .order('criado_em', { ascending: false });
 
   // Remove vírgula/parênteses antes de interpolar no `.or()`: o PostgREST separa condições por
   // vírgula, então um valor como "x,plano_plataforma_id.eq.1" injetaria uma cláusula extra no filtro.
@@ -58,6 +63,45 @@ router.get('/super-admin/empresas', async (req, res) => {
   const { data, error } = await query.limit(200);
   if (error) return res.status(500).json({ error: 'Erro ao buscar empresas.' });
   res.json(data);
+});
+
+// Detalhamento completo de uma empresa (aba "Empresas" -> "Ver detalhes"): junta os dados já
+// usados na listagem com o consumo atual de barbeiros/agendamentos contra o limite do plano
+// (mesma lógica de utils/limitesPlano.js, mas com o número, não só true/false) — calcular isso
+// pra cada linha da listagem faria 2 queries extras por empresa, então fica só nesta rota,
+// aberta sob demanda.
+router.get('/super-admin/empresas/:id', async (req, res) => {
+  const { data: empresa, error } = await supabase
+    .from('empresas')
+    .select(`
+      id, nome, slug, email, vertical, cpf_cnpj, criado_em,
+      status_assinatura, proxima_cobranca_em, cancelamento_agendado, gateway_subscription_id,
+      chave_ativacao_expira_em, dominio_customizado, dominio_verificado,
+      plano_plataforma_id, plano_plataforma:plano_plataforma_id(nome, preco_mensal, limite_profissionais, limite_agendamentos_mes, limite_admins),
+      plano_plataforma_pendente_id, plano_plataforma_pendente:plano_plataforma_pendente_id(nome, preco_mensal)
+    `)
+    .eq('id', req.params.id)
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: 'Erro ao buscar empresa.' });
+  if (!empresa) return res.status(404).json({ error: 'Empresa não encontrada.' });
+
+  const inicioMes = new Date();
+  inicioMes.setUTCDate(1);
+  const inicioMesISO = inicioMes.toISOString().slice(0, 10);
+
+  const [{ count: totalBarbeiros }, { count: totalAgendamentosMes }] = await Promise.all([
+    supabase.from('barbeiros').select('id', { count: 'exact', head: true }).eq('empresa_id', empresa.id),
+    supabase.from('agendamentos').select('id', { count: 'exact', head: true }).eq('empresa_id', empresa.id).gte('data_hora', `${inicioMesISO}T00:00:00`).neq('status', 'cancelado')
+  ]);
+
+  res.json({
+    ...empresa,
+    uso: {
+      barbeiros: totalBarbeiros || 0,
+      agendamentos_mes: totalAgendamentosMes || 0
+    }
+  });
 });
 
 router.post('/super-admin/empresas/:id/suspender', async (req, res) => {
