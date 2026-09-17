@@ -172,12 +172,45 @@ router.post('/super-admin/empresas/:id/reativar', async (req, res) => {
 
 // --- Métricas gerais da plataforma ---
 
-router.get('/super-admin/metricas', async (req, res) => {
-  const { data: empresas, error } = await supabase
-    .from('empresas')
-    .select('status_assinatura, plano_plataforma:plano_plataforma_id(nome, preco_mensal)');
+// periodo=mes exige ano+mes (mes 0-indexado, igual Date do JS, mesmo padrão usado no filtro do
+// AdminDashboard.js do admin de empresa); qualquer coisa diferente de 'mes' cai no ano inteiro.
+// Sem período nenhum na query, assume o ano corrente — é o "filtro macro" da tela de Métricas.
+function calcularPeriodo(query) {
+  const hoje = new Date();
+  const ano = Number(query.ano) || hoje.getUTCFullYear();
 
-  if (error) return res.status(500).json({ error: 'Erro ao calcular métricas.' });
+  if (query.periodo === 'mes') {
+    const mes = query.mes !== undefined ? Number(query.mes) : hoje.getUTCMonth();
+    return {
+      tipo: 'mes',
+      ano,
+      mes,
+      inicio: new Date(Date.UTC(ano, mes, 1)),
+      fim: new Date(Date.UTC(ano, mes + 1, 0, 23, 59, 59, 999))
+    };
+  }
+
+  return {
+    tipo: 'ano',
+    ano,
+    inicio: new Date(Date.UTC(ano, 0, 1)),
+    fim: new Date(Date.UTC(ano, 11, 31, 23, 59, 59, 999))
+  };
+}
+
+router.get('/super-admin/metricas', async (req, res) => {
+  const periodo = calcularPeriodo(req.query);
+
+  const [{ data: empresas, error }, { data: cadastradasNoPeriodo, error: errCadastro }, { data: aReceberRows, error: errAReceber }] = await Promise.all([
+    supabase.from('empresas').select('status_assinatura, plano_plataforma:plano_plataforma_id(nome, preco_mensal)'),
+    supabase.from('empresas').select('id').gte('criado_em', periodo.inicio.toISOString()).lte('criado_em', periodo.fim.toISOString()),
+    // "A receber no período": soma o preço dos planos pagos cuja PRÓXIMA cobrança cai dentro do
+    // período — como o sistema só guarda a próxima data (não um calendário de cobranças
+    // futuras), isso reflete uma única cobrança por empresa, não uma projeção de todo o ano.
+    supabase.from('empresas').select('plano_plataforma:plano_plataforma_id(preco_mensal)').gte('proxima_cobranca_em', periodo.inicio.toISOString()).lte('proxima_cobranca_em', periodo.fim.toISOString())
+  ]);
+
+  if (error || errCadastro || errAReceber) return res.status(500).json({ error: 'Erro ao calcular métricas.' });
 
   const totalEmpresas = empresas.length;
   const porStatus = {};
@@ -191,17 +224,23 @@ router.get('/super-admin/metricas', async (req, res) => {
     porPlano[nomePlano] = (porPlano[nomePlano] || 0) + 1;
 
     // MRR só soma empresas com assinatura ativa e plano pago — trial/inadimplente/suspensa não
-    // representam receita recorrente confirmada.
+    // representam receita recorrente confirmada. É sempre um retrato de AGORA, não do período
+    // filtrado (MRR não é uma métrica "de um mês passado").
     if (e.status_assinatura === 'ativa' && e.plano_plataforma?.preco_mensal > 0) {
       mrr += Number(e.plano_plataforma.preco_mensal);
     }
   }
 
+  const aReceberNoPeriodo = (aReceberRows || []).reduce((soma, e) => soma + (e.plano_plataforma?.preco_mensal > 0 ? Number(e.plano_plataforma.preco_mensal) : 0), 0);
+
   res.json({
+    periodo: { tipo: periodo.tipo, ano: periodo.ano, mes: periodo.mes },
     total_empresas: totalEmpresas,
     mrr: Number(mrr.toFixed(2)),
     empresas_por_status: porStatus,
-    empresas_por_plano: porPlano
+    empresas_por_plano: porPlano,
+    cadastradas_no_periodo: (cadastradasNoPeriodo || []).length,
+    a_receber_no_periodo: Number(aReceberNoPeriodo.toFixed(2))
   });
 });
 
