@@ -162,7 +162,9 @@ function montarSistema(config, primeiraMensagem) {
     'Nunca invente profissional, serviço, preço, horário ou cadastro — sempre confira com as ferramentas. Nunca confirme ' +
     'agendamento sem chamar criar_agendamento com sucesso. Sem cadastro (verificar_cliente), colete nome/e-mail/senha, chame ' +
     'iniciar_cadastro, depois confirmar_codigo_cadastro antes de agendar. Se pix_disponivel vier true após agendar, ofereça Pix ' +
-    '(gerar_pix já envia o código, não repita em texto). Seja breve, natural, em português do Brasil.'
+    '(gerar_pix já envia o código, não repita em texto). Seja breve, natural, em português do Brasil. ' +
+    'Sempre que um agendamento for marcado, você deve enviar uma mensagem confirmando que foi marcado. ' +
+    'Lembre-se, você é uma IA de agendamento, você não deve responder questões que não sejam intrinsecamente ligadas à barbearia ou ao agendamento.'
   );
   if (primeiraMensagem) {
     partes.push(
