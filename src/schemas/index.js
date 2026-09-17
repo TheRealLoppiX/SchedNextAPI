@@ -444,7 +444,10 @@ const superAdminCriarSchema = z.object({
   // LOGADO pra confirmar essa ação, senão um painel deixado aberto/desbloqueado por acidente
   // vira uma porta pra qualquer um criar seu próprio acesso de dono da plataforma (ver
   // routes/superAdmin.js, que compara isso com o hash do req.superAdmin.id).
-  senha_atual: z.string().min(1, 'Confirme sua senha atual para continuar')
+  senha_atual: z.string().min(1, 'Confirme sua senha atual para continuar'),
+  // Opcional — mesmo padrão de foto do resto do sistema (data URI base64 já redimensionada no
+  // navegador, ver sql/2026_super_admins_foto.sql).
+  foto_url: z.string().trim().optional().nullable()
 });
 
 const leadStatusSchema = z.object({

@@ -45,7 +45,7 @@ router.post('/super-admin/login', loginLimiter, validate(superAdminLoginSchema),
 router.get('/super-admin/super-admins', async (req, res) => {
   const { data, error } = await supabase
     .from('super_admins')
-    .select('id, email, ativo, criado_em, criado_por')
+    .select('id, email, ativo, criado_em, criado_por, foto_url')
     .order('criado_em', { ascending: true });
 
   if (error) return res.status(500).json({ error: 'Erro ao listar super admins.' });
@@ -61,7 +61,7 @@ router.get('/super-admin/super-admins', async (req, res) => {
 // de dono da plataforma. Por isso exige a senha de QUEM ESTÁ CRIANDO (não da conta nova) de
 // novo aqui, mesmo já autenticado.
 router.post('/super-admin/super-admins', loginLimiter, validate(superAdminCriarSchema), async (req, res) => {
-  const { email, senha, senha_atual } = req.body;
+  const { email, senha, senha_atual, foto_url } = req.body;
 
   const { data: quemEstaCriando, error: errQuemCria } = await supabase
     .from('super_admins')
@@ -80,8 +80,8 @@ router.post('/super-admin/super-admins', loginLimiter, validate(superAdminCriarS
   const senhaHash = await bcrypt.hash(senha, 12);
   const { data, error } = await supabase
     .from('super_admins')
-    .insert({ email, senha_hash: senhaHash, criado_por: req.superAdmin?.id || null })
-    .select('id, email, ativo, criado_em')
+    .insert({ email, senha_hash: senhaHash, criado_por: req.superAdmin?.id || null, foto_url: foto_url || null })
+    .select('id, email, ativo, criado_em, foto_url')
     .single();
 
   if (error) return res.status(500).json({ error: 'Erro ao criar super admin.' });
