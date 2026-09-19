@@ -11,6 +11,7 @@ const {
   contaReceberBaixaSchema,
   contaReceberBoletoSchema,
   contaReceberEnviarCobrancaSchema,
+  lancamentoEmMassaSchema,
   plataformaConfiguracaoSchema
 } = require('../schemas');
 
@@ -51,6 +52,23 @@ function chaveAgrupamento(isoInstant, agrupamento) {
 
 function formatarDataLocalHoje() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+}
+
+// Dia do mês (fuso de Brasília) de um instante UTC real — usado como âncora de cobrança de uma
+// empresa: o dia em que ela fez o PRIMEIRO pagamento da assinatura da plataforma nunca muda,
+// mesmo que proxima_cobranca_em tenha sido ajustado manualmente depois (carência, correção etc,
+// ver PUT /super-admin/empresas/:id/vencimento em superAdminPlataforma.js).
+function diaLocal(isoInstant) {
+  return Number(new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', day: '2-digit' }).format(new Date(isoInstant)));
+}
+
+// Aplica um dia-âncora (1-31) a uma competência "AAAA-MM", grudando no último dia do mês quando
+// o mês de destino é mais curto (ex: âncora dia 31 numa competência de fevereiro vira 28/29).
+function dataPrevistaPorAncora(diaAncora, competenciaAnoMes) {
+  const [ano, mes] = competenciaAnoMes.split('-').map(Number);
+  const ultimoDiaDoMes = new Date(ano, mes, 0).getDate();
+  const dia = Math.min(diaAncora || 1, ultimoDiaDoMes);
+  return `${ano}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`;
 }
 
 const TIPOS = ['assinatura_plataforma', 'taxa_marketplace'];
@@ -257,9 +275,31 @@ router.delete('/super-admin/contas-pagar/:id', async (req, res) => {
   res.json({ message: 'Conta a pagar excluída.' });
 });
 
+// Data (criado_em) do PRIMEIRO pagamento de assinatura confirmado de cada empresa (ver
+// sql/2026_plataforma_receitas.sql) — âncora da cobrança dela, que nunca muda mesmo que
+// proxima_cobranca_em seja ajustado manualmente depois. Uma query filtrada por empresa_id IN
+// (...), não uma varredura da tabela inteira.
+async function buscarPrimeirosPagamentos(empresaIds) {
+  if (!empresaIds.length) return {};
+  const { data } = await supabase
+    .from('plataforma_receitas')
+    .select('empresa_id, criado_em')
+    .eq('tipo', 'assinatura_plataforma')
+    .in('empresa_id', empresaIds)
+    .order('criado_em', { ascending: true });
+
+  const primeiros = {};
+  for (const r of data || []) {
+    if (!primeiros[r.empresa_id]) primeiros[r.empresa_id] = r.criado_em;
+  }
+  return primeiros;
+}
+
 // Empresas com assinatura de plano pago ativa, pra popular o vínculo rápido de contas a
-// receber com a próxima cobrança já conhecida (empresas.proxima_cobranca_em) sem digitar tudo
-// de novo à mão.
+// receber. dia_ancora é o dia do mês do primeiro pagamento de cada uma (fallback: dia de
+// proxima_cobranca_em, pra empresa sem pagamento confirmado ainda, ex: cortesia por chave) —
+// usado pra calcular a data prevista de qualquer competência (ver dataPrevistaPorAncora acima),
+// em vez de proxima_cobranca_em bruto, que pode ter sido alterado manualmente.
 router.get('/super-admin/contas-receber/empresas-sugeridas', async (req, res) => {
   const { data, error } = await supabase
     .from('empresas')
@@ -268,7 +308,65 @@ router.get('/super-admin/contas-receber/empresas-sugeridas', async (req, res) =>
     .order('proxima_cobranca_em', { ascending: true });
 
   if (error) return res.status(500).json({ error: 'Erro ao buscar empresas.' });
-  res.json(data.filter((e) => Number(e.plano_plataforma?.preco_mensal) > 0));
+  const empresasPagas = data.filter((e) => Number(e.plano_plataforma?.preco_mensal) > 0);
+
+  const primeirosPagamentos = await buscarPrimeirosPagamentos(empresasPagas.map((e) => e.id));
+
+  res.json(empresasPagas.map((e) => ({
+    ...e,
+    dia_ancora: primeirosPagamentos[e.id] ? diaLocal(primeirosPagamentos[e.id]) : (e.proxima_cobranca_em ? diaLocal(e.proxima_cobranca_em) : 1)
+  })));
+});
+
+// Lançamento em massa: cria uma conta a receber pra cada empresa com plano pago ativo que ainda
+// não tem lançamento nessa competência, usando o valor do plano e a data prevista no dia-âncora
+// de cada uma (ver dataPrevistaPorAncora/buscarPrimeirosPagamentos acima) — evita ter que criar
+// uma por uma toda vez que fecha o mês.
+router.post('/super-admin/contas-receber/lancamento-em-massa', validate(lancamentoEmMassaSchema), async (req, res) => {
+  const { competencia } = req.body;
+  const competenciaData = `${competencia}-01`;
+
+  const { data: empresas, error } = await supabase
+    .from('empresas')
+    .select('id, nome, email, status_assinatura, plano_plataforma:plano_plataforma_id(nome, preco_mensal)')
+    .eq('status_assinatura', 'ativa');
+  if (error) return res.status(500).json({ error: 'Erro ao buscar empresas.' });
+
+  const empresasPagas = empresas.filter((e) => Number(e.plano_plataforma?.preco_mensal) > 0);
+  if (!empresasPagas.length) return res.json({ message: 'Nenhuma empresa com plano pago ativo.', criadas: 0, ignoradas: 0 });
+
+  const ids = empresasPagas.map((e) => e.id);
+  const [primeirosPagamentos, { data: existentes, error: errExistentes }] = await Promise.all([
+    buscarPrimeirosPagamentos(ids),
+    supabase.from('contas_receber').select('empresa_id').eq('competencia', competenciaData).in('empresa_id', ids)
+  ]);
+  if (errExistentes) return res.status(500).json({ error: 'Erro ao verificar lançamentos já existentes.' });
+
+  const jaLancadas = new Set((existentes || []).map((c) => c.empresa_id));
+  const linhasNovas = empresasPagas
+    .filter((e) => !jaLancadas.has(e.id))
+    .map((e) => ({
+      empresa_id: e.id,
+      pagador_nome: e.nome,
+      pagador_email: e.email || null,
+      descricao: `Assinatura de plataforma - ${e.plano_plataforma?.nome || ''}`,
+      valor: e.plano_plataforma.preco_mensal,
+      competencia: competenciaData,
+      data_prevista: dataPrevistaPorAncora(primeirosPagamentos[e.id] ? diaLocal(primeirosPagamentos[e.id]) : 1, competencia)
+    }));
+
+  if (!linhasNovas.length) {
+    return res.json({ message: 'Todas as empresas já têm lançamento nessa competência.', criadas: 0, ignoradas: jaLancadas.size });
+  }
+
+  const { data: inseridas, error: errInsercao } = await supabase.from('contas_receber').insert(linhasNovas).select();
+  if (errInsercao) return res.status(500).json({ error: 'Erro ao lançar as contas em massa.' });
+
+  res.json({
+    message: `${inseridas.length} conta(s) lançada(s)${jaLancadas.size ? `, ${jaLancadas.size} já existiam nessa competência` : ''}.`,
+    criadas: inseridas.length,
+    ignoradas: jaLancadas.size
+  });
 });
 
 router.get('/super-admin/contas-receber', async (req, res) => {

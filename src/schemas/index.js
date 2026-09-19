@@ -542,6 +542,12 @@ const contaReceberEnviarCobrancaSchema = z.object({
   mensagem: textoOpcionalNullable
 });
 
+// Mês/ano cru ("AAAA-MM"), sem o transform pro dia 1 que competenciaSchema aplica — o lançamento
+// em massa precisa das partes ano/mês separadas pra calcular a data prevista de cada empresa.
+const lancamentoEmMassaSchema = z.object({
+  competencia: z.string().regex(/^\d{4}-\d{2}$/, 'Competência inválida (use mês/ano)')
+});
+
 // Configuração genérica da plataforma (ver sql/2026_plataforma_configuracoes.sql) — chave/valor
 // livre, então a validação aqui é só de forma, não de conteúdo (cada chave decide seu próprio
 // formato de valor no lugar que a lê).
@@ -650,6 +656,7 @@ module.exports = {
   contaReceberBaixaSchema,
   contaReceberBoletoSchema,
   contaReceberEnviarCobrancaSchema,
+  lancamentoEmMassaSchema,
   plataformaConfiguracaoSchema,
   superAdminEditarSchema,
   planoPlataformaSchema,
