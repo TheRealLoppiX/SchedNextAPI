@@ -483,6 +483,11 @@ const empresaTrocarPlanoSchema = z.object({
 
 const dataSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida');
 const formaPagamentoContaEnum = z.enum(['pix', 'ted', 'boleto', 'dinheiro', 'cartao', 'outro']).optional().nullable();
+// Competência = mês/ano de referência financeira (regime de competência), separado da data de
+// vencimento/pagamento (regime de caixa) — ver sql/2026_contas_competencia.sql. Input do
+// frontend é <input type="month"> ("AAAA-MM"), convertido aqui pro dia 1 do mês pra bater com a
+// coluna DATE do banco.
+const competenciaSchema = z.string().regex(/^\d{4}-\d{2}$/, 'Competência inválida (use mês/ano)').transform((v) => `${v}-01`);
 
 const contaPagarSchema = z.object({
   descricao: z.string().trim().min(1, 'Descrição é obrigatória').max(200),
@@ -495,6 +500,7 @@ const contaPagarSchema = z.object({
   agencia: textoOpcionalNullable,
   conta: textoOpcionalNullable,
   valor: z.coerce.number().min(0, 'Valor não pode ser negativo'),
+  competencia: competenciaSchema,
   data_vencimento: dataSchema,
   observacoes: textoOpcionalNullable
 });
@@ -508,6 +514,7 @@ const contaReceberSchema = z.object({
   pagador_nome: z.string().trim().min(1, 'Nome do pagador é obrigatório').max(150),
   descricao: z.string().trim().min(1, 'Descrição é obrigatória').max(200),
   valor: z.coerce.number().min(0, 'Valor não pode ser negativo'),
+  competencia: competenciaSchema,
   data_prevista: dataSchema,
   forma_pagamento: formaPagamentoContaEnum,
   observacoes: textoOpcionalNullable

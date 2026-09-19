@@ -176,10 +176,11 @@ function resumoContas(linhas, campoValor = 'valor') {
 }
 
 router.get('/super-admin/contas-pagar', async (req, res) => {
-  const { status, categoria, dataInicio, dataFim, busca } = req.query;
+  const { status, categoria, competencia, dataInicio, dataFim, busca } = req.query;
 
   let query = supabase.from('contas_pagar').select('*').order('data_vencimento', { ascending: true });
   if (categoria) query = query.eq('categoria', categoria);
+  if (competencia && /^\d{4}-\d{2}$/.test(competencia)) query = query.eq('competencia', `${competencia}-01`);
   if (dataInicio) query = query.gte('data_vencimento', dataInicio);
   if (dataFim) query = query.lte('data_vencimento', dataFim);
   // Remove vírgula/parênteses antes de interpolar no `.or()` (mesmo cuidado de
@@ -265,13 +266,14 @@ router.get('/super-admin/contas-receber/empresas-sugeridas', async (req, res) =>
 });
 
 router.get('/super-admin/contas-receber', async (req, res) => {
-  const { status, empresa_id, dataInicio, dataFim, busca } = req.query;
+  const { status, empresa_id, competencia, dataInicio, dataFim, busca } = req.query;
 
   let query = supabase
     .from('contas_receber')
     .select('*, empresas(nome)')
     .order('data_prevista', { ascending: true });
   if (empresa_id) query = query.eq('empresa_id', empresa_id);
+  if (competencia && /^\d{4}-\d{2}$/.test(competencia)) query = query.eq('competencia', `${competencia}-01`);
   if (dataInicio) query = query.gte('data_prevista', dataInicio);
   if (dataFim) query = query.lte('data_prevista', dataFim);
   if (busca) {
