@@ -512,6 +512,7 @@ const contaPagarBaixaSchema = z.object({
 const contaReceberSchema = z.object({
   empresa_id: idLikeNullable,
   pagador_nome: z.string().trim().min(1, 'Nome do pagador é obrigatório').max(150),
+  pagador_email: z.string().trim().email('E-mail inválido').optional().nullable().or(z.literal('')),
   descricao: z.string().trim().min(1, 'Descrição é obrigatória').max(200),
   valor: z.coerce.number().min(0, 'Valor não pode ser negativo'),
   competencia: competenciaSchema,
@@ -522,6 +523,31 @@ const contaReceberSchema = z.object({
 
 const contaReceberBaixaSchema = z.object({
   data_recebimento: dataSchema.optional()
+});
+
+// Dados de identificação/endereço exigidos pela API de boleto do Mercado Pago (ver
+// services/mercadopago.js:criarPagamentoBoleto) — gravados na própria conta a receber pra não
+// pedir de novo numa próxima emissão.
+const contaReceberBoletoSchema = z.object({
+  pagador_documento: z.string().trim().regex(/^\d{11}$|^\d{14}$/, 'Informe um CPF (11 dígitos) ou CNPJ (14 dígitos), só números'),
+  pagador_cep: z.string().trim().regex(/^\d{8}$/, 'CEP inválido, só números (8 dígitos)'),
+  pagador_endereco: z.string().trim().min(1, 'Endereço é obrigatório').max(150),
+  pagador_numero: z.string().trim().min(1, 'Número é obrigatório').max(20),
+  pagador_bairro: z.string().trim().min(1, 'Bairro é obrigatório').max(100),
+  pagador_cidade: z.string().trim().min(1, 'Cidade é obrigatória').max(100),
+  pagador_uf: z.string().trim().length(2, 'UF deve ter 2 letras')
+});
+
+const contaReceberEnviarCobrancaSchema = z.object({
+  mensagem: textoOpcionalNullable
+});
+
+// Configuração genérica da plataforma (ver sql/2026_plataforma_configuracoes.sql) — chave/valor
+// livre, então a validação aqui é só de forma, não de conteúdo (cada chave decide seu próprio
+// formato de valor no lugar que a lê).
+const plataformaConfiguracaoSchema = z.object({
+  chave: z.string().trim().min(1).max(100),
+  valor: z.string().trim().max(500).optional().nullable()
 });
 
 // --- chavesAtivacao.js ---
@@ -622,6 +648,9 @@ module.exports = {
   contaPagarBaixaSchema,
   contaReceberSchema,
   contaReceberBaixaSchema,
+  contaReceberBoletoSchema,
+  contaReceberEnviarCobrancaSchema,
+  plataformaConfiguracaoSchema,
   superAdminEditarSchema,
   planoPlataformaSchema,
   chaveAtivacaoCriarSchema,

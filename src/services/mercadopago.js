@@ -98,6 +98,40 @@ async function buscarPagamento({ accessTokenVendedor, paymentId }) {
   return request(`/v1/payments/${paymentId}`, { accessToken: accessTokenVendedor });
 }
 
+// Boleto (bolbradesco) de cobrança avulsa da PLATAFORMA em cima de uma conta a receber (ver
+// routes/superAdminFinanceiro.js) — sempre com o token da própria SchedNext, nunca o de uma
+// empresa. Diferente do Pix acima, a API de boleto do Mercado Pago exige identificação completa
+// do pagador (CPF/CNPJ) e endereço; sem isso a emissão é recusada. date_of_expiration precisa
+// vir como ISO-8601 completo com offset (ex: "2026-10-15T23:59:59-03:00").
+async function criarPagamentoBoleto({ accessToken, valor, descricao, externalReference, dataVencimentoIso, payer }) {
+  const documento = String(payer.documento || '').replace(/\D/g, '');
+  return request('/v1/payments', {
+    method: 'POST',
+    accessToken,
+    idempotencyKey: crypto.randomUUID(),
+    body: {
+      transaction_amount: Number(valor),
+      description: descricao,
+      payment_method_id: 'bolbradesco',
+      external_reference: String(externalReference),
+      date_of_expiration: dataVencimentoIso,
+      payer: {
+        email: payer.email,
+        first_name: payer.nome,
+        identification: { type: documento.length > 11 ? 'CNPJ' : 'CPF', number: documento },
+        address: {
+          zip_code: String(payer.cep || '').replace(/\D/g, ''),
+          street_name: payer.endereco,
+          street_number: payer.numero,
+          neighborhood: payer.bairro,
+          city: payer.cidade,
+          federal_unit: payer.uf
+        }
+      }
+    }
+  });
+}
+
 // Cobrança recorrente (assinatura da plataforma OU do cliente final, ver services/pagamento.js
 // e routes/mercadopago.js). accessToken aqui pode ser o da própria SchedNext (cobrança da
 // plataforma) ou o de uma empresa conectada via OAuth (assinatura do cliente final dela) —
@@ -200,6 +234,7 @@ module.exports = {
   renovarToken,
   criarPagamentoPix,
   buscarPagamento,
+  criarPagamentoBoleto,
   criarPreapproval,
   proximoStartDateValido,
   cancelarPreapproval,

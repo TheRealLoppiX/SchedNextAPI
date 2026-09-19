@@ -1,11 +1,17 @@
 const express = require('express');
 const supabase = require('../config/supabase');
 const validate = require('../middleware/validate');
+const transporter = require('../config/mailer');
+const { emailHtml } = require('../utils/emailTemplate');
+const { criarPagamentoBoleto } = require('../services/mercadopago');
 const {
   contaPagarSchema,
   contaPagarBaixaSchema,
   contaReceberSchema,
-  contaReceberBaixaSchema
+  contaReceberBaixaSchema,
+  contaReceberBoletoSchema,
+  contaReceberEnviarCobrancaSchema,
+  plataformaConfiguracaoSchema
 } = require('../schemas');
 
 const router = express.Router();
@@ -257,7 +263,7 @@ router.delete('/super-admin/contas-pagar/:id', async (req, res) => {
 router.get('/super-admin/contas-receber/empresas-sugeridas', async (req, res) => {
   const { data, error } = await supabase
     .from('empresas')
-    .select('id, nome, status_assinatura, proxima_cobranca_em, plano_plataforma:plano_plataforma_id(nome, preco_mensal)')
+    .select('id, nome, email, status_assinatura, proxima_cobranca_em, plano_plataforma:plano_plataforma_id(nome, preco_mensal)')
     .eq('status_assinatura', 'ativa')
     .order('proxima_cobranca_em', { ascending: true });
 
@@ -341,6 +347,132 @@ router.delete('/super-admin/contas-receber/:id', async (req, res) => {
   const { error } = await supabase.from('contas_receber').delete().eq('id', req.params.id);
   if (error) return res.status(500).json({ error: 'Erro ao excluir a conta a receber.' });
   res.json({ message: 'Conta a receber excluída.' });
+});
+
+// --- Cobrança de verdade (boleto + e-mail) de contas a receber (ver
+// sql/2026_contas_receber_cobranca.sql) — nota fiscal e WhatsApp ficam de fora por enquanto
+// (nota fiscal exige contratar provedor externo; WhatsApp exige uma instância própria da
+// plataforma, ainda não provisionada, ver GET/PUT /super-admin/configuracoes abaixo).
+
+function formatarDataBr(dataStr) {
+  if (!dataStr) return '-';
+  const [ano, mes, dia] = dataStr.split('-');
+  return `${dia}/${mes}/${ano}`;
+}
+
+router.post('/super-admin/contas-receber/:id/gerar-boleto', validate(contaReceberBoletoSchema), async (req, res) => {
+  if (!process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN) {
+    return res.status(503).json({ error: 'Cobrança via Mercado Pago não configurada na plataforma.' });
+  }
+
+  const { data: conta, error: errBusca } = await supabase.from('contas_receber').select('*').eq('id', req.params.id).maybeSingle();
+  if (errBusca) return res.status(500).json({ error: 'Erro ao buscar a conta a receber.' });
+  if (!conta) return res.status(404).json({ error: 'Conta a receber não encontrada.' });
+  if (!conta.pagador_email) return res.status(400).json({ error: 'Preencha o e-mail do pagador antes de gerar o boleto.' });
+
+  // Salva os dados de identificação/endereço na hora, mesmo que a emissão em si falhe lá na
+  // frente — assim o admin não perde o que já digitou numa nova tentativa.
+  await supabase.from('contas_receber').update(req.body).eq('id', conta.id);
+
+  try {
+    const pagamento = await criarPagamentoBoleto({
+      accessToken: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
+      valor: conta.valor,
+      descricao: conta.descricao,
+      externalReference: `conta_receber_${conta.id}`,
+      dataVencimentoIso: `${conta.data_prevista}T23:59:59-03:00`,
+      payer: {
+        email: conta.pagador_email,
+        nome: conta.pagador_nome,
+        documento: req.body.pagador_documento,
+        cep: req.body.pagador_cep,
+        endereco: req.body.pagador_endereco,
+        numero: req.body.pagador_numero,
+        bairro: req.body.pagador_bairro,
+        cidade: req.body.pagador_cidade,
+        uf: req.body.pagador_uf
+      }
+    });
+
+    const { data: atualizada, error } = await supabase
+      .from('contas_receber')
+      .update({
+        mercadopago_payment_id: String(pagamento.id),
+        boleto_url: pagamento.transaction_details?.external_resource_url || null,
+        boleto_codigo_barras: pagamento.barcode?.content || null,
+        boleto_gerado_em: new Date().toISOString(),
+        atualizado_em: new Date().toISOString()
+      })
+      .eq('id', conta.id)
+      .select()
+      .single();
+    if (error) return res.status(500).json({ error: 'Boleto gerado, mas houve um erro ao salvar os dados na conta.' });
+    res.json({ message: 'Boleto gerado com sucesso.', conta: atualizada });
+  } catch (err) {
+    console.error('Erro ao gerar boleto no Mercado Pago:', err.mercadoPagoErrors || err);
+    res.status(502).json({ error: err.message || 'Erro ao gerar o boleto no Mercado Pago.' });
+  }
+});
+
+router.post('/super-admin/contas-receber/:id/enviar-cobranca', validate(contaReceberEnviarCobrancaSchema), async (req, res) => {
+  const { data: conta, error: errBusca } = await supabase.from('contas_receber').select('*').eq('id', req.params.id).maybeSingle();
+  if (errBusca) return res.status(500).json({ error: 'Erro ao buscar a conta a receber.' });
+  if (!conta) return res.status(404).json({ error: 'Conta a receber não encontrada.' });
+  if (!conta.pagador_email) return res.status(400).json({ error: 'Preencha o e-mail do pagador antes de enviar a cobrança.' });
+
+  const linhasBoleto = conta.boleto_url
+    ? `<p style="margin: 12px 0;"><a href="${conta.boleto_url}" style="color:#2554eb;">Clique aqui para ver o boleto</a></p>
+       ${conta.boleto_codigo_barras ? `<p style="margin:0;font-size:13px;color:#4b5563;">Linha digitável: <strong>${conta.boleto_codigo_barras}</strong></p>` : ''}`
+    : '';
+
+  try {
+    await transporter.sendMail({
+      to: conta.pagador_email,
+      subject: `Cobrança SchedNext - ${conta.descricao}`,
+      html: emailHtml({
+        titulo: `Olá, ${conta.pagador_nome}!`,
+        mensagemHtml: `
+          <p style="margin: 0 0 4px;">${req.body.mensagem || 'Segue a cobrança referente a:'} <strong>${conta.descricao}</strong></p>
+          <p style="margin: 12px 0; font-size: 15px;"><strong>Valor:</strong> R$ ${Number(conta.valor).toFixed(2)}<br><strong>Vencimento:</strong> ${formatarDataBr(conta.data_prevista)}</p>
+          ${linhasBoleto}
+        `
+      })
+    });
+  } catch (err) {
+    console.error('Erro ao enviar e-mail de cobrança:', err);
+    return res.status(502).json({ error: 'Não foi possível enviar o e-mail de cobrança.' });
+  }
+
+  const { data: atualizada, error } = await supabase
+    .from('contas_receber')
+    .update({ cobranca_enviada_em: new Date().toISOString() })
+    .eq('id', conta.id)
+    .select()
+    .single();
+  if (error) return res.status(500).json({ error: 'E-mail enviado, mas houve um erro ao registrar o envio.' });
+
+  res.json({ message: 'Cobrança enviada por e-mail.', conta: atualizada });
+});
+
+// --- Configurações gerais da plataforma (ver sql/2026_plataforma_configuracoes.sql) —
+// cadastro genérico de chave/valor, hoje usado pro número de WhatsApp próprio da SchedNext
+// (ainda sem envio automático, só registro pra quando essa instância for provisionada).
+
+router.get('/super-admin/configuracoes', async (req, res) => {
+  const { data, error } = await supabase.from('plataforma_configuracoes').select('chave, valor');
+  if (error) return res.status(500).json({ error: 'Erro ao buscar configurações.' });
+  res.json(Object.fromEntries(data.map((c) => [c.chave, c.valor])));
+});
+
+router.put('/super-admin/configuracoes', validate(plataformaConfiguracaoSchema), async (req, res) => {
+  const { chave, valor } = req.body;
+  const { data, error } = await supabase
+    .from('plataforma_configuracoes')
+    .upsert({ chave, valor: valor || null, atualizado_em: new Date().toISOString() }, { onConflict: 'chave' })
+    .select()
+    .single();
+  if (error) return res.status(500).json({ error: 'Erro ao salvar configuração.' });
+  res.json({ message: 'Configuração salva.', configuracao: data });
 });
 
 module.exports = router;

@@ -718,9 +718,44 @@ router.post('/webhooks/mercadopago', async (req, res) => {
     .maybeSingle();
 
   if (!agendamento) {
-    // Não é Pix de atendimento — tenta como Pix de mensalidade de assinatura de cliente final
-    // (ver services/cobrancaAssinatura.js). Mesmo princípio de nunca confiar só no payload: só
-    // marca pago depois de reconfirmar direto na API.
+    // Não é Pix de atendimento — tenta como boleto de conta a receber da PLATAFORMA (admin
+    // absoluto, ver routes/superAdminFinanceiro.js). Token é sempre o da própria SchedNext, nunca
+    // o de uma empresa, já que quem gera esse boleto é a plataforma cobrando a empresa.
+    const { data: contaReceber } = await supabase
+      .from('contas_receber')
+      .select('id, status')
+      .eq('mercadopago_payment_id', dataId)
+      .maybeSingle();
+
+    if (contaReceber) {
+      if (contaReceber.status === 'pendente' && process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN) {
+        try {
+          const pagamento = await buscarPagamento({
+            accessTokenVendedor: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
+            paymentId: dataId
+          });
+          if (pagamento.status === 'approved') {
+            // Data local de Brasília (mesmo padrão de routes/superAdminFinanceiro.js), não a
+            // data UTC do servidor — evita gravar o dia seguinte pra pagamentos confirmados de
+            // madrugada.
+            const hojeLocal = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+            await supabase.from('contas_receber').update({
+              status: 'recebido',
+              data_recebimento: hojeLocal,
+              forma_pagamento: 'boleto',
+              atualizado_em: new Date().toISOString()
+            }).eq('id', contaReceber.id);
+          }
+        } catch (err) {
+          console.error('Erro ao reconfirmar boleto de conta a receber via webhook:', err);
+        }
+      }
+      return res.json({ recebido: true });
+    }
+
+    // Também não é boleto de conta a receber — tenta como Pix de mensalidade de assinatura de
+    // cliente final (ver services/cobrancaAssinatura.js). Mesmo princípio de nunca confiar só no
+    // payload: só marca pago depois de reconfirmar direto na API.
     const { data: cobranca } = await supabase
       .from('assinatura_cobrancas')
       .select('id, usuario_id, empresa_id, status')
