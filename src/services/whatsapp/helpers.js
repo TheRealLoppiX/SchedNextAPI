@@ -153,10 +153,17 @@ async function horariosDisponiveis(empresaId, barbeiroId, dataStr) {
 
   const horasOcupadas = new Set((ocupados || []).map((a) => new Date(a.data_hora).toISOString().slice(11, 16)));
 
+  // Se dataStr é hoje (horário de Brasília), descarta os slots cujo início já passou — antes só
+  // filtrava horário ocupado, então às 19h de hoje o bot ainda oferecia (e chegava a marcar) um
+  // horário das 12h do mesmo dia.
+  const agora = paraConvencaoDoBanco(new Date());
+  const minutoAgora = dataStr === dataLocalISO(agora) ? agora.getUTCHours() * 60 + agora.getUTCMinutes() : -1;
+
   const [horaAbre, minAbre] = horarioDia.abre.split(':').map(Number);
   const [horaFecha, minFecha] = horarioDia.fecha.split(':').map(Number);
   const slots = [];
   for (let min = horaAbre * 60 + minAbre; min < horaFecha * 60 + minFecha; min += 30) {
+    if (min <= minutoAgora) continue;
     const hStr = `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
     if (!horasOcupadas.has(hStr)) slots.push(hStr);
   }

@@ -5,6 +5,7 @@ const { apiPublicaAgendamentoSchema } = require('../schemas');
 const { autenticarApiKey } = require('../middleware/apiKeyAuth');
 const { apiPublicaLimiter } = require('../middleware/rateLimiters');
 const { limiteAgendamentosMesAtingido } = require('../utils/limitesPlano');
+const { paraConvencaoDoBanco } = require('../utils/horarioBrasilia');
 
 const router = express.Router();
 
@@ -71,10 +72,18 @@ router.get('/api/v1/disponibilidade', async (req, res) => {
     return { inicio, fim };
   });
 
+  // Se `data` é hoje (horário de Brasília), descarta os slots cujo início já passou — mesmo
+  // ajuste feito em services/whatsapp/helpers.js pro bot, pra não oferecer horário de um
+  // passado do mesmo dia via API pública.
+  const agora = paraConvencaoDoBanco(new Date());
+  const hojeStr = `${agora.getUTCFullYear()}-${String(agora.getUTCMonth() + 1).padStart(2, '0')}-${String(agora.getUTCDate()).padStart(2, '0')}`;
+  const minutoAgora = data === hojeStr ? agora.getUTCHours() * 60 + agora.getUTCMinutes() : -1;
+
   const [horaAbre, minAbre] = horarioDia.abre.split(':').map(Number);
   const [horaFecha, minFecha] = horarioDia.fecha.split(':').map(Number);
   const slots = [];
   for (let min = horaAbre * 60 + minAbre; min < horaFecha * 60 + minFecha; min += 30) {
+    if (min <= minutoAgora) continue;
     const hStr = `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
     const inicioSlot = new Date(`${data}T${hStr}:00Z`);
     const ocupado = intervalosOcupados.some((iv) => inicioSlot >= iv.inicio && inicioSlot < iv.fim);
