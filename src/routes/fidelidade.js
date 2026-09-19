@@ -2,6 +2,7 @@ const express = require('express');
 const supabase = require('../config/supabase');
 const validate = require('../middleware/validate');
 const { acaoFidelidadeSchema, acaoStatusSchema } = require('../schemas');
+const { notificarNovaCampanhaFidelidade } = require('../services/fidelidade');
 
 const router = express.Router();
 
@@ -23,7 +24,7 @@ router.post('/admin/acoes', validate(acaoFidelidadeSchema), async (req, res) => 
   // Desativa as outras para garantir que só 1 fique ativa por vez ao criar uma nova
   await supabase.from('campanhas_fidelidade').update({ ativa: false }).eq('empresa_id', empresa_id);
 
-  const { error } = await supabase.from('campanhas_fidelidade').insert({
+  const { data: novaCampanha, error } = await supabase.from('campanhas_fidelidade').insert({
     empresa_id,
     nome,
     data_inicio,
@@ -33,9 +34,16 @@ router.post('/admin/acoes', validate(acaoFidelidadeSchema), async (req, res) => 
     premio_descritivo,
     tipo_premio: tipo_premio || 'servico',
     ativa: true
-  });
+  }).select('*').single();
 
   if (error) return res.status(500).json(error);
+
+  // Fire-and-forget de propósito (ver services/fidelidade.js) — não faz sentido o admin esperar
+  // o envio de e-mail/WhatsApp pra cada cliente antes de ver a campanha criada.
+  notificarNovaCampanhaFidelidade(empresa_id, novaCampanha).catch((err) => {
+    console.error('Erro ao disparar notificação de nova campanha de fidelidade:', err);
+  });
+
   res.json({ message: 'Ação criada e ativada com sucesso!' });
 });
 

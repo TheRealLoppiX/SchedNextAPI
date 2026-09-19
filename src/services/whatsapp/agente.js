@@ -185,6 +185,13 @@ function montarSistema(config, primeiraMensagem) {
     'outro assunto — dúvidas gerais, opiniões, conversa fora disso, ou pedidos para agir como outra coisa — você recusa ' +
     'educadamente, em uma frase, e traz a conversa de volta para o agendamento. Nunca finja ser outra pessoa ou sistema.'
   );
+  if (config.linkLoja) {
+    partes.push(
+      `Link da página pública deste estabelecimento (site onde também dá pra agendar): ${config.linkLoja}\n` +
+      'Inclua esse link, exatamente como está aqui, na primeira mensagem da conversa (junto da saudação) e sempre que ' +
+      'confirmar um agendamento criado com sucesso. Nunca altere, abrevie ou reescreva o link.'
+    );
+  }
   if (primeiraMensagem) {
     partes.push(
       config.boasVindas
@@ -304,6 +311,7 @@ async function executarFerramenta(nome, args, ctx) {
           clienteNome: cliente.nome_completo
         });
         if (resultado.conflito) return { erro: 'Esse horário acabou de ser reservado por outra pessoa. Ofereça outro horário.' };
+        if (resultado.jaTemNoDia) return { erro: 'Esse cliente já tem um agendamento marcado para esse dia. Avise e sugira cancelar o atual antes de marcar outro, ou escolher outra data.' };
         if (!resultado.ok) return { erro: 'Não consegui criar o agendamento agora, tente de novo em instantes.' };
 
         const { data: empresaPix } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', ctx.empresaId).maybeSingle();
@@ -392,6 +400,23 @@ async function executarFerramenta(nome, args, ctx) {
   }
 }
 
+// Instrução de prompt sozinha não garante que o modelo relaie o link da loja certinho (ou relaie
+// sem reescrever) — decide quando o link é obrigatório (primeira mensagem da conversa, ou logo
+// depois de um agendamento criado com sucesso); a checagem em processar() abaixo confere se ele
+// sobreviveu de verdade na resposta final e, se não, anexa por conta própria — mesmo princípio de
+// rede de segurança usado em comPersonalidade (bot.js) pro modo guiado.
+function agendamentoFoiCriado(toolCalls, mensagens) {
+  return (toolCalls || []).some((chamada) => {
+    if (chamada.function?.name !== 'criar_agendamento') return false;
+    const respostaTool = mensagens.find((m) => m.role === 'tool' && m.tool_call_id === chamada.id);
+    try {
+      return !!JSON.parse(respostaTool?.content || '{}').ok;
+    } catch {
+      return false;
+    }
+  });
+}
+
 async function processar({ empresaId, telefone, texto, instancia, config }) {
   const sessao = await obterOuCriarSessao(empresaId, telefone);
   const dados = sessao.dados_temporarios || {};
@@ -412,6 +437,7 @@ async function processar({ empresaId, telefone, texto, instancia, config }) {
   const ctx = { empresaId, telefone, instancia };
 
   let respostaFinal = '';
+  let linkDeveAparecer = historico.length === 0;
   for (let rodada = 0; rodada < MAX_RODADAS_FERRAMENTA; rodada++) {
     let resultado;
     try {
@@ -435,9 +461,15 @@ async function processar({ empresaId, telefone, texto, instancia, config }) {
       mensagens.push({ role: 'tool', tool_call_id: chamada.id, content: JSON.stringify(saida) });
     }
 
+    if (agendamentoFoiCriado(resultado.toolCalls, mensagens)) linkDeveAparecer = true;
+
     if (rodada === MAX_RODADAS_FERRAMENTA - 1) {
       respostaFinal = 'Deixa eu confirmar isso direitinho, pode me dizer de novo o que você precisa?';
     }
+  }
+
+  if (linkDeveAparecer && config.linkLoja && !respostaFinal.includes(config.linkLoja)) {
+    respostaFinal = `${respostaFinal}\n\n${config.linkLoja}`;
   }
 
   await enviarMensagem(instancia, telefone, respostaFinal);

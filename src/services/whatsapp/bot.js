@@ -5,6 +5,7 @@ const { enviarMensagem, enviarImagem } = require('./provider');
 const { criarPagamentoPix } = require('../mercadopago');
 const { limiteAgendamentosMesAtingido, obterTaxaMarketplace } = require('../../utils/limitesPlano');
 const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
+const { montarUrlTenant } = require('../../utils/tenantContext');
 const { gerarTexto, estaConfigurado: iaConfigurada, MODELOS_CLASSIFICACAO } = require('../groq');
 const {
   EMAIL_REGEX,
@@ -74,7 +75,7 @@ async function resolverIntencaoGlobal(msg, msgLower, { atalhosNumericos = false 
 async function obterConfigBot(empresaId) {
   const { data } = await supabase
     .from('empresas')
-    .select('whatsapp_bot_modo, whatsapp_bot_nome, whatsapp_bot_personalidade, whatsapp_bot_boas_vindas, whatsapp_bot_temperatura, plano_plataforma:plano_plataforma_id(permite_ia)')
+    .select('slug, dominio_customizado, dominio_verificado, whatsapp_bot_modo, whatsapp_bot_nome, whatsapp_bot_personalidade, whatsapp_bot_boas_vindas, whatsapp_bot_temperatura, plano_plataforma:plano_plataforma_id(permite_ia)')
     .eq('id', empresaId)
     .maybeSingle();
 
@@ -85,7 +86,11 @@ async function obterConfigBot(empresaId) {
     nome: permiteIa ? (data?.whatsapp_bot_nome || null) : null,
     personalidade: permiteIa ? (data?.whatsapp_bot_personalidade || null) : null,
     boasVindas: data?.whatsapp_bot_boas_vindas || null,
-    temperatura: data?.whatsapp_bot_temperatura != null ? Number(data.whatsapp_bot_temperatura) : 0.6
+    temperatura: data?.whatsapp_bot_temperatura != null ? Number(data.whatsapp_bot_temperatura) : 0.6,
+    // Link da página pública da empresa (subdomínio ou domínio próprio verificado, ver
+    // utils/tenantContext.js) — usado na saudação inicial e na confirmação de agendamento, pra
+    // quem prefere terminar/ver tudo pelo site em vez de continuar no WhatsApp.
+    linkLoja: data ? montarUrlTenant(data) : null
   };
 }
 
@@ -98,9 +103,19 @@ async function obterConfigBot(empresaId) {
 async function comPersonalidade(texto, config) {
   if (!config.personalidade || !iaConfigurada() || /^\s*\d+[.)]\s/m.test(texto)) return texto;
   try {
-    const sistema = `Você é${config.nome ? ` ${config.nome},` : ''} assistente virtual de agendamento de um estabelecimento que usa o SchedNext, respondendo por WhatsApp. Personalidade definida pelo dono do negócio: ${config.personalidade}\n\nReescreva a MENSAGEM abaixo mantendo exatamente o mesmo significado e as mesmas informações — nunca invente, remova ou altere dados, valores, datas, horários, nomes ou emojis de status (✅❌). Ajuste só o tom/estilo. Responda só com a mensagem final, sem aspas, sem comentários.`;
+    const sistema = `Você é${config.nome ? ` ${config.nome},` : ''} assistente virtual de agendamento de um estabelecimento que usa o SchedNext, respondendo por WhatsApp. Personalidade definida pelo dono do negócio: ${config.personalidade}\n\nReescreva a MENSAGEM abaixo mantendo exatamente o mesmo significado e as mesmas informações — nunca invente, remova ou altere dados, valores, datas, horários, nomes, links/URLs ou emojis de status (✅❌). Um link precisa sair IDÊNTICO, caractere por caractere. Ajuste só o tom/estilo. Responda só com a mensagem final, sem aspas, sem comentários.`;
     const reescrita = await gerarTexto({ sistema, prompt: texto, maxTokens: 350, temperatura: config.temperatura });
-    return reescrita || texto;
+    if (!reescrita) return texto;
+
+    // Rede de segurança pros links (mensagem de boas-vindas e confirmação de agendamento, ver
+    // config.linkLoja em obterConfigBot): em vez de só confiar na instrução acima, confere que
+    // todo link presente no texto original sobreviveu IDÊNTICO na reescrita — instrução de prompt
+    // sozinha não é garantia, e um link quebrado/alterado pelo "tom" da IA manda o cliente pra
+    // lugar nenhum.
+    const links = texto.match(/https?:\/\/\S+/g) || [];
+    if (links.some((link) => !reescrita.includes(link))) return texto;
+
+    return reescrita;
   } catch (err) {
     console.error('Erro ao aplicar personalidade do bot (Groq):', err);
     return texto;
@@ -203,9 +218,12 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   }
 
   // A saudação ("Olá! 👋") é customizável por empresa (whatsapp_bot_boas_vindas); o resto do menu
-  // continua fixo, já que é uma lista numerada (ver comPersonalidade acima).
+  // continua fixo, já que é uma lista numerada (ver comPersonalidade acima). O link da loja entra
+  // aqui (não numa linha numerada) porque quem prefere terminar pelo site precisa saber que a
+  // opção existe logo de cara, sem precisar perguntar.
   const saudacao = config.boasVindas || 'Olá!';
-  const MENSAGEM_MENU = `${saudacao} O que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.`;
+  const linkLojaTexto = config.linkLoja ? ` Prefere marcar direto pelo site? ${config.linkLoja}` : '';
+  const MENSAGEM_MENU = `${saudacao} O que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.${linkLojaTexto}`;
 
   // "menu" digitado explicitamente sempre mostra o menu, em qualquer estado — é um pedido
   // direto, não faz sentido reinterpretar via IA.
@@ -542,6 +560,12 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sess
     return;
   }
 
+  if (resultado.jaTemNoDia) {
+    await enviarMensagem(instancia, telefone, await comPersonalidade('Você já tem um agendamento marcado para esse dia. Cancele o atual antes de marcar outro, ou escolha outra data. Digite *MENU* para ver as opções.', config));
+    await salvarSessao(sessao, 'inicio', {});
+    return;
+  }
+
   if (!resultado.ok) {
     console.error('Erro ao criar agendamento via WhatsApp:', resultado.erro);
     await enviarMensagem(instancia, telefone, await comPersonalidade('Não consegui concluir o agendamento agora. Tente novamente em instantes.', config));
@@ -549,7 +573,8 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sess
     return;
   }
 
-  const confirmacao = `Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}`;
+  const confirmacao = `Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}` +
+    (config.linkLoja ? `\n\nAcompanhe pelo site: ${config.linkLoja}` : '');
 
   // Oferece adiantar o pagamento via Pix só quando a empresa tem Mercado Pago conectado (ver
   // routes/mercadopago.js) — sem conta conectada não tem pra onde gerar a cobrança.

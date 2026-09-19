@@ -1,16 +1,35 @@
+const crypto = require('crypto');
 const express = require('express');
 const supabase = require('../config/supabase');
 const { processarMensagem } = require('../services/whatsapp/bot');
+const { whatsappWebhookLimiter } = require('../middleware/rateLimiters');
 
 const router = express.Router();
 
+// Compara em tempo constante pra não vazar o segredo por timing (quanto mais caracteres batem
+// no início, mais devagar uma comparação ingênua com === responde) — mesmo cuidado que já existe
+// pra outros segredos do projeto. Tamanhos diferentes nunca são iguais, e timingSafeEqual exige
+// buffers do mesmo tamanho pra não lançar exceção.
+function segredoValido(recebido) {
+  const esperado = process.env.EVOLUTION_WEBHOOK_SECRET;
+  if (!esperado || !recebido || recebido.length !== esperado.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(recebido), Buffer.from(esperado));
+}
+
 // Recebe eventos do Evolution API (self-hosted, ver services/whatsapp/provider.js). Diferente
-// da Meta, não tem handshake de verificação por GET: o webhook é registrado direto via chamada
-// à API do Evolution (POST /webhook/set/{instance}) quando a instância é criada, então só existe
-// a rota de recebimento (POST) mesmo.
-router.post('/whatsapp/webhook', async (req, res) => {
-  // Sempre responde 200 rápido, que é o esperado por qualquer provedor de webhook, mesmo que o
-  // processamento abaixo não gere resposta (evita retentativas desnecessárias).
+// da Meta, não tem handshake de verificação por GET nem assinatura de payload — o webhook é
+// registrado com um segredo embutido na própria URL (?secret=..., ver urlWebhookComSegredo em
+// provider.js) quando a instância é criada. Sem essa checagem, esta rota era pública de verdade:
+// qualquer um podia forjar um POST com `instance` = slug de qualquer empresa (público, é a URL
+// do site dela) e `remoteJid` = telefone de qualquer cliente, e o bot tratava como mensagem real
+// daquele cliente — dava pra ver/cancelar agendamento alheio, criar cadastro vinculado ao
+// telefone de outra pessoa, e brute-forçar o código de confirmação de 6 dígitos sem nem precisar
+// passar por um WhatsApp de verdade.
+router.post('/whatsapp/webhook', whatsappWebhookLimiter, async (req, res) => {
+  if (!segredoValido(req.query?.secret)) return res.sendStatus(401);
+
+  // Sempre responde 200 rápido a partir daqui, que é o esperado por qualquer provedor de
+  // webhook, mesmo que o processamento abaixo não gere resposta (evita retentativas desnecessárias).
   res.sendStatus(200);
 
   try {

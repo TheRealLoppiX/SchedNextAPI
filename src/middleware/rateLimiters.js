@@ -45,4 +45,19 @@ const codigoLimiter = rateLimit({
   message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' }
 });
 
-module.exports = { loginLimiter, cadastroEmpresaLimiter, cadastroClienteLimiter, apiPublicaLimiter, codigoLimiter };
+// Defesa em profundidade pro webhook do WhatsApp (ver routes/whatsapp.js): a validação do
+// ?secret já barra quem não conhece o segredo, mas isso continua sendo o único endpoint público
+// da API sem JWT nem chave de API — um limite generoso por IP evita que a instância da Evolution
+// (ou um segredo eventualmente vazado) consiga martelar o servidor sem controle nenhum. O teto é
+// alto de propósito: uma única VPS Evolution encaminha a conversa em tempo real de TODAS as
+// empresas conectadas na plataforma, então o tráfego legítimo já é naturalmente mais alto que os
+// outros limitadores acima.
+const whatsappWebhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas requisições.' }
+});
+
+module.exports = { loginLimiter, cadastroEmpresaLimiter, cadastroClienteLimiter, apiPublicaLimiter, codigoLimiter, whatsappWebhookLimiter };

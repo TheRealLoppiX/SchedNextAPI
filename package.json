@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node scripts/check-syntax.js",
+    "reregistrar-webhooks-whatsapp": "node scripts/reregistrar-webhooks-whatsapp.js"
   },
   "keywords": [],
   "author": "",

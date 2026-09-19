@@ -176,6 +176,24 @@ async function horariosDisponiveis(empresaId, barbeiroId, dataStr) {
 // confirmados pro mesmo slot (não há UNIQUE(barbeiro_id, data_hora) no banco). Compartilhada pelos
 // dois modos do bot (guiado chama direto; livre chama via tool "criar_agendamento" no agente).
 async function inserirAgendamento({ empresaId, usuarioId, barbeiroId, dataHora, servicoValor, servicoDuracao, clienteNome }) {
+  // Mesma regra de "um agendamento por dia" já aplicada em POST /agendar (routes/agendamentos.js)
+  // pro site — faltava só aqui, então o bot deixava o mesmo cliente marcar vários horários no
+  // mesmo dia sem limite nenhum. usuario_id já é implicitamente escopado a uma empresa (cada
+  // cliente pertence a uma só), então não precisa filtrar por empresaId de novo aqui.
+  if (usuarioId) {
+    const diaISO = dataHora.slice(0, 10);
+    const { data: jaTemNoDia } = await supabase
+      .from('agendamentos')
+      .select('id')
+      .eq('usuario_id', usuarioId)
+      .gte('data_hora', `${diaISO}T00:00:00`)
+      .lte('data_hora', `${diaISO}T23:59:59`)
+      .neq('status', 'cancelado')
+      .maybeSingle();
+
+    if (jaTemNoDia) return { ok: false, jaTemNoDia: true };
+  }
+
   const { data: conflito } = await supabase
     .from('agendamentos')
     .select('id')

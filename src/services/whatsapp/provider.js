@@ -83,12 +83,23 @@ async function enviarImagem(instancia, telefone, base64, legenda) {
   return { enviado: true, id: dados.key?.id };
 }
 
+// URL do webhook com o segredo compartilhado embutido como query string (ver EVOLUTION_WEBHOOK_SECRET
+// e a validação em routes/whatsapp.js). Query string em vez de header customizado de propósito: a
+// Evolution só recebe essa URL pronta e faz o POST pra ela, então isso funciona garantido
+// independente da versão da Evolution suportar (ou não) um campo de headers customizados no
+// webhook — não dá pra confirmar isso sem testar contra a instância real de produção.
+function urlWebhookComSegredo() {
+  const backendUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 4000}`;
+  if (!process.env.EVOLUTION_WEBHOOK_SECRET) {
+    throw new Error('EVOLUTION_WEBHOOK_SECRET não configurada — obrigatório antes de registrar o webhook do WhatsApp.');
+  }
+  return `${backendUrl}/whatsapp/webhook?secret=${encodeURIComponent(process.env.EVOLUTION_WEBHOOK_SECRET)}`;
+}
+
 // Cria a instância na Evolution API pra uma empresa e já registra o webhook de recebimento
 // (ver routes/whatsapp.js). `qrcode: true` faz a Evolution já devolver o QR Code de pareamento
 // na própria resposta de criação, sem precisar de uma segunda chamada.
 async function criarInstancia(instancia) {
-  const backendUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 4000}`;
-
   const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/instance/create`, {
     method: 'POST',
     headers: headers(),
@@ -100,12 +111,29 @@ async function criarInstancia(instancia) {
       // -> "MESSAGES_UPSERT") antes de checar se está na lista de eventos inscritos do
       // webhook — registrar em minúsculo/com ponto faz essa checagem nunca bater, e o
       // disparo é pulado em silêncio (sem erro, sem log, sem retry).
-      webhook: { url: `${backendUrl}/whatsapp/webhook`, events: ['MESSAGES_UPSERT'] },
+      webhook: { url: urlWebhookComSegredo(), events: ['MESSAGES_UPSERT'] },
     }),
   });
 
   const dados = await resposta.json();
   if (!resposta.ok) throw new Error(dados?.response?.message?.[0] || dados?.message || 'Erro ao criar instância no Evolution API.');
+  return dados;
+}
+
+// Reemite a configuração de webhook de uma instância JÁ conectada, sem exigir escanear QR Code de
+// novo — necessário depois de girar EVOLUTION_WEBHOOK_SECRET, ou pra migrar uma instância criada
+// antes desse segredo existir. Endpoint separado da Evolution (POST /webhook/set/:instance),
+// mesmo formato de corpo usado em /instance/create.
+async function atualizarWebhook(instancia) {
+  const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/webhook/set/${instancia}`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({
+      webhook: { url: urlWebhookComSegredo(), events: ['MESSAGES_UPSERT'] },
+    }),
+  });
+  const dados = await resposta.json();
+  if (!resposta.ok) throw new Error(dados?.response?.message?.[0] || dados?.message || 'Erro ao atualizar webhook no Evolution API.');
   return dados;
 }
 
@@ -153,4 +181,4 @@ async function removerInstancia(instancia) {
   }
 }
 
-module.exports = { estaConfigurado, enviarMensagem, enviarImagem, criarInstancia, obterQrCode, obterStatusConexao, removerInstancia };
+module.exports = { estaConfigurado, enviarMensagem, enviarImagem, criarInstancia, atualizarWebhook, obterQrCode, obterStatusConexao, removerInstancia };

@@ -1,0 +1,34 @@
+name: CI
+
+# Roda em todo push e pull request pras branches que importam (main e dev) — não em qualquer
+# branch de rascunho, pra não gastar minuto de Actions à toa.
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  backend:
+    name: Backend — instalar e verificar
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # npm ci (não npm install) usa exatamente o que está no package-lock.json — falha se o
+      # lockfile estiver desatualizado em vez de silenciosamente instalar outra versão.
+      - name: Instalar dependências
+        run: npm ci
+
+      # O projeto não tem suite de testes automatizados; "npm test" aqui roda um checador de
+      # sintaxe (scripts/check-syntax.js) em todo arquivo .js do backend — pega erro de sintaxe
+      # (parêntese/chave faltando, import quebrado, etc.) antes de chegar no Render.
+      - name: Verificar sintaxe
+        run: npm test

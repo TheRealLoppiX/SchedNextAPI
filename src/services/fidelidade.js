@@ -91,4 +91,63 @@ async function verificarEDispararPremioFidelidade(usuarioId, empresaId) {
   }
 }
 
-module.exports = { verificarEDispararPremioFidelidade };
+// Notifica todos os clientes da empresa sobre uma campanha de fidelidade recém-criada (ver POST
+// /admin/acoes em routes/fidelidade.js). Fire-and-forget de propósito — o caller não faz await
+// nisso, pra criar a campanha não ficar esperando o envio de e-mail/WhatsApp pra centenas de
+// clientes antes de responder ao admin. Sequencial (não Promise.all), mesmo motivo do cron de
+// lembretes (cron/lembretes.js): não afogar a Evolution API/SMTP com um monte de chamada de uma
+// vez só.
+async function notificarNovaCampanhaFidelidade(empresaId, campanha) {
+  try {
+    const { data: clientes } = await supabase
+      .from('usuarios')
+      .select('id, nome_completo, email, telefone')
+      .eq('empresa_id', empresaId)
+      .eq('tipo', 'cliente')
+      .eq('ativo', true);
+
+    if (!clientes || clientes.length === 0) return;
+
+    const { data: empresa } = await supabase.from('empresas').select('nome, whatsapp_phone_number_id').eq('id', empresaId).maybeSingle();
+    const nomeEmpresa = empresa?.nome || 'Seu estabelecimento';
+    const permiteBot = await permiteWhatsappBot(empresaId);
+
+    const metaTexto = `${campanha.cortes_necessarios} atendimento${campanha.cortes_necessarios === 1 ? '' : 's'}`;
+    const periodoTexto = `${campanha.data_inicio.split('-').reverse().join('/')} até ${campanha.data_fim.split('-').reverse().join('/')}`;
+    const premioTexto = campanha.premio_descritivo || 'uma recompensa especial';
+
+    for (const cliente of clientes) {
+      try {
+        const primeiroNome = (cliente.nome_completo || '').split(' ')[0] || 'Cliente';
+
+        if (cliente.email) {
+          await transporter.sendMail({
+            to: cliente.email,
+            subject: `${nomeEmpresa} tem uma campanha nova: ${campanha.nome}`,
+            html: emailHtml({
+              titulo: `Novidade da ${nomeEmpresa}!`,
+              mensagemHtml: `
+                <p style="margin: 0 0 4px;">Olá, ${primeiroNome}! A campanha <strong>${campanha.nome}</strong> já está valendo, de ${periodoTexto}.</p>
+                <p style="margin: 12px 0;">Complete ${metaTexto} nesse período e ganhe: <strong>${premioTexto}</strong>.</p>
+              `
+            })
+          });
+        }
+
+        if (cliente.telefone && permiteBot) {
+          await enviarMensagem(
+            empresa?.whatsapp_phone_number_id,
+            `55${cliente.telefone.replace(/\D/g, '')}`,
+            `${nomeEmpresa} tem uma campanha nova: "${campanha.nome}"! Complete ${metaTexto} entre ${periodoTexto} e ganhe ${premioTexto}.`
+          );
+        }
+      } catch (err) {
+        console.error(`Erro ao notificar cliente ${cliente.id} sobre nova campanha de fidelidade:`, err);
+      }
+    }
+  } catch (err) {
+    console.error('Erro ao notificar clientes sobre nova campanha de fidelidade:', err);
+  }
+}
+
+module.exports = { verificarEDispararPremioFidelidade, notificarNovaCampanhaFidelidade };
