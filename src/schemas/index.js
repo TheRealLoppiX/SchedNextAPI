@@ -479,6 +479,44 @@ const empresaTrocarPlanoSchema = z.object({
   plano_plataforma_id: idLike
 });
 
+// --- superAdminFinanceiro.js (contas a pagar/receber, ver sql/2026_contas_pagar_receber.sql) ---
+
+const dataSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida');
+const formaPagamentoContaEnum = z.enum(['pix', 'ted', 'boleto', 'dinheiro', 'cartao', 'outro']).optional().nullable();
+
+const contaPagarSchema = z.object({
+  descricao: z.string().trim().min(1, 'Descrição é obrigatória').max(200),
+  categoria: textoOpcionalNullable,
+  beneficiario_nome: z.string().trim().min(1, 'Nome do beneficiário é obrigatório').max(150),
+  beneficiario_documento: textoOpcionalNullable,
+  forma_pagamento: formaPagamentoContaEnum,
+  chave_pix: textoOpcionalNullable,
+  banco: textoOpcionalNullable,
+  agencia: textoOpcionalNullable,
+  conta: textoOpcionalNullable,
+  valor: z.coerce.number().min(0, 'Valor não pode ser negativo'),
+  data_vencimento: dataSchema,
+  observacoes: textoOpcionalNullable
+});
+
+const contaPagarBaixaSchema = z.object({
+  data_pagamento: dataSchema.optional()
+});
+
+const contaReceberSchema = z.object({
+  empresa_id: idLikeNullable,
+  pagador_nome: z.string().trim().min(1, 'Nome do pagador é obrigatório').max(150),
+  descricao: z.string().trim().min(1, 'Descrição é obrigatória').max(200),
+  valor: z.coerce.number().min(0, 'Valor não pode ser negativo'),
+  data_prevista: dataSchema,
+  forma_pagamento: formaPagamentoContaEnum,
+  observacoes: textoOpcionalNullable
+});
+
+const contaReceberBaixaSchema = z.object({
+  data_recebimento: dataSchema.optional()
+});
+
 // --- chavesAtivacao.js ---
 
 const chaveAtivacaoCriarSchema = z.object({
@@ -573,6 +611,10 @@ module.exports = {
   leadStatusSchema,
   empresaVencimentoSchema,
   empresaTrocarPlanoSchema,
+  contaPagarSchema,
+  contaPagarBaixaSchema,
+  contaReceberSchema,
+  contaReceberBaixaSchema,
   superAdminEditarSchema,
   planoPlataformaSchema,
   chaveAtivacaoCriarSchema,

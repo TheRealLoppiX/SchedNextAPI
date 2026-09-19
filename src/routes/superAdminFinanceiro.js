@@ -1,5 +1,12 @@
 const express = require('express');
 const supabase = require('../config/supabase');
+const validate = require('../middleware/validate');
+const {
+  contaPagarSchema,
+  contaPagarBaixaSchema,
+  contaReceberSchema,
+  contaReceberBaixaSchema
+} = require('../schemas');
 
 const router = express.Router();
 
@@ -128,6 +135,210 @@ router.get('/super-admin/financeiro', async (req, res) => {
       valor_liquido: Number(r.valor_liquido)
     }))
   });
+});
+
+// --- Contas a Pagar e a Receber (ver sql/2026_contas_pagar_receber.sql) ---
+//
+// Lançamento manual de despesas (contas_pagar) e valores previstos a receber (contas_receber),
+// diferente de plataforma_receitas acima que só guarda cobrança JÁ confirmada. "Atrasado" nunca
+// é gravado no banco — é sempre derivado (pendente + vencimento no passado) na hora de responder,
+// pra não depender de um cron rodando todo dia só pra manter esse status em dia.
+
+function comStatusEfetivo(linha, campoData) {
+  const hoje = formatarDataLocalHoje();
+  const atrasado = linha.status === 'pendente' && linha[campoData] && linha[campoData] < hoje;
+  return { ...linha, status_efetivo: atrasado ? 'atrasado' : linha.status };
+}
+
+function resumoContas(linhas, campoValor = 'valor') {
+  const resumo = {
+    valor_total: 0, qtd_total: linhas.length,
+    pendente: { valor: 0, qtd: 0 },
+    atrasado: { valor: 0, qtd: 0 },
+    concluido: { valor: 0, qtd: 0 },
+    cancelado: { valor: 0, qtd: 0 }
+  };
+  for (const l of linhas) {
+    const valor = Number(l[campoValor]);
+    resumo.valor_total += valor;
+    const chave = l.status_efetivo === 'atrasado' ? 'atrasado'
+      : l.status_efetivo === 'pendente' ? 'pendente'
+      : l.status_efetivo === 'cancelado' ? 'cancelado'
+      : 'concluido';
+    resumo[chave].valor += valor;
+    resumo[chave].qtd += 1;
+  }
+  resumo.valor_total = Number(resumo.valor_total.toFixed(2));
+  for (const chave of ['pendente', 'atrasado', 'concluido', 'cancelado']) {
+    resumo[chave].valor = Number(resumo[chave].valor.toFixed(2));
+  }
+  return resumo;
+}
+
+router.get('/super-admin/contas-pagar', async (req, res) => {
+  const { status, categoria, dataInicio, dataFim, busca } = req.query;
+
+  let query = supabase.from('contas_pagar').select('*').order('data_vencimento', { ascending: true });
+  if (categoria) query = query.eq('categoria', categoria);
+  if (dataInicio) query = query.gte('data_vencimento', dataInicio);
+  if (dataFim) query = query.lte('data_vencimento', dataFim);
+  // Remove vírgula/parênteses antes de interpolar no `.or()` (mesmo cuidado de
+  // routes/superAdminPlataforma.js): o PostgREST separa condições por vírgula.
+  if (busca) {
+    const buscaSegura = String(busca).replace(/[,()]/g, '');
+    query = query.or(`descricao.ilike.%${buscaSegura}%,beneficiario_nome.ilike.%${buscaSegura}%`);
+  }
+
+  const { data, error } = await query;
+  if (error) return res.status(500).json({ error: 'Erro ao buscar contas a pagar.' });
+
+  let itens = data.map((l) => comStatusEfetivo(l, 'data_vencimento'));
+  if (status) itens = itens.filter((l) => l.status_efetivo === status);
+
+  res.json({ resumo: resumoContas(itens), itens });
+});
+
+router.post('/super-admin/contas-pagar', validate(contaPagarSchema), async (req, res) => {
+  const { data, error } = await supabase.from('contas_pagar').insert(req.body).select().single();
+  if (error) return res.status(500).json({ error: 'Erro ao lançar a conta a pagar.' });
+  res.status(201).json({ message: 'Conta a pagar lançada com sucesso.', conta: data });
+});
+
+router.put('/super-admin/contas-pagar/:id', validate(contaPagarSchema), async (req, res) => {
+  const { data, error } = await supabase
+    .from('contas_pagar')
+    .update({ ...req.body, atualizado_em: new Date().toISOString() })
+    .eq('id', req.params.id)
+    .select()
+    .maybeSingle();
+  if (error) return res.status(500).json({ error: 'Erro ao atualizar a conta a pagar.' });
+  if (!data) return res.status(404).json({ error: 'Conta a pagar não encontrada.' });
+  res.json({ message: 'Conta a pagar atualizada.', conta: data });
+});
+
+router.put('/super-admin/contas-pagar/:id/pagar', validate(contaPagarBaixaSchema), async (req, res) => {
+  const { data, error } = await supabase
+    .from('contas_pagar')
+    .update({
+      status: 'pago',
+      data_pagamento: req.body.data_pagamento || formatarDataLocalHoje(),
+      atualizado_em: new Date().toISOString()
+    })
+    .eq('id', req.params.id)
+    .select()
+    .maybeSingle();
+  if (error) return res.status(500).json({ error: 'Erro ao dar baixa na conta a pagar.' });
+  if (!data) return res.status(404).json({ error: 'Conta a pagar não encontrada.' });
+  res.json({ message: 'Conta marcada como paga.', conta: data });
+});
+
+router.put('/super-admin/contas-pagar/:id/cancelar', async (req, res) => {
+  const { data, error } = await supabase
+    .from('contas_pagar')
+    .update({ status: 'cancelado', atualizado_em: new Date().toISOString() })
+    .eq('id', req.params.id)
+    .select()
+    .maybeSingle();
+  if (error) return res.status(500).json({ error: 'Erro ao cancelar a conta a pagar.' });
+  if (!data) return res.status(404).json({ error: 'Conta a pagar não encontrada.' });
+  res.json({ message: 'Conta a pagar cancelada.', conta: data });
+});
+
+router.delete('/super-admin/contas-pagar/:id', async (req, res) => {
+  const { error } = await supabase.from('contas_pagar').delete().eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: 'Erro ao excluir a conta a pagar.' });
+  res.json({ message: 'Conta a pagar excluída.' });
+});
+
+// Empresas com assinatura de plano pago ativa, pra popular o vínculo rápido de contas a
+// receber com a próxima cobrança já conhecida (empresas.proxima_cobranca_em) sem digitar tudo
+// de novo à mão.
+router.get('/super-admin/contas-receber/empresas-sugeridas', async (req, res) => {
+  const { data, error } = await supabase
+    .from('empresas')
+    .select('id, nome, status_assinatura, proxima_cobranca_em, plano_plataforma:plano_plataforma_id(nome, preco_mensal)')
+    .eq('status_assinatura', 'ativa')
+    .order('proxima_cobranca_em', { ascending: true });
+
+  if (error) return res.status(500).json({ error: 'Erro ao buscar empresas.' });
+  res.json(data.filter((e) => Number(e.plano_plataforma?.preco_mensal) > 0));
+});
+
+router.get('/super-admin/contas-receber', async (req, res) => {
+  const { status, empresa_id, dataInicio, dataFim, busca } = req.query;
+
+  let query = supabase
+    .from('contas_receber')
+    .select('*, empresas(nome)')
+    .order('data_prevista', { ascending: true });
+  if (empresa_id) query = query.eq('empresa_id', empresa_id);
+  if (dataInicio) query = query.gte('data_prevista', dataInicio);
+  if (dataFim) query = query.lte('data_prevista', dataFim);
+  if (busca) {
+    const buscaSegura = String(busca).replace(/[,()]/g, '');
+    query = query.or(`descricao.ilike.%${buscaSegura}%,pagador_nome.ilike.%${buscaSegura}%`);
+  }
+
+  const { data, error } = await query;
+  if (error) return res.status(500).json({ error: 'Erro ao buscar contas a receber.' });
+
+  let itens = data.map((l) => comStatusEfetivo({ ...l, empresa_nome: l.empresas?.nome || null }, 'data_prevista'));
+  if (status) itens = itens.filter((l) => l.status_efetivo === status);
+  itens = itens.map(({ empresas, ...resto }) => resto);
+
+  res.json({ resumo: resumoContas(itens), itens });
+});
+
+router.post('/super-admin/contas-receber', validate(contaReceberSchema), async (req, res) => {
+  const { data, error } = await supabase.from('contas_receber').insert(req.body).select().single();
+  if (error) return res.status(500).json({ error: 'Erro ao lançar a conta a receber.' });
+  res.status(201).json({ message: 'Conta a receber lançada com sucesso.', conta: data });
+});
+
+router.put('/super-admin/contas-receber/:id', validate(contaReceberSchema), async (req, res) => {
+  const { data, error } = await supabase
+    .from('contas_receber')
+    .update({ ...req.body, atualizado_em: new Date().toISOString() })
+    .eq('id', req.params.id)
+    .select()
+    .maybeSingle();
+  if (error) return res.status(500).json({ error: 'Erro ao atualizar a conta a receber.' });
+  if (!data) return res.status(404).json({ error: 'Conta a receber não encontrada.' });
+  res.json({ message: 'Conta a receber atualizada.', conta: data });
+});
+
+router.put('/super-admin/contas-receber/:id/receber', validate(contaReceberBaixaSchema), async (req, res) => {
+  const { data, error } = await supabase
+    .from('contas_receber')
+    .update({
+      status: 'recebido',
+      data_recebimento: req.body.data_recebimento || formatarDataLocalHoje(),
+      atualizado_em: new Date().toISOString()
+    })
+    .eq('id', req.params.id)
+    .select()
+    .maybeSingle();
+  if (error) return res.status(500).json({ error: 'Erro ao dar baixa na conta a receber.' });
+  if (!data) return res.status(404).json({ error: 'Conta a receber não encontrada.' });
+  res.json({ message: 'Conta marcada como recebida.', conta: data });
+});
+
+router.put('/super-admin/contas-receber/:id/cancelar', async (req, res) => {
+  const { data, error } = await supabase
+    .from('contas_receber')
+    .update({ status: 'cancelado', atualizado_em: new Date().toISOString() })
+    .eq('id', req.params.id)
+    .select()
+    .maybeSingle();
+  if (error) return res.status(500).json({ error: 'Erro ao cancelar a conta a receber.' });
+  if (!data) return res.status(404).json({ error: 'Conta a receber não encontrada.' });
+  res.json({ message: 'Conta a receber cancelada.', conta: data });
+});
+
+router.delete('/super-admin/contas-receber/:id', async (req, res) => {
+  const { error } = await supabase.from('contas_receber').delete().eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: 'Erro ao excluir a conta a receber.' });
+  res.json({ message: 'Conta a receber excluída.' });
 });
 
 module.exports = router;
