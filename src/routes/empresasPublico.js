@@ -10,6 +10,8 @@ const { registrarEmpresaSchema, contatoEnterpriseSchema, confirmarCodigoSchema }
 const { registrarLead } = require('../services/leadsEnterprise');
 const { emailHtml, blocoCodigo } = require('../utils/emailTemplate');
 const { criarPendente, buscarPendenteValido, removerPendente } = require('../services/cadastroPendente');
+const { verificarCadastro, registrarCadastro } = require('../services/antifraude');
+const { normalizarDocumento } = require('../utils/antifraude');
 
 const router = express.Router();
 
@@ -29,6 +31,8 @@ router.get('/planos-plataforma', async (req, res) => {
   const { data, error } = await supabase
     .from('planos_plataforma')
     .select('*')
+    .eq('ativo', true)
+    .eq('publico', true)
     .order('id');
 
   if (error) return res.status(500).json(error);
@@ -48,7 +52,10 @@ router.get('/empresas/slug-disponivel/:slug', async (req, res) => {
 });
 
 router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmpresaSchema), async (req, res) => {
-  const { nome, slug, email, senha, vertical, plano_plataforma_id } = req.body;
+  const { nome, slug, email, senha, vertical, plano_plataforma_id, telefone } = req.body;
+
+  const documento = normalizarDocumento(req.body.documento);
+  if (!documento) return res.status(400).json({ error: 'CPF ou CNPJ inválido.' });
 
   const { data: slugExistente } = await supabase.from('empresas').select('id').eq('slug', slug).maybeSingle();
   if (slugExistente) return res.status(400).json({ error: 'Esse endereço já está em uso. Escolha outro.' });
@@ -56,12 +63,27 @@ router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmp
   const { data: emailExistente } = await supabase.from('empresas').select('id').eq('email', email).maybeSingle();
   if (emailExistente) return res.status(400).json({ error: 'Já existe uma empresa cadastrada com esse e-mail.' });
 
-  const { data: planoGratis } = await supabase.from('planos_plataforma').select('id').eq('nome', 'Grátis').maybeSingle();
+  // Antifraude: mesmo e-mail (normalizado), telefone ou CPF/CNPJ de uma conta já criada
+  // bloqueia o cadastro (ver services/antifraude.js). Falha ao consultar NÃO libera o cadastro.
+  try {
+    const bloqueio = await verificarCadastro({ email, telefone, documento, nome });
+    if (bloqueio) return res.status(409).json({ error: bloqueio });
+  } catch (e) {
+    console.error('Erro na checagem antifraude do cadastro de empresa:', e);
+    return res.status(500).json({ error: 'Erro interno ao validar o cadastro. Tente novamente.' });
+  }
+
+  const { data: planoGratis } = await supabase.from('planos_plataforma').select('id, dias_teste').eq('nome', 'Grátis').maybeSingle();
   if (!planoGratis) return res.status(500).json({ error: 'Erro interno ao localizar o plano Grátis.' });
   let planoEscolhidoId = plano_plataforma_id || planoGratis.id;
 
-  const { data: plano } = await supabase.from('planos_plataforma').select('id, nome, preco_mensal').eq('id', planoEscolhidoId).maybeSingle();
+  const { data: plano } = await supabase.from('planos_plataforma').select('id, nome, preco_mensal, ativo, publico, dias_teste').eq('id', planoEscolhidoId).maybeSingle();
   if (!plano) return res.status(400).json({ error: 'Plano inválido.' });
+
+  // Plano desligado ou oculto (área de teste do admin absoluto) não pode ser contratado pelo
+  // site — sem essa trava, um plano de R$0 com todos os recursos, criado só pra testar, poderia
+  // ser assinado por qualquer visitante direto pela API.
+  if (!plano.ativo || !plano.publico) return res.status(400).json({ error: 'Este plano não está disponível no momento.' });
 
   // Enterprise (e qualquer plano futuro "sob consulta") não tem preço fixo — não dá pra
   // assinar sozinho pelo cadastro, precisa passar pelo formulário de contato
@@ -77,6 +99,8 @@ router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmp
   // plano pago de graça, sem nunca pagar (ver handoff.md).
   const planoAplicadoId = ehPago ? planoGratis.id : plano.id;
   const planoPendenteId = ehPago ? plano.id : null;
+  // Dias de teste do plano em que a conta de fato nasce (o Grátis, se o escolhido é pago).
+  const diasTeste = ehPago ? planoGratis.dias_teste : plano.dias_teste;
   const senhaHash = await bcrypt.hash(senha, 12);
   const codigoVerificacao = Math.floor(100000 + Math.random() * 900000).toString();
 
@@ -95,7 +119,11 @@ router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmp
       plano_plataforma_id: planoAplicadoId,
       plano_plataforma_pendente_id: planoPendenteId,
       plano_nome: plano.nome,
-      status_assinatura: 'ativa',
+      telefone,
+      documento,
+      dias_teste: diasTeste || null,
+      ip: req.ip,
+      status_assinatura: diasTeste ? 'trial' : 'ativa',
       horarios_funcionamento: JSON.stringify({
         0: { aberto: false, abre: '08:00', fecha: '18:00', label: 'Domingo' },
         1: { aberto: true, abre: '08:00', fecha: '20:00', label: 'Segunda-feira' },
@@ -137,7 +165,7 @@ router.post('/empresas/confirmar-codigo', codigoLimiter, validate(confirmarCodig
   const pendente = await buscarPendenteValido({ tipo: 'empresa', email, codigo });
   if (!pendente) return res.status(400).json({ error: 'Código inválido ou expirado.' });
 
-  const { nome, slug, senha, vertical, plano_plataforma_id, plano_plataforma_pendente_id, plano_nome, status_assinatura, horarios_funcionamento } = pendente.dados;
+  const { nome, slug, senha, vertical, plano_plataforma_id, plano_plataforma_pendente_id, plano_nome, status_assinatura, horarios_funcionamento, telefone, documento, dias_teste, ip } = pendente.dados;
 
   // Rechecagem: o slug/e-mail pode ter sido tomado por outra empresa enquanto este
   // cadastro ficava pendente de confirmação.
@@ -147,9 +175,24 @@ router.post('/empresas/confirmar-codigo', codigoLimiter, validate(confirmarCodig
   const { data: emailExistente } = await supabase.from('empresas').select('id').eq('email', email).maybeSingle();
   if (emailExistente) return res.status(400).json({ error: 'Já existe uma empresa cadastrada com esse e-mail.' });
 
+  // Rechecagem antifraude: outra conta pode ter sido criada com esses dados enquanto este
+  // cadastro esperava o código (ex: dois cadastros abertos em paralelo).
+  try {
+    const bloqueio = await verificarCadastro({ email, telefone, documento, nome });
+    if (bloqueio) return res.status(409).json({ error: bloqueio });
+  } catch (e) {
+    console.error('Erro na checagem antifraude ao confirmar cadastro de empresa:', e);
+    return res.status(500).json({ error: 'Erro ao ativar a conta.' });
+  }
+
   const { data: empresa, error } = await supabase
     .from('empresas')
-    .insert({ nome, slug, email, senha, vertical, plano_plataforma_id, plano_plataforma_pendente_id, status_assinatura, horarios_funcionamento })
+    .insert({
+      nome, slug, email, senha, vertical, plano_plataforma_id, plano_plataforma_pendente_id, status_assinatura, horarios_funcionamento,
+      telefone,
+      cpf_cnpj: documento,
+      trial_expira_em: dias_teste ? new Date(Date.now() + dias_teste * 86400000).toISOString() : null
+    })
     .select('id, nome, slug')
     .single();
 
@@ -159,6 +202,7 @@ router.post('/empresas/confirmar-codigo', codigoLimiter, validate(confirmarCodig
   }
 
   await removerPendente(pendente.id);
+  await registrarCadastro({ empresaId: empresa.id, nomeEmpresa: nome, email, telefone, documento, ip });
 
   const token = jwt.sign({ empresa_id: empresa.id, tipo: 'admin' }, process.env.JWT_SECRET, { expiresIn: '8h' });
 
@@ -173,7 +217,8 @@ router.post('/empresas/confirmar-codigo', codigoLimiter, validate(confirmarCodig
     slug: empresa.slug,
     status_assinatura,
     plano_nome,
-    planoPendente: !!plano_plataforma_pendente_id
+    planoPendente: !!plano_plataforma_pendente_id,
+    trialDias: dias_teste || null
   });
 });
 

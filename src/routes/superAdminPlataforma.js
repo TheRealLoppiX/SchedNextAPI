@@ -2,7 +2,8 @@ const express = require('express');
 const supabase = require('../config/supabase');
 const validate = require('../middleware/validate');
 const { cancelarAssinaturaNoGateway } = require('../services/pagamento');
-const { planoPlataformaSchema, empresaVencimentoSchema, empresaTrocarPlanoSchema } = require('../schemas');
+const { planoPlataformaSchema, planoAtivoSchema, planoTesteSchema, empresaVencimentoSchema, empresaTrocarPlanoSchema } = require('../schemas');
+const { limparCacheTrial } = require('../middleware/trialAuth');
 
 const router = express.Router();
 
@@ -33,6 +34,132 @@ router.put('/super-admin/planos/:id', validate(planoPlataformaSchema), async (re
   if (error) return res.status(500).json({ error: 'Erro ao atualizar plano.' });
   if (!data) return res.status(404).json({ error: 'Plano não encontrado.' });
   res.json(data);
+});
+
+// Liga/desliga um plano: desligado, some da landing/cadastro e ninguém consegue contratar (nem
+// pela API, ver routes/pagamentos.js e routes/empresasPublico.js). Empresas que já estão nele
+// continuam normalmente. O Grátis não pode ser desligado: é o plano de destino de cancelamentos,
+// chaves expiradas e testes, os crons dependem dele.
+router.patch('/super-admin/planos/:id/ativo', validate(planoAtivoSchema), async (req, res) => {
+  const { data: plano } = await supabase.from('planos_plataforma').select('id, nome').eq('id', req.params.id).maybeSingle();
+  if (!plano) return res.status(404).json({ error: 'Plano não encontrado.' });
+  if (plano.nome === 'Grátis' && !req.body.ativo) {
+    return res.status(400).json({ error: 'O plano Grátis não pode ser desligado: ele é o plano de destino de cancelamentos e testes expirados.' });
+  }
+
+  const { data, error } = await supabase.from('planos_plataforma').update({ ativo: req.body.ativo }).eq('id', plano.id).select('*').single();
+  if (error) return res.status(500).json({ error: 'Erro ao atualizar o plano.' });
+  res.json(data);
+});
+
+// --- Área de teste de planos ---
+// Aplica um plano (mesmo desligado/oculto, ex: um "Teste Completo" de R$0 com todos os
+// recursos) numa empresa ESCOLHIDA por alguns dias, sem nunca expô-lo ao site. Guarda o plano
+// anterior e, quando o prazo acaba, o cron (cron/assinaturas.js) devolve a empresa a ele.
+
+router.get('/super-admin/testes-plano', async (req, res) => {
+  const { data, error } = await supabase
+    .from('empresas')
+    .select('id, nome, slug, email, plano_teste_expira_em, plano_atual:plano_plataforma_id(id, nome), plano_anterior:plano_teste_anterior_id(id, nome)')
+    .not('plano_teste_expira_em', 'is', null)
+    .order('plano_teste_expira_em', { ascending: true });
+
+  if (error) return res.status(500).json({ error: 'Erro ao buscar testes de plano.' });
+  res.json(data);
+});
+
+router.post('/super-admin/testes-plano', validate(planoTesteSchema), async (req, res) => {
+  const { empresa_id, plano_plataforma_id, dias } = req.body;
+
+  const [{ data: plano }, { data: empresa }] = await Promise.all([
+    supabase.from('planos_plataforma').select('id, nome').eq('id', plano_plataforma_id).maybeSingle(),
+    supabase.from('empresas').select('id, nome, plano_plataforma_id, plano_teste_expira_em, plano_teste_anterior_id, gateway_subscription_id').eq('id', empresa_id).maybeSingle()
+  ]);
+  if (!plano) return res.status(400).json({ error: 'Plano inválido.' });
+  if (!empresa) return res.status(404).json({ error: 'Empresa não encontrada.' });
+
+  // Empresa com cobrança recorrente própria não entra em teste: o teste trocaria o plano pago
+  // dela por baixo da assinatura ativa no gateway.
+  if (empresa.gateway_subscription_id) {
+    return res.status(400).json({ error: 'Essa empresa tem assinatura paga ativa. Teste de plano é só pra contas sem cobrança recorrente.' });
+  }
+
+  // Testar de novo numa empresa que já está em teste mantém o plano ORIGINAL como retorno, não o
+  // plano de teste anterior, senão ela ficaria presa num plano de teste ao expirar.
+  const anteriorId = empresa.plano_teste_expira_em ? empresa.plano_teste_anterior_id : empresa.plano_plataforma_id;
+  const expiraEm = new Date(Date.now() + dias * 86400000).toISOString();
+
+  const { error } = await supabase
+    .from('empresas')
+    .update({
+      plano_plataforma_id: plano.id,
+      plano_plataforma_pendente_id: null,
+      status_assinatura: 'ativa',
+      plano_teste_anterior_id: anteriorId,
+      plano_teste_expira_em: expiraEm
+    })
+    .eq('id', empresa.id);
+
+  if (error) return res.status(500).json({ error: 'Erro ao aplicar o teste de plano.' });
+  limparCacheTrial(empresa.id);
+  res.json({
+    success: true,
+    message: `Plano ${plano.nome} aplicado em ${empresa.nome} até ${new Date(expiraEm).toLocaleDateString('pt-BR')}. Depois disso ela volta ao plano anterior.`,
+    expira_em: expiraEm
+  });
+});
+
+router.post('/super-admin/testes-plano/:empresaId/encerrar', async (req, res) => {
+  const { data: empresa } = await supabase.from('empresas').select('id, plano_teste_anterior_id').eq('id', req.params.empresaId).maybeSingle();
+  if (!empresa || !empresa.plano_teste_anterior_id) return res.status(404).json({ error: 'Essa empresa não está em teste de plano.' });
+
+  const { error } = await supabase
+    .from('empresas')
+    .update({ plano_plataforma_id: empresa.plano_teste_anterior_id, plano_teste_anterior_id: null, plano_teste_expira_em: null })
+    .eq('id', empresa.id);
+
+  if (error) return res.status(500).json({ error: 'Erro ao encerrar o teste.' });
+  limparCacheTrial(empresa.id);
+  res.json({ success: true, message: 'Teste encerrado. A empresa voltou ao plano anterior.' });
+});
+
+// --- Antifraude de cadastro ---
+// Grupos de empresas que compartilham e-mail (normalizado), telefone, CPF/CNPJ, nome ou IP. O
+// cadastro novo já é BLOQUEADO em e-mail/telefone/documento repetidos (services/antifraude.js);
+// aqui o admin vê o que passou (nomes iguais, IPs repetidos) e libera falsos positivos.
+
+router.get('/super-admin/antifraude', async (req, res) => {
+  const { data: registros, error } = await supabase
+    .from('cadastro_empresa_registros')
+    .select('id, empresa_id, nome_empresa, email_normalizado, telefone_normalizado, documento, nome_normalizado, ip, liberado_em, criado_em, empresa:empresa_id(id, slug, status_assinatura, plano:plano_plataforma_id(nome))')
+    .order('criado_em', { ascending: false })
+    .limit(2000);
+
+  if (error) return res.status(500).json({ error: 'Erro ao buscar registros de antifraude.' });
+
+  const CAMPOS = [['email_normalizado', 'email'], ['telefone_normalizado', 'telefone'], ['documento', 'documento'], ['nome_normalizado', 'nome'], ['ip', 'ip']];
+  const grupos = [];
+  for (const [coluna, rotulo] of CAMPOS) {
+    const porValor = new Map();
+    for (const r of registros) {
+      if (!r[coluna] || r.liberado_em) continue;
+      if (!porValor.has(r[coluna])) porValor.set(r[coluna], []);
+      porValor.get(r[coluna]).push(r);
+    }
+    for (const [valor, lista] of porValor) {
+      // Mesmo IP em 2 contas é comum (rede compartilhada), então só vira alerta a partir de 3.
+      if (lista.length >= (coluna === 'ip' ? 3 : 2)) grupos.push({ campo: rotulo, valor, empresas: lista });
+    }
+  }
+
+  res.json({ grupos, total_registros: registros.length });
+});
+
+// Falso positivo: o registro deixa de bloquear novos cadastros com esses dados.
+router.post('/super-admin/antifraude/:id/liberar', async (req, res) => {
+  const { error } = await supabase.from('cadastro_empresa_registros').update({ liberado_em: new Date().toISOString() }).eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: 'Erro ao liberar o registro.' });
+  res.json({ success: true });
 });
 
 // --- Empresas cadastradas na plataforma ---
@@ -150,11 +277,16 @@ router.put('/super-admin/empresas/:id/plano', validate(empresaTrocarPlanoSchema)
       plano_plataforma_pendente_id: null,
       gateway_subscription_id: null,
       status_assinatura: 'ativa',
-      cancelamento_agendado: false
+      cancelamento_agendado: false,
+      // Troca manual do admin absoluto é decisão explícita: encerra qualquer trial/teste em curso.
+      trial_expira_em: null,
+      plano_teste_expira_em: null,
+      plano_teste_anterior_id: null
     })
     .eq('id', req.params.id);
 
   if (error) return res.status(500).json({ error: 'Erro ao trocar o plano da empresa.' });
+  limparCacheTrial(Number(req.params.id));
   res.json({ success: true, message: 'Plano da empresa atualizado. Se havia cobrança recorrente ativa, ela foi cancelada, ajuste a data de próxima cobrança se o novo plano também for pago.' });
 });
 

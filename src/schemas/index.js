@@ -55,7 +55,11 @@ const registrarEmpresaSchema = z.object({
   email: z.string().trim().toLowerCase().email('E-mail inválido'),
   senha: z.string().min(6, 'Senha deve ter ao menos 6 caracteres').max(100),
   vertical: z.enum(['barbearia', 'salao', 'estudio_unhas', 'generico']),
-  plano_plataforma_id: idLike.optional()
+  plano_plataforma_id: idLike.optional(),
+  // Antifraude (ver services/antifraude.js): telefone e CPF/CNPJ são obrigatórios no cadastro
+  // pra impedir várias contas grátis da mesma pessoa/negócio.
+  telefone: z.string().trim().min(10, 'Telefone inválido').max(20),
+  documento: z.string().trim().min(11, 'CPF/CNPJ inválido').max(18)
 });
 
 // --- auth.js (fluxos de código de 6 dígitos) ---
@@ -586,7 +590,23 @@ const planoPlataformaSchema = z.object({
   permite_dominio_customizado: z.boolean().optional().default(false),
   // Fatia (application_fee) que a SchedNext fica de cada Pix cobrado via Mercado Pago nesse
   // plano — ver utils/limitesPlano.js (obterTaxaMarketplace) e routes/mercadopago.js.
-  taxa_marketplace_percentual: z.coerce.number().min(0, 'Taxa não pode ser negativa').max(100, 'Taxa não pode passar de 100%').optional().default(0)
+  taxa_marketplace_percentual: z.coerce.number().min(0, 'Taxa não pode ser negativa').max(100, 'Taxa não pode passar de 100%').optional().default(0),
+  // Liga/desliga (ativo=false some do site e ninguém contrata), plano oculto (publico=false só
+  // o admin absoluto aplica) e dias de teste (null = sem limite). Ver
+  // sql/2026_planos_ativo_trial_antifraude.sql.
+  ativo: z.boolean().optional(),
+  publico: z.boolean().optional(),
+  dias_teste: z.coerce.number().int().positive('Dias de teste deve ser maior que zero').nullable().optional()
+});
+
+const planoAtivoSchema = z.object({ ativo: z.boolean() });
+
+// Área de teste de planos: aplica um plano (mesmo desligado/oculto) numa empresa escolhida por
+// alguns dias; ao acabar, ela volta ao plano anterior (cron/assinaturas.js).
+const planoTesteSchema = z.object({
+  empresa_id: idLike,
+  plano_plataforma_id: idLike,
+  dias: z.coerce.number().int().min(1, 'Mínimo 1 dia').max(90, 'Máximo 90 dias')
 });
 
 module.exports = {
@@ -660,6 +680,8 @@ module.exports = {
   plataformaConfiguracaoSchema,
   superAdminEditarSchema,
   planoPlataformaSchema,
+  planoAtivoSchema,
+  planoTesteSchema,
   chaveAtivacaoCriarSchema,
   chaveAtivacaoResgatarSchema
 };

@@ -13,11 +13,16 @@ router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgr
 
   const { data: plano, error } = await supabase
     .from('planos_plataforma')
-    .select('id, nome, preco_mensal')
+    .select('id, nome, preco_mensal, ativo, publico')
     .eq('id', plano_plataforma_id)
     .maybeSingle();
 
   if (error || !plano) return res.status(400).json({ error: 'Plano inválido.' });
+
+  // Plano desligado/oculto (área de teste do admin absoluto) não é contratável pelo próprio
+  // cliente — só o admin absoluto aplica. Sem isso, um plano de R$0 com todos os recursos
+  // criado só pra testar cairia no branch "preco <= 0" abaixo e seria ativado de graça.
+  if (!plano.ativo || !plano.publico) return res.status(400).json({ error: 'Este plano não está disponível no momento.' });
 
   // Enterprise (e qualquer plano futuro "sob consulta") não tem preço fixo — preco_mensal vem
   // null do banco. Sem essa checagem, `null <= 0` é true em JS e cairia no branch de downgrade

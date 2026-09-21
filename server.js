@@ -11,6 +11,8 @@ const iniciarProcessamentoCancelamentos = require('./src/cron/assinaturas');
 const iniciarRecuperacaoClientes = require('./src/cron/recuperacaoClientes');
 const iniciarRenovacaoTokenMercadoPago = require('./src/cron/mercadoPago');
 const iniciarCobrancaAssinaturas = require('./src/cron/cobrancaAssinaturas');
+const iniciarTrialPlanos = require('./src/cron/trialPlanos');
+const { bloquearTrialExpirado } = require('./src/middleware/trialAuth');
 
 const app = express();
 
@@ -55,6 +57,9 @@ app.use(cors({
 // Protege toda a área /admin/*. O único endpoint sob /admin que fica de fora é o próprio
 // /admin/login (é ele quem emite o token). Ver src/middleware/adminAuth.js.
 app.use('/admin', verificarTokenAdmin);
+
+// Teste grátis acabou: trava o painel até assinar (ver src/middleware/trialAuth.js).
+app.use('/admin', bloquearTrialExpirado);
 
 // Segunda camada, só pra admin de UMA unidade (req.unidadeId setado, ver adminAuth.js): por
 // padrão, bloqueia qualquer rota /admin/* que não esteja explicitamente liberada aqui. Assim,
@@ -116,6 +121,7 @@ iniciarProcessamentoCancelamentos();
 iniciarRecuperacaoClientes();
 iniciarRenovacaoTokenMercadoPago();
 iniciarCobrancaAssinaturas();
+iniciarTrialPlanos();
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Servidor rodando em http://localhost:${PORT}`));
