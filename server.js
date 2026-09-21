@@ -23,7 +23,13 @@ const app = express();
 // por rate limit (cadastro, login, código de verificação) funcionava em produção.
 // "1" confia só no primeiro hop (o proxy do Render), não na cadeia inteira, pra não
 // abrir brecha de spoofing de IP via header em quem chama a API diretamente.
-app.set('trust proxy', 1);
+// Cloudflare (CDN) agora fica na frente do Render: cliente -> Cloudflare -> proxy do Render ->
+// API. São 2 hops confiáveis. Com 1, o req.ip virava o IP do Cloudflare, e o rate limit
+// (cadastro, login, código) passava a contar todos os usuários juntos por borda do CDN, além
+// de o antifraude gravar o IP errado. Configurável por TRUST_PROXY_HOPS caso a infra mude.
+// Atenção: acesso direto ao domínio .onrender.com (sem passar pelo Cloudflare) deixa o IP
+// forjável via X-Forwarded-For; ideal é o Render aceitar tráfego só do Cloudflare.
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS) || 2);
 
 // crossOriginResourcePolicy precisa ser "cross-origin": o front (porta 3000) e a API (porta 4000)
 // são origens diferentes de propósito. Com o padrão do helmet ("same-origin"), o navegador
