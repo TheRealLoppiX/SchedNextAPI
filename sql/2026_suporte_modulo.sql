@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS suporte_mensagens (
   id bigserial PRIMARY KEY,
   conversa_id bigint NOT NULL REFERENCES suporte_conversas(id) ON DELETE CASCADE,
   remetente text NOT NULL, -- 'empresa' | 'ia' | 'super_admin'
-  super_admin_id bigint NULL REFERENCES super_admins(id) ON DELETE SET NULL,
+  super_admin_id uuid NULL REFERENCES super_admins(id) ON DELETE SET NULL, -- super_admins.id é uuid, não bigint
   texto text NOT NULL,
   criado_em timestamptz NOT NULL DEFAULT now()
 );
