@@ -4,13 +4,25 @@ const validate = require('../middleware/validate');
 const { suporteMensagemSchema } = require('../schemas');
 const { permiteIA } = require('../utils/limitesPlano');
 const { responderSuporte } = require('../services/suporte');
+const { nomeDoEmail } = require('../utils/nomeAdmin');
 
 const router = express.Router();
 
-// Módulo de suporte do admin de empresa (Admin -> Suporte). Reaproveita o mesmo flag de plano
-// permite_ia já usado pro bot de WhatsApp (Profissional/Enterprise) — decisão de produto: só esses
-// planos ganham chat com IA + escalação pra um humano; Grátis/Essencial ficam com contato por
-// e-mail (sem rota nem tabela nenhuma pra isso, é só um link no front).
+// Módulo de suporte do admin de empresa — hoje vive como widget flutuante (botão de FAQ) em vez
+// de página dedicada, ver frontend/src/components/SuporteFlutuante.js. Reaproveita o mesmo flag
+// de plano permite_ia já usado pro bot de WhatsApp (Profissional/Enterprise) — decisão de produto:
+// só esses planos ganham chat com IA + escalação pra um humano; Grátis/Essencial ficam com
+// contato por e-mail (sem rota nem tabela nenhuma pra isso, é só um link no front).
+
+function mapConversa(c) {
+  return {
+    id: c.id,
+    status: c.status,
+    criado_em: c.criado_em,
+    atualizado_em: c.atualizado_em,
+    atendido_por_nome: c.atendido_por?.email ? nomeDoEmail(c.atendido_por.email) : null
+  };
+}
 
 // Busca a conversa ativa (não resolvida) da empresa, se existir — nunca cria uma vazia aqui,
 // só quando a primeira mensagem é mandada (ver POST /admin/suporte/mensagem).
@@ -21,7 +33,7 @@ router.get('/admin/suporte', async (req, res) => {
 
   const { data: conversa } = await supabase
     .from('suporte_conversas')
-    .select('id, status, criado_em, atualizado_em')
+    .select('id, status, criado_em, atualizado_em, atendido_por:atendido_por_super_admin_id(email)')
     .eq('empresa_id', empresa_id)
     .neq('status', 'resolvido')
     .order('criado_em', { ascending: false })
@@ -32,12 +44,57 @@ router.get('/admin/suporte', async (req, res) => {
 
   const { data: mensagens, error } = await supabase
     .from('suporte_mensagens')
-    .select('id, remetente, texto, criado_em')
+    .select('id, remetente, texto, criado_em, super_admin:super_admin_id(email)')
     .eq('conversa_id', conversa.id)
     .order('criado_em', { ascending: true });
 
   if (error) return res.status(500).json({ error: 'Erro ao carregar conversa.' });
-  res.json({ permitido: true, conversa, mensagens: mensagens || [] });
+  res.json({
+    permitido: true,
+    conversa: mapConversa(conversa),
+    mensagens: (mensagens || []).map((m) => ({ ...m, nome_admin: m.super_admin?.email ? nomeDoEmail(m.super_admin.email) : null }))
+  });
+});
+
+// Histórico completo (todas as conversas, incluindo resolvidas) — a empresa sempre pode ver o
+// que já conversou antes, mesmo depois de encerrado.
+router.get('/admin/suporte/historico', async (req, res) => {
+  const empresa_id = req.empresaId;
+  if (!(await permiteIA(empresa_id))) return res.json([]);
+
+  const { data, error } = await supabase
+    .from('suporte_conversas')
+    .select('id, status, criado_em, atualizado_em, atendido_por:atendido_por_super_admin_id(email)')
+    .eq('empresa_id', empresa_id)
+    .order('criado_em', { ascending: false });
+
+  if (error) return res.status(500).json({ error: 'Erro ao carregar histórico.' });
+  res.json((data || []).map(mapConversa));
+});
+
+// Uma conversa específica do histórico (inclusive resolvida) — sempre confere que é desta
+// empresa antes de devolver qualquer coisa.
+router.get('/admin/suporte/historico/:id', async (req, res) => {
+  const empresa_id = req.empresaId;
+  const { data: conversa } = await supabase
+    .from('suporte_conversas')
+    .select('id, status, criado_em, atualizado_em, empresa_id, atendido_por:atendido_por_super_admin_id(email)')
+    .eq('id', req.params.id)
+    .maybeSingle();
+
+  if (!conversa || conversa.empresa_id !== empresa_id) return res.status(404).json({ error: 'Conversa não encontrada.' });
+
+  const { data: mensagens, error } = await supabase
+    .from('suporte_mensagens')
+    .select('id, remetente, texto, criado_em, super_admin:super_admin_id(email)')
+    .eq('conversa_id', conversa.id)
+    .order('criado_em', { ascending: true });
+
+  if (error) return res.status(500).json({ error: 'Erro ao carregar conversa.' });
+  res.json({
+    conversa: mapConversa(conversa),
+    mensagens: (mensagens || []).map((m) => ({ ...m, nome_admin: m.super_admin?.email ? nomeDoEmail(m.super_admin.email) : null }))
+  });
 });
 
 // Manda uma mensagem: cria a conversa se não existir uma ativa, grava a mensagem da empresa e,
@@ -93,11 +150,14 @@ router.post('/admin/suporte/mensagem', validate(suporteMensagemSchema), async (r
 
   const { data: mensagens } = await supabase
     .from('suporte_mensagens')
-    .select('id, remetente, texto, criado_em')
+    .select('id, remetente, texto, criado_em, super_admin:super_admin_id(email)')
     .eq('conversa_id', conversa.id)
     .order('criado_em', { ascending: true });
 
-  res.json({ conversa: { id: conversa.id, status: conversa.status }, mensagens: mensagens || [] });
+  res.json({
+    conversa: { id: conversa.id, status: conversa.status },
+    mensagens: (mensagens || []).map((m) => ({ ...m, nome_admin: m.super_admin?.email ? nomeDoEmail(m.super_admin.email) : null }))
+  });
 });
 
 // Escala pra um humano — a partir daqui a IA para de responder, e a conversa aparece pro admin

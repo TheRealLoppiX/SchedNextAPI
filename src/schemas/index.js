@@ -326,6 +326,10 @@ const suporteMensagemSchema = z.object({
   texto: z.string().trim().min(1, 'Digite uma mensagem').max(2000)
 });
 
+const suporteRepassarSchema = z.object({
+  super_admin_id: z.string().uuid('Super admin inválido').nullable().optional()
+});
+
 // --- assinaturas.js ---
 
 const assinaturaPlanoSchema = z.object({
@@ -632,6 +636,7 @@ module.exports = {
   loginClienteSchema,
   loginMagicoSchema,
   suporteMensagemSchema,
+  suporteRepassarSchema,
   agendarSchema,
   clienteRapidoSchema,
   registrarEmpresaSchema,
