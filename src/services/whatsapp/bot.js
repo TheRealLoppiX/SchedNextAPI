@@ -6,6 +6,7 @@ const { criarPagamentoPix } = require('../mercadopago');
 const { limiteAgendamentosMesAtingido, obterTaxaMarketplace } = require('../../utils/limitesPlano');
 const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
 const { montarUrlTenant } = require('../../utils/tenantContext');
+const { gerarLinkAcesso } = require('../loginMagico');
 const { gerarTexto, estaConfigurado: iaConfigurada, MODELOS_CLASSIFICACAO } = require('../groq');
 const {
   EMAIL_REGEX,
@@ -89,8 +90,12 @@ async function obterConfigBot(empresaId) {
     temperatura: data?.whatsapp_bot_temperatura != null ? Number(data.whatsapp_bot_temperatura) : 0.6,
     // Link da página pública da empresa (subdomínio ou domínio próprio verificado, ver
     // utils/tenantContext.js) — usado na saudação inicial e na confirmação de agendamento, pra
-    // quem prefere terminar/ver tudo pelo site em vez de continuar no WhatsApp.
-    linkLoja: data ? montarUrlTenant(data) : null
+    // quem prefere terminar/ver tudo pelo site em vez de continuar no WhatsApp. Guardamos a linha
+    // crua da empresa também (empresaTenant) pra dar pra gerar o link COM login automático
+    // (gerarLinkAcesso, ver services/loginMagico.js) assim que o cliente for identificado —
+    // aqui ainda não sabemos o telefone de quem está escrevendo.
+    linkLoja: data ? montarUrlTenant(data) : null,
+    empresaTenant: data || null
   };
 }
 
@@ -220,15 +225,22 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   // A saudação ("Olá! 👋") é customizável por empresa (whatsapp_bot_boas_vindas); o resto do menu
   // continua fixo, já que é uma lista numerada (ver comPersonalidade acima). O link da loja entra
   // aqui (não numa linha numerada) porque quem prefere terminar pelo site precisa saber que a
-  // opção existe logo de cara, sem precisar perguntar.
-  const saudacao = config.boasVindas || 'Olá!';
-  const linkLojaTexto = config.linkLoja ? ` Prefere marcar direto pelo site? ${config.linkLoja}` : '';
-  const MENSAGEM_MENU = `${saudacao} O que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.${linkLojaTexto}`;
+  // opção existe logo de cara, sem precisar perguntar. Função (não string pronta) de propósito:
+  // só faz a consulta pra saber se o telefone já tem cadastro (e assim gerar um link com login
+  // automático, ver services/loginMagico.js) na hora de mandar o menu de verdade, não em toda
+  // mensagem recebida.
+  const montarMensagemMenu = async () => {
+    const saudacao = config.boasVindas || 'Olá!';
+    const cliente = await encontrarClientePorTelefone(empresaId, telefone);
+    const link = gerarLinkAcesso(config.empresaTenant, cliente?.id) || config.linkLoja;
+    const linkLojaTexto = link ? ` Prefere marcar direto pelo site? ${link}` : '';
+    return `${saudacao} O que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.${linkLojaTexto}`;
+  };
 
   // "menu" digitado explicitamente sempre mostra o menu, em qualquer estado — é um pedido
   // direto, não faz sentido reinterpretar via IA.
   if (msgLower === 'menu') {
-    return responder(MENSAGEM_MENU, 'menu');
+    return responder(await montarMensagemMenu(), 'menu');
   }
 
   if (sessao.estado_atual === 'inicio') {
@@ -245,7 +257,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
       const { texto: t, estado, dados: d } = await construirRespostaVerAgendamentos(empresaId, telefone);
       return responder(t, estado, d);
     }
-    return responder(MENSAGEM_MENU, 'menu');
+    return responder(await montarMensagemMenu(), 'menu');
   }
 
   if (sessao.estado_atual === 'menu') {
@@ -573,8 +585,11 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sess
     return;
   }
 
+  // usuario_id sempre setado a essa altura (veio de encontrarClientePorTelefone ou do cadastro
+  // que acabou de ser concluído), então dá pra gerar link com login automático de verdade aqui.
+  const linkConfirmacao = gerarLinkAcesso(config.empresaTenant, dados.usuario_id) || config.linkLoja;
   const confirmacao = `Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}` +
-    (config.linkLoja ? `\n\nAcompanhe pelo site: ${config.linkLoja}` : '');
+    (linkConfirmacao ? `\n\nAcompanhe pelo site: ${linkConfirmacao}` : '');
 
   // Oferece adiantar o pagamento via Pix só quando a empresa tem Mercado Pago conectado (ver
   // routes/mercadopago.js) — sem conta conectada não tem pra onde gerar a cobrança.

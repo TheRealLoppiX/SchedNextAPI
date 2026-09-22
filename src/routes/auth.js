@@ -10,6 +10,7 @@ const {
   registrarSchema,
   loginSchema,
   loginClienteSchema,
+  loginMagicoSchema,
   confirmarCodigoSchema,
   recuperarSenhaSchema,
   resetarSenhaSchema,
@@ -124,6 +125,35 @@ router.post('/login', loginLimiter, validate(loginClienteSchema), async (req, re
     console.error('Erro no /login:', e);
     res.status(500).json({ message: 'Erro interno ao autenticar' });
   }
+});
+
+// Troca o token de login mágico (gerado pelo bot de WhatsApp quando já reconhece o cliente pelo
+// telefone, ver services/loginMagico.js) por uma sessão de verdade — o token de troca em si nunca
+// é usado como sessão. codigoLimiter reaproveitado aqui só como defesa em profundidade: a
+// assinatura do JWT já é o que impede adivinhar um token válido, o rate limit é só pra não deixar
+// alguém martelar o endpoint sem limite nenhum.
+router.post('/login-magico', codigoLimiter, validate(loginMagicoSchema), async (req, res) => {
+  let payload;
+  try {
+    payload = jwt.verify(req.body.token, process.env.JWT_SECRET);
+  } catch (e) {
+    return res.status(401).json({ message: 'Link expirado ou inválido. Peça um novo pelo WhatsApp.' });
+  }
+
+  if (payload.tipo !== 'login_magico' || !payload.id) {
+    return res.status(401).json({ message: 'Link inválido.' });
+  }
+
+  const { data: usuario, error } = await supabase
+    .from('usuarios')
+    .select('id, nome_completo, ativo')
+    .eq('id', payload.id)
+    .maybeSingle();
+
+  if (error || !usuario || !usuario.ativo) return res.status(401).json({ message: 'Conta não encontrada ou inativa.' });
+
+  const token = jwt.sign({ id: usuario.id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+  res.json({ message: 'Sucesso!', token, usuario: { id: usuario.id, nome: usuario.nome_completo } });
 });
 
 router.post('/confirmar-codigo', codigoLimiter, validate(confirmarCodigoSchema), async (req, res) => {
