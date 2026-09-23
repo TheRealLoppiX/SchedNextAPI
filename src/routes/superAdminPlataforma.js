@@ -265,11 +265,17 @@ router.put('/super-admin/empresas/:id/vencimento', validate(empresaVencimentoSch
 // Enterprise. Cancela uma assinatura recorrente existente no Mercado Pago antes de trocar (best
 // effort): sem isso, o cliente continuaria sendo cobrado no plano ANTIGO por uma recorrência que
 // o admin não sabe mais que existe, já que o gateway_subscription_id é zerado a seguir.
+//
+// O backend nunca consegue cobrar o cartão da empresa na hora (isso só acontece pelo checkout do
+// Mercado Pago, iniciado pela própria empresa em POST /admin/iniciar-upgrade) — então "gerar uma
+// cobrança" aqui lança uma conta a receber (mesmo mecanismo manual de superAdminFinanceiro.js,
+// com boleto/WhatsApp/baixa já prontos) em vez de tentar cobrar automaticamente. gerar_cobranca
+// (default true) deixa desligar isso pra cortesia de verdade, onde nenhuma cobrança deve existir.
 router.put('/super-admin/empresas/:id/plano', validate(empresaTrocarPlanoSchema), async (req, res) => {
-  const { data: plano } = await supabase.from('planos_plataforma').select('id').eq('id', req.body.plano_plataforma_id).maybeSingle();
+  const { data: plano } = await supabase.from('planos_plataforma').select('id, nome, preco_mensal').eq('id', req.body.plano_plataforma_id).maybeSingle();
   if (!plano) return res.status(400).json({ error: 'Plano inválido.' });
 
-  const { data: empresaAtual } = await supabase.from('empresas').select('gateway_subscription_id').eq('id', req.params.id).maybeSingle();
+  const { data: empresaAtual } = await supabase.from('empresas').select('nome, email, gateway_subscription_id').eq('id', req.params.id).maybeSingle();
   if (!empresaAtual) return res.status(404).json({ error: 'Empresa não encontrada.' });
 
   if (empresaAtual.gateway_subscription_id) {
@@ -288,6 +294,11 @@ router.put('/super-admin/empresas/:id/plano', validate(empresaTrocarPlanoSchema)
       gateway_subscription_id: null,
       status_assinatura: 'ativa',
       cancelamento_agendado: false,
+      // A recorrência antiga (se havia) já foi cancelada acima — sem ela, essa data ficaria
+      // inerte (nenhum cron/webhook cobra sem gateway_subscription_id) e só confundiria o dono
+      // da empresa na tela de Conta. A cobrança do novo plano, se houver, vira conta a receber
+      // logo abaixo, que tem sua própria data prevista.
+      proxima_cobranca_em: null,
       // Troca manual do admin absoluto é decisão explícita: encerra qualquer trial/teste em curso.
       trial_expira_em: null,
       plano_teste_expira_em: null,
@@ -297,7 +308,28 @@ router.put('/super-admin/empresas/:id/plano', validate(empresaTrocarPlanoSchema)
 
   if (error) return res.status(500).json({ error: 'Erro ao trocar o plano da empresa.' });
   limparCacheTrial(Number(req.params.id));
-  res.json({ success: true, message: 'Plano da empresa atualizado. Se havia cobrança recorrente ativa, ela foi cancelada, ajuste a data de próxima cobrança se o novo plano também for pago.' });
+
+  let avisoCobranca = '';
+  if (req.body.gerar_cobranca && Number(plano.preco_mensal) > 0) {
+    const hoje = new Date().toISOString().slice(0, 10);
+    const { error: errCobranca } = await supabase.from('contas_receber').insert({
+      empresa_id: req.params.id,
+      pagador_nome: empresaAtual.nome,
+      pagador_email: empresaAtual.email || null,
+      descricao: `Assinatura de plataforma - troca de plano para ${plano.nome}`,
+      valor: plano.preco_mensal,
+      competencia: `${hoje.slice(0, 7)}-01`,
+      data_prevista: hoje
+    });
+    if (errCobranca) {
+      console.error('Erro ao lançar conta a receber na troca de plano:', errCobranca);
+      avisoCobranca = ' O plano foi trocado, mas não foi possível lançar a cobrança em Contas a Receber — lance manualmente.';
+    } else {
+      avisoCobranca = ' Cobrança lançada em Contas a Receber.';
+    }
+  }
+
+  res.json({ success: true, message: `Plano da empresa atualizado.${avisoCobranca}` });
 });
 
 // Cancela qualquer recorrência ativa no Mercado Pago antes de suspender (mesmo cuidado da troca

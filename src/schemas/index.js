@@ -512,8 +512,12 @@ const empresaVencimentoSchema = z.object({
   proxima_cobranca_em: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida').nullable()
 });
 
+// gerar_cobranca (padrão true): lança uma conta a receber pro novo plano, se pago (ver
+// superAdminPlataforma.js). Desliga só pra cortesia de verdade — nesses casos o admin não quer
+// nenhum lançamento cobrando a empresa.
 const empresaTrocarPlanoSchema = z.object({
-  plano_plataforma_id: idLike
+  plano_plataforma_id: idLike,
+  gerar_cobranca: z.boolean().optional().default(true)
 });
 
 // Corrige o tipo de negócio de uma empresa cadastrada errada (ver POST /empresas/registrar em
