@@ -199,6 +199,19 @@ async function buscarPreapproval({ accessToken, preapprovalId }) {
   return request(`/preapproval/${preapprovalId}`, { accessToken });
 }
 
+// Ajusta o valor da PRÓXIMA cobrança de uma assinatura já autorizada, sem exigir nova
+// autorização do pagador — usado pra escalonar o preço entre ciclos de uma campanha
+// promocional (ver services/precificacaoPlataforma.js). Diferente de cancelarPreapproval, este
+// é um caminho novo neste projeto (nunca usado em produção antes): teste com uma assinatura de
+// verdade antes de confiar cegamente que o próximo ciclo cobra o valor certo.
+async function atualizarValorPreapproval({ accessToken, preapprovalId, valor }) {
+  return request(`/preapproval/${preapprovalId}`, {
+    method: 'PUT',
+    accessToken,
+    body: { auto_recurring: { transaction_amount: Number(valor) } }
+  });
+}
+
 // Cada cobrança individual de um ciclo de assinatura (evento de webhook
 // "subscription_authorized_payment") — devolve entre outros o `preapproval_id` associado, já
 // que a notificação só traz o id dessa cobrança pontual, não da assinatura em si.
@@ -239,6 +252,7 @@ module.exports = {
   proximoStartDateValido,
   cancelarPreapproval,
   buscarPreapproval,
+  atualizarValorPreapproval,
   buscarPagamentoAutorizado,
   buscarUltimoPagamentoAutorizadoProcessado,
   taxaRealDoPagamento

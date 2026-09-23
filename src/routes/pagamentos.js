@@ -1,6 +1,13 @@
 const express = require('express');
 const supabase = require('../config/supabase');
-const { estaConfigurado, criarCheckout, cancelarAssinaturaNoGateway, reativarAssinaturaNoGateway } = require('../services/pagamento');
+const {
+  estaConfigurado,
+  criarCheckout,
+  cancelarAssinaturaNoGateway,
+  reativarAssinaturaNoGateway,
+  criarPixAssinaturaPlataforma
+} = require('../services/pagamento');
+const { buscarCampanhaParaNovoCadastro, precoDoCiclo } = require('../services/precificacaoPlataforma');
 const validate = require('../middleware/validate');
 const { iniciarUpgradeSchema } = require('../schemas');
 
@@ -9,7 +16,7 @@ const router = express.Router();
 // Protegida pelo mesmo verificarTokenAdmin de toda a área /admin/* (ver server.js).
 router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgradeSchema), async (req, res) => {
   const empresaId = req.empresaId;
-  const { plano_plataforma_id } = req.body;
+  const { plano_plataforma_id, forma_pagamento } = req.body;
 
   const { data: plano, error } = await supabase
     .from('planos_plataforma')
@@ -72,16 +79,73 @@ router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgr
       status_assinatura: 'ativa',
       proxima_cobranca_em: null,
       cancelamento_agendado: false,
-      gateway_subscription_id: null
+      gateway_subscription_id: null,
+      campanha_precificacao_id: null,
+      ciclo_cobranca_atual: 1,
+      plataforma_forma_pagamento: null
     }).eq('id', empresaId);
     return res.json({ configurado: true, message: 'Plano atualizado para o Grátis.' });
+  }
+
+  // Campanha promocional pro plano escolhido, se houver uma em vigor agora (ver
+  // services/precificacaoPlataforma.js) — o 1º ciclo já nasce no preço promocional; os
+  // seguintes são ajustados no cartão (routes/mercadopago.js:processarNotificacaoAssinatura) ou
+  // já nascem certos no Pix (cron/cobrancaPlataforma.js), ciclo a ciclo.
+  const campanha = await buscarCampanhaParaNovoCadastro(plano.id);
+  const precoPrimeiroCiclo = precoDoCiclo(campanha, 1, plano.preco_mensal);
+
+  if (forma_pagamento === 'pix') {
+    try {
+      const cobranca = await criarPixAssinaturaPlataforma({
+        empresaId,
+        planoNome: plano.nome,
+        valor: precoPrimeiroCiclo,
+        email: empresa.email,
+        cicloRef: 1
+      });
+      if (!cobranca.configurado) return res.status(503).json({ error: cobranca.message });
+
+      await supabase.from('plataforma_cobrancas').insert({
+        empresa_id: empresaId,
+        ciclo_ref: 1,
+        valor: precoPrimeiroCiclo,
+        forma_pagamento: 'pix',
+        mercadopago_payment_id: cobranca.mercadopagoPaymentId,
+        status: 'pendente'
+      });
+
+      // Mesmo princípio do cartão: plano_plataforma_id só troca de verdade quando o Pix cair
+      // (webhook de payment, ver routes/mercadopago.js). gateway_subscription_id fica null —
+      // Pix não tem recorrência no Mercado Pago, cada ciclo é uma cobrança avulsa nova.
+      await supabase.from('empresas').update({
+        plano_plataforma_pendente_id: plano.id,
+        gateway_subscription_id: null,
+        cancelamento_agendado: false,
+        campanha_precificacao_id: campanha?.id || null,
+        ciclo_cobranca_atual: 1,
+        plataforma_forma_pagamento: 'pix'
+      }).eq('id', empresaId);
+
+      res.json({
+        configurado: true,
+        formaPagamento: 'pix',
+        qr_code: cobranca.qr_code,
+        qr_code_base64: cobranca.qr_code_base64,
+        planoPendenteId: plano.id,
+        message: 'Pague o Pix abaixo para ativar o plano.'
+      });
+    } catch (e) {
+      console.error('Erro ao gerar Pix da assinatura da plataforma:', e);
+      res.status(500).json({ error: 'Não foi possível gerar a cobrança Pix agora. Tente novamente mais tarde.' });
+    }
+    return;
   }
 
   try {
     const checkout = await criarCheckout({
       empresaId,
       planoNome: plano.nome,
-      precoMensal: plano.preco_mensal,
+      precoMensal: precoPrimeiroCiclo,
       email: empresa.email
     });
 
@@ -94,7 +158,10 @@ router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgr
     await supabase.from('empresas').update({
       plano_plataforma_pendente_id: plano.id,
       gateway_subscription_id: checkout.gatewaySubscriptionId,
-      cancelamento_agendado: false
+      cancelamento_agendado: false,
+      campanha_precificacao_id: campanha?.id || null,
+      ciclo_cobranca_atual: 1,
+      plataforma_forma_pagamento: 'cartao'
     }).eq('id', empresaId);
 
     res.json({ ...checkout, planoPendenteId: plano.id });

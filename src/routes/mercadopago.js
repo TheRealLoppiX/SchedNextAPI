@@ -30,8 +30,9 @@ const {
   buscarPagamentoAutorizado,
   taxaRealDoPagamento
 } = require('../services/mercadopago');
-const { buscarPagamentoCicloPlataforma } = require('../services/pagamento');
+const { buscarPagamentoCicloPlataforma, atualizarValorAssinaturaNoGateway } = require('../services/pagamento');
 const { registrarReceitaPlataforma, registrarTaxaMarketplace } = require('../services/receitaPlataforma');
+const { buscarCampanhaDaEmpresa, precoDoCiclo, confirmarCicloPlataforma } = require('../services/precificacaoPlataforma');
 
 // Valor líquido real recebido num pagamento Pix confirmado (transaction_amount menos a taxa de
 // processamento do Mercado Pago, ver taxaRealDoPagamento) — mesmo princípio já usado pro cartão
@@ -524,7 +525,7 @@ router.get('/mercadopago/oauth/callback', async (req, res) => {
 async function processarNotificacaoAssinatura(preapprovalId) {
   const { data: empresaPlataforma } = await supabase
     .from('empresas')
-    .select('id, nome, email, plano_plataforma_pendente_id, status_assinatura')
+    .select('id, nome, email, plano_plataforma_id, plano_plataforma_pendente_id, status_assinatura, ciclo_cobranca_atual, campanha_precificacao_id')
     .eq('gateway_subscription_id', preapprovalId)
     .maybeSingle();
 
@@ -561,12 +562,17 @@ async function processarNotificacaoAssinatura(preapprovalId) {
     // services/receitaPlataforma.js) — busca o pagamento de verdade desse ciclo (com
     // fee_details) pra taxa real do Mercado Pago, não uma estimativa. Idempotente por id do
     // pagamento, então não tem problema chamar isso em toda notificação recebida, mesmo
-    // repetida.
+    // repetida. Também é o gatilho pra escalonar o preço do PRÓXIMO ciclo (campanha
+    // promocional, ver services/precificacaoPlataforma.js) — só avança depois de confirmar
+    // que esse ciclo específico ainda não tinha sido processado (confirmarCicloPlataforma é
+    // idempotente por empresa+ciclo), pra uma notificação repetida do Mercado Pago nunca
+    // pular ciclos nem ajustar o valor duas vezes.
     if (ativa) {
       buscarPagamentoCicloPlataforma(preapprovalId)
-        .then((pagamento) => {
+        .then(async (pagamento) => {
           if (!pagamento) return;
-          return registrarReceitaPlataforma({
+
+          registrarReceitaPlataforma({
             tipo: 'assinatura_plataforma',
             empresaId: empresaPlataforma.id,
             valorBruto: Number(pagamento.transaction_amount || 0),
@@ -574,9 +580,40 @@ async function processarNotificacaoAssinatura(preapprovalId) {
             formaPagamento: pagamento.payment_method_id === 'pix' ? 'pix' : 'cartao',
             referenciaExterna: String(pagamento.id),
             descricao: `Assinatura da plataforma - ${empresaPlataforma.nome}`
+          }).catch((err) => console.error('Erro ao registrar receita da assinatura da plataforma:', err));
+
+          const cicloConfirmado = empresaPlataforma.ciclo_cobranca_atual || 1;
+          const confirmado = await confirmarCicloPlataforma({
+            empresaId: empresaPlataforma.id,
+            cicloRef: cicloConfirmado,
+            valor: Number(pagamento.transaction_amount || 0),
+            formaPagamento: pagamento.payment_method_id === 'pix' ? 'pix' : 'cartao',
+            mercadopagoPaymentId: String(pagamento.id)
           });
+          if (!confirmado) return; // ciclo já tinha sido processado (webhook duplicado)
+
+          const proximoCiclo = cicloConfirmado + 1;
+          // Só mexe no valor cobrado de quem está numa campanha de verdade — sem essa checagem,
+          // um admin editando o preço BASE do plano mais tarde (PUT /super-admin/planos/:id)
+          // repricaria silenciosamente todo assinante já ativo desse plano no próximo ciclo, o
+          // que nunca foi o comportamento esperado (plano mudou de preço só pra quem assina
+          // dali em diante, igual sempre foi).
+          if (empresaPlataforma.campanha_precificacao_id) {
+            const planoAtualId = atualizacao.plano_plataforma_id || empresaPlataforma.plano_plataforma_id;
+            const [{ data: planoAtual }, campanha] = await Promise.all([
+              supabase.from('planos_plataforma').select('preco_mensal').eq('id', planoAtualId).maybeSingle(),
+              buscarCampanhaDaEmpresa(empresaPlataforma.campanha_precificacao_id)
+            ]);
+
+            const precoProximoCiclo = precoDoCiclo(campanha, proximoCiclo, planoAtual?.preco_mensal ?? 0);
+            if (Number(precoProximoCiclo) !== Number(pagamento.transaction_amount)) {
+              atualizarValorAssinaturaNoGateway(preapprovalId, precoProximoCiclo)
+                .catch((err) => console.error('Erro ao ajustar valor da assinatura pro próximo ciclo (campanha promocional):', err));
+            }
+          }
+          await supabase.from('empresas').update({ ciclo_cobranca_atual: proximoCiclo }).eq('id', empresaPlataforma.id);
         })
-        .catch((err) => console.error('Erro ao registrar receita da assinatura da plataforma:', err));
+        .catch((err) => console.error('Erro ao processar ciclo confirmado da assinatura da plataforma:', err));
     }
 
     // Avisa o dono da empresa quando a cobrança da própria plataforma falha (cartão recusado,
@@ -753,7 +790,69 @@ router.post('/webhooks/mercadopago', async (req, res) => {
       return res.json({ recebido: true });
     }
 
-    // Também não é boleto de conta a receber — tenta como Pix de mensalidade de assinatura de
+    // Também não é boleto — tenta como Pix de um ciclo da assinatura da PLATAFORMA (empresa
+    // pagando a SchedNext via Pix, ver services/pagamento.js:criarPixAssinaturaPlataforma e
+    // cron/cobrancaPlataforma.js). Token da própria SchedNext, igual o boleto acima. Mesmo
+    // gatilho de "aplicar o plano pendente"/"avançar ciclo" que o cartão já tem em
+    // processarNotificacaoAssinatura, só que pro lado do Pix, que não passa por preapproval.
+    const { data: cobrancaPlataforma } = await supabase
+      .from('plataforma_cobrancas')
+      .select('id, empresa_id, ciclo_ref, valor, status')
+      .eq('mercadopago_payment_id', dataId)
+      .maybeSingle();
+
+    if (cobrancaPlataforma) {
+      if (cobrancaPlataforma.status === 'pendente' && process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN) {
+        try {
+          const pagamento = await buscarPagamento({
+            accessTokenVendedor: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
+            paymentId: dataId
+          });
+
+          if (pagamento.status === 'approved') {
+            await supabase.from('plataforma_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString() }).eq('id', cobrancaPlataforma.id);
+
+            const { data: empresaPix } = await supabase
+              .from('empresas')
+              .select('id, nome, plano_plataforma_id, plano_plataforma_pendente_id')
+              .eq('id', cobrancaPlataforma.empresa_id)
+              .maybeSingle();
+
+            const atualizacaoPix = {
+              status_assinatura: 'ativa',
+              ciclo_cobranca_atual: cobrancaPlataforma.ciclo_ref + 1
+            };
+            const proxima = new Date();
+            proxima.setMonth(proxima.getMonth() + 1);
+            atualizacaoPix.proxima_cobranca_em = proxima.toISOString();
+            // Mesmo gatilho do cartão: o plano só passa a valer de verdade quando a cobrança
+            // confirma — só acontece no 1º ciclo, os seguintes já são desse mesmo plano.
+            if (empresaPix?.plano_plataforma_pendente_id) {
+              atualizacaoPix.plano_plataforma_id = empresaPix.plano_plataforma_pendente_id;
+              atualizacaoPix.plano_plataforma_pendente_id = null;
+            }
+            await supabase.from('empresas').update(atualizacaoPix).eq('id', cobrancaPlataforma.empresa_id);
+
+            registrarReceitaPlataforma({
+              tipo: 'assinatura_plataforma',
+              empresaId: cobrancaPlataforma.empresa_id,
+              valorBruto: Number(pagamento.transaction_amount || 0),
+              valorLiquido: Number(pagamento.transaction_amount || 0) - taxaRealDoPagamento(pagamento),
+              formaPagamento: 'pix',
+              referenciaExterna: String(pagamento.id),
+              descricao: `Assinatura da plataforma - ${empresaPix?.nome || ''}`
+            }).catch((err) => console.error('Erro ao registrar receita da assinatura da plataforma (Pix):', err));
+          } else if (pagamento.status === 'rejected' || pagamento.status === 'cancelled') {
+            await supabase.from('plataforma_cobrancas').update({ status: 'inadimplente' }).eq('id', cobrancaPlataforma.id);
+          }
+        } catch (err) {
+          console.error('Erro ao reconfirmar Pix da assinatura da plataforma via webhook:', err);
+        }
+      }
+      return res.json({ recebido: true });
+    }
+
+    // Também não é Pix da plataforma — tenta como Pix de mensalidade de assinatura de
     // cliente final (ver services/cobrancaAssinatura.js). Mesmo princípio de nunca confiar só no
     // payload: só marca pago depois de reconfirmar direto na API.
     const { data: cobranca } = await supabase

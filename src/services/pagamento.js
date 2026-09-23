@@ -58,6 +58,46 @@ async function cancelarAssinaturaNoGateway(gatewaySubscriptionId) {
   });
 }
 
+// Escalona o valor de uma assinatura de cartão já autorizada pro próximo ciclo (campanha
+// promocional, ver services/precificacaoPlataforma.js e routes/mercadopago.js:
+// processarNotificacaoAssinatura). Best-effort de propósito (mesmo padrão de
+// cancelarAssinaturaNoGateway): se falhar, o ciclo cobra o valor antigo — melhor cobrar errado
+// uma vez (detectável e estornável) do que travar a confirmação do pagamento que acabou de cair.
+async function atualizarValorAssinaturaNoGateway(gatewaySubscriptionId, valor) {
+  if (!estaConfigurado() || !gatewaySubscriptionId) return;
+  await mercadopago.atualizarValorPreapproval({
+    accessToken: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
+    preapprovalId: gatewaySubscriptionId,
+    valor
+  });
+}
+
+// Cobrança Pix avulsa de um ciclo da assinatura da PLATAFORMA (empresa pagando a SchedNext) —
+// sempre com o token da própria SchedNext, nunca o da empresa (diferente do Pix de agendamento).
+// Mesmo princípio de gerarCobrancaPix em services/cobrancaAssinatura.js (cliente final), mas pro
+// outro lado da relação. Mercado Pago não tem Pix recorrente, então cada ciclo precisa de uma
+// cobrança nova — ver cron/cobrancaPlataforma.js, que chama isto uma vez por ciclo/empresa.
+async function criarPixAssinaturaPlataforma({ empresaId, planoNome, valor, email, cicloRef }) {
+  if (!estaConfigurado()) {
+    return { configurado: false, message: 'Cobrança automática ainda não está disponível.' };
+  }
+
+  const pagamento = await mercadopago.criarPagamentoPix({
+    accessTokenVendedor: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
+    valor,
+    descricao: `SchedNext: plano ${planoNome} - ciclo ${cicloRef}`,
+    externalReference: `plataforma-${empresaId}-${cicloRef}`,
+    payerEmail: email
+  });
+
+  return {
+    configurado: true,
+    mercadopagoPaymentId: String(pagamento.id),
+    qr_code: pagamento.point_of_interaction?.transaction_data?.qr_code || null,
+    qr_code_base64: pagamento.point_of_interaction?.transaction_data?.qr_code_base64 || null
+  };
+}
+
 // Busca o pagamento de verdade (com fee_details) da cobrança mais recente de um preapproval da
 // PLATAFORMA — mesmo princípio de services/cobrancaAssinatura.js:buscarValorLiquidoCicloCartao,
 // só que com o access_token DA SCHEDNEXT em vez do de uma empresa conectada. Usado pra registrar
@@ -104,4 +144,12 @@ async function reativarAssinaturaNoGateway({ empresaId, email, planoNome, precoM
   return preapproval.id;
 }
 
-module.exports = { estaConfigurado, criarCheckout, cancelarAssinaturaNoGateway, reativarAssinaturaNoGateway, buscarPagamentoCicloPlataforma };
+module.exports = {
+  estaConfigurado,
+  criarCheckout,
+  cancelarAssinaturaNoGateway,
+  atualizarValorAssinaturaNoGateway,
+  reativarAssinaturaNoGateway,
+  buscarPagamentoCicloPlataforma,
+  criarPixAssinaturaPlataforma
+};

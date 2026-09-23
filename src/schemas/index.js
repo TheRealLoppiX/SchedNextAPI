@@ -361,7 +361,10 @@ const clientePlanoSchema = z.object({
 // --- pagamentos.js ---
 
 const iniciarUpgradeSchema = z.object({
-  plano_plataforma_id: idLike
+  plano_plataforma_id: idLike,
+  // Pix é novo aqui (antes só cartão) — ver services/pagamento.js:criarPixAssinaturaPlataforma
+  // e cron/cobrancaPlataforma.js, que gera a cobrança de cada ciclo seguinte.
+  forma_pagamento: z.enum(['cartao', 'pix']).optional().default('cartao')
 });
 
 // --- apiKeys.js ---
@@ -531,6 +534,26 @@ const empresaTrocarVerticalSchema = z.object({
 
 const dataSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida');
 const formaPagamentoContaEnum = z.enum(['pix', 'ted', 'boleto', 'dinheiro', 'cartao', 'outro']).optional().nullable();
+
+// --- superAdminPrecificacao.js (campanhas promocionais de preço escalonado, ver
+// sql/2026_campanhas_precificacao.sql) ---
+
+// fim vira 23:59:59 do dia informado — sem isso, uma campanha "até 30/11" já contaria como
+// encerrada às 00:00 do próprio dia 30, excluindo o último dia da promoção.
+const campanhaPrecificacaoSchema = z.object({
+  plano_plataforma_id: idLike,
+  nome: z.string().trim().min(1, 'Nome da campanha é obrigatório').max(150),
+  inicio: dataSchema.transform((v) => `${v}T00:00:00`),
+  fim: dataSchema.transform((v) => `${v}T23:59:59`),
+  precos_por_ciclo: z.array(z.object({
+    numero_ciclo: z.coerce.number().int().positive('Ciclo deve ser maior que zero'),
+    valor: z.coerce.number().min(0, 'Valor não pode ser negativo')
+  })).min(1, 'Defina o preço de pelo menos um ciclo')
+});
+
+const campanhaAtivaSchema = z.object({
+  ativa: z.boolean()
+});
 // Competência = mês/ano de referência financeira (regime de competência), separado da data de
 // vencimento/pagamento (regime de caixa) — ver sql/2026_contas_competencia.sql. Input do
 // frontend é <input type="month"> ("AAAA-MM"), convertido aqui pro dia 1 do mês pra bater com a
@@ -719,6 +742,8 @@ module.exports = {
   empresaVencimentoSchema,
   empresaTrocarPlanoSchema,
   empresaTrocarVerticalSchema,
+  campanhaPrecificacaoSchema,
+  campanhaAtivaSchema,
   contaPagarSchema,
   contaPagarBaixaSchema,
   contaReceberSchema,
