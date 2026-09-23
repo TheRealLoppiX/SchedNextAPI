@@ -300,10 +300,28 @@ router.put('/super-admin/empresas/:id/plano', validate(empresaTrocarPlanoSchema)
   res.json({ success: true, message: 'Plano da empresa atualizado. Se havia cobrança recorrente ativa, ela foi cancelada, ajuste a data de próxima cobrança se o novo plano também for pago.' });
 });
 
+// Cancela qualquer recorrência ativa no Mercado Pago antes de suspender (mesmo cuidado da troca
+// de plano e da exclusão acima): sem isso, a empresa continuaria sendo cobrada todo mês mesmo
+// com o painel bloqueado, já que suspender só travava o login, nunca mexeu em gateway_subscription_id.
 router.post('/super-admin/empresas/:id/suspender', async (req, res) => {
-  const { error } = await supabase.from('empresas').update({ status_assinatura: 'suspensa' }).eq('id', req.params.id);
+  const { data: empresa } = await supabase.from('empresas').select('gateway_subscription_id').eq('id', req.params.id).maybeSingle();
+  if (!empresa) return res.status(404).json({ error: 'Empresa não encontrada.' });
+
+  if (empresa.gateway_subscription_id) {
+    try {
+      await cancelarAssinaturaNoGateway(empresa.gateway_subscription_id);
+    } catch (e) {
+      console.error('Erro ao cancelar assinatura no Mercado Pago (suspensão de empresa pelo admin absoluto):', e);
+    }
+  }
+
+  const { error } = await supabase
+    .from('empresas')
+    .update({ status_assinatura: 'suspensa', gateway_subscription_id: null, cancelamento_agendado: false })
+    .eq('id', req.params.id);
+
   if (error) return res.status(500).json({ error: 'Erro ao suspender empresa.' });
-  res.json({ success: true, message: 'Empresa suspensa. O login do admin dela fica bloqueado até reativar.' });
+  res.json({ success: true, message: 'Empresa suspensa. O login do admin dela fica bloqueado e a cobrança recorrente (se havia) foi cancelada.' });
 });
 
 router.post('/super-admin/empresas/:id/reativar', async (req, res) => {
