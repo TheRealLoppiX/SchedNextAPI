@@ -6,9 +6,11 @@ const {
   enviarNotificacaoCobrancaPix,
   verificarCobrancaCartao,
   buscarValorLiquidoCicloCartao,
-  marcarInadimplente
+  marcarInadimplente,
+  atualizarValorAssinaturaCliente
 } = require('../services/cobrancaAssinatura');
 const { registrarTaxaMarketplace } = require('../services/receitaPlataforma');
+const { buscarCampanhaDoCliente, precoDoCiclo } = require('../services/precificacaoAssinatura');
 
 // Roda uma vez por dia: cobrança recorrente da assinatura do CLIENTE FINAL (mensalidade que ele
 // paga pra própria barbearia). Só considera quem tem assinatura_forma_pagamento configurada —
@@ -24,7 +26,7 @@ function iniciarCobrancaAssinaturas() {
 
     const { data: assinantes, error } = await supabase
       .from('usuarios')
-      .select('id, empresa_id, plano_id, nome_completo, email, telefone, assinante_desde, assinatura_forma_pagamento, status_assinatura, mercadopago_preapproval_id')
+      .select('id, empresa_id, plano_id, nome_completo, email, telefone, assinante_desde, assinatura_forma_pagamento, status_assinatura, mercadopago_preapproval_id, ciclo_cobranca_atual, campanha_assinatura_id')
       .eq('assinante', true)
       .not('plano_id', 'is', null)
       .not('assinatura_forma_pagamento', 'is', null);
@@ -57,20 +59,29 @@ function iniciarCobrancaAssinaturas() {
           .maybeSingle();
         if (!empresa || !plano) continue;
 
+        // Preço deste ciclo: cai no preço cheio do plano, a não ser que o cliente esteja numa
+        // campanha promocional da própria empresa (ver services/precificacaoAssinatura.js) que
+        // defina um valor pra esse ciclo específico (1º, 2º, 3º...).
+        const campanha = await buscarCampanhaDoCliente(usuario.campanha_assinatura_id);
+        const valorCiclo = precoDoCiclo(campanha, usuario.ciclo_cobranca_atual || 1, plano.preco);
+
         if (usuario.assinatura_forma_pagamento === 'pix') {
           if (!empresa.mercadopago_access_token) continue;
-          const { qr_code, qr_code_base64 } = await gerarCobrancaPix({ usuario, empresa, plano });
-          await enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode: qr_code, qrCodeBase64: qr_code_base64 });
+          const { qr_code, qr_code_base64 } = await gerarCobrancaPix({ usuario, empresa, plano, valor: valorCiclo });
+          await enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode: qr_code, qrCodeBase64: qr_code_base64, valor: valorCiclo });
           console.log(`Cobrança Pix da mensalidade gerada e enviada pra ${usuario.nome_completo}.`);
         } else if (usuario.assinatura_forma_pagamento === 'cartao') {
           // O Mercado Pago cobra sozinho no preapproval já agendado — aqui só abre o registro
           // do ciclo, que a segunda passada abaixo confirma como paga (ou não) no dia seguinte.
+          // O VALOR do preapproval em si já foi ajustado pro ciclo atual na confirmação do ciclo
+          // anterior (ver segunda passada abaixo) — este valor aqui é só o esperado, pra bater
+          // com o que realmente vier na confirmação.
           await supabase.from('assinatura_cobrancas').insert({
             usuario_id: usuario.id,
             empresa_id: empresa.id,
             plano_id: plano.id,
             ciclo_ref: cicloRef,
-            valor: plano.preco,
+            valor: valorCiclo,
             forma_pagamento: 'cartao',
             status: 'pendente'
           });
@@ -85,7 +96,7 @@ function iniciarCobrancaAssinaturas() {
     // assinatura de cliente final) e marca Pix não pago como inadimplente.
     const { data: pendentesVencidas, error: errVencidas } = await supabase
       .from('assinatura_cobrancas')
-      .select('id, usuario_id, empresa_id, forma_pagamento, ciclo_ref')
+      .select('id, usuario_id, empresa_id, plano_id, forma_pagamento, ciclo_ref')
       .eq('status', 'pendente')
       .lt('ciclo_ref', hoje);
 
@@ -95,7 +106,7 @@ function iniciarCobrancaAssinaturas() {
       try {
         const { data: usuario } = await supabase
           .from('usuarios')
-          .select('id, nome_completo, email, telefone, status_assinatura, mercadopago_preapproval_id')
+          .select('id, nome_completo, email, telefone, status_assinatura, mercadopago_preapproval_id, ciclo_cobranca_atual, campanha_assinatura_id')
           .eq('id', cobranca.usuario_id)
           .maybeSingle();
         if (!usuario) continue;
@@ -132,6 +143,23 @@ function iniciarCobrancaAssinaturas() {
                 console.error('Erro ao registrar taxa de marketplace da mensalidade:', err);
               }
             }
+
+            // Escalona o valor do PRÓXIMO ciclo, só pra quem está numa campanha de verdade —
+            // sem essa checagem, mudar o preço BASE do plano mais tarde repricaria
+            // silenciosamente todo assinante já ativo dele (mesmo cuidado do lado da
+            // plataforma, ver routes/mercadopago.js:processarNotificacaoAssinatura).
+            const cicloConfirmado = usuario.ciclo_cobranca_atual || 1;
+            const proximoCiclo = cicloConfirmado + 1;
+            if (usuario.campanha_assinatura_id) {
+              const { data: planoCobranca } = await supabase.from('planos_assinatura').select('preco').eq('id', cobranca.plano_id).maybeSingle();
+              const campanha = await buscarCampanhaDoCliente(usuario.campanha_assinatura_id);
+              const precoProximoCiclo = precoDoCiclo(campanha, proximoCiclo, planoCobranca?.preco ?? 0);
+              if (pagamento && Number(precoProximoCiclo) !== Number(pagamento.transaction_amount)) {
+                atualizarValorAssinaturaCliente({ empresa, preapprovalId: usuario.mercadopago_preapproval_id, valor: precoProximoCiclo })
+                  .catch((err) => console.error('Erro ao ajustar valor da assinatura do cliente pro próximo ciclo (campanha promocional):', err));
+              }
+            }
+            await supabase.from('usuarios').update({ ciclo_cobranca_atual: proximoCiclo }).eq('id', usuario.id);
           } else {
             await supabase.from('assinatura_cobrancas').update({ status: 'falhou' }).eq('id', cobranca.id);
             await marcarInadimplente(usuario, empresa);

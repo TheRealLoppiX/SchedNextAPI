@@ -109,6 +109,7 @@ app.use(require('./src/routes/agendamentos'));
 app.use(require('./src/routes/estoque'));
 app.use(require('./src/routes/fidelidade'));
 app.use(require('./src/routes/assinaturas'));
+app.use(require('./src/routes/campanhasAssinatura'));
 app.use(require('./src/routes/empresa'));
 app.use(require('./src/routes/empresasPublico'));
 app.use(require('./src/routes/pagamentos'));

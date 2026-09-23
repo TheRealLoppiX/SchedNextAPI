@@ -10,6 +10,7 @@ const {
   criarPreapproval,
   proximoStartDateValido,
   buscarPreapproval,
+  atualizarValorPreapproval,
   buscarPagamento,
   buscarUltimoPagamentoAutorizadoProcessado,
   taxaRealDoPagamento
@@ -27,7 +28,7 @@ const {
 // se ainda não existir — usado tanto pra registrar uma cobrança nova (Pix/cartão) quanto pra
 // dar baixa manual em cliente que nunca teve cobrança automática configurada (o caso comum de
 // primeira mensalidade paga presencialmente, sem nenhuma linha ainda).
-async function obterOuCriarCobrancaCicloAtual({ usuario, empresa, plano, formaPagamento }) {
+async function obterOuCriarCobrancaCicloAtual({ usuario, empresa, plano, formaPagamento, valor }) {
   const cicloRef = calcularInicioCiclo(usuario.assinante_desde);
 
   const { data: existente, error: errBusca } = await supabase
@@ -46,7 +47,7 @@ async function obterOuCriarCobrancaCicloAtual({ usuario, empresa, plano, formaPa
       empresa_id: empresa.id,
       plano_id: plano.id,
       ciclo_ref: cicloRef,
-      valor: plano.preco,
+      valor: valor ?? plano.preco,
       forma_pagamento: formaPagamento,
       status: 'pendente'
     })
@@ -60,17 +61,18 @@ async function obterOuCriarCobrancaCicloAtual({ usuario, empresa, plano, formaPa
 // idempotente, então gerar de novo no mesmo ciclo — ex: cliente perdeu o QR — devolve/atualiza a
 // mesma linha em vez de duplicar). applicationFee usa a mesma taxa de marketplace do Pix avulso
 // e do preapproval (obterTaxaMarketplace).
-async function gerarCobrancaPix({ usuario, empresa, plano }) {
+async function gerarCobrancaPix({ usuario, empresa, plano, valor }) {
   const cicloRef = calcularInicioCiclo(usuario.assinante_desde);
+  const valorCobrado = valor ?? plano.preco;
   const taxaPercentual = await obterTaxaMarketplace(empresa.id);
 
   const cobranca = await criarPagamentoPix({
     accessTokenVendedor: empresa.mercadopago_access_token,
-    valor: plano.preco,
+    valor: valorCobrado,
     descricao: `${empresa.nome}: assinatura ${plano.nome}`,
     externalReference: `assinatura-${usuario.id}-${cicloRef}`,
     payerEmail: usuario.email,
-    applicationFee: plano.preco * (taxaPercentual / 100)
+    applicationFee: valorCobrado * (taxaPercentual / 100)
   });
 
   const { data: linha, error } = await supabase
@@ -80,7 +82,7 @@ async function gerarCobrancaPix({ usuario, empresa, plano }) {
       empresa_id: empresa.id,
       plano_id: plano.id,
       ciclo_ref: cicloRef,
-      valor: plano.preco,
+      valor: valorCobrado,
       forma_pagamento: 'pix',
       status: 'pendente',
       mercadopago_payment_id: String(cobranca.id)
@@ -100,7 +102,8 @@ async function gerarCobrancaPix({ usuario, empresa, plano }) {
 // WhatsApp (só o código copia-e-cola em texto — o adapter da Evolution API não manda imagem, ver
 // services/whatsapp/provider.js). Mesmo padrão de notificarPagamentoConfirmado em
 // routes/mercadopago.js.
-async function enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode, qrCodeBase64 }) {
+async function enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode, qrCodeBase64, valor }) {
+  const valorCobrado = valor ?? plano.preco;
   if (usuario.email) {
     transporter.sendMail({
       to: usuario.email,
@@ -109,7 +112,7 @@ async function enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode, q
         titulo: `Olá, ${usuario.nome_completo}!`,
         mensagemHtml: `
           <p style="margin: 0 0 12px;">Sua mensalidade do plano <strong>${plano.nome}</strong> na <strong>${empresa.nome}</strong> está disponível pra pagamento via Pix.</p>
-          <p style="margin: 12px 0; font-size: 15px;"><strong>Valor:</strong> R$ ${Number(plano.preco).toFixed(2)}</p>
+          <p style="margin: 12px 0; font-size: 15px;"><strong>Valor:</strong> R$ ${Number(valorCobrado).toFixed(2)}</p>
           ${qrCodeBase64 ? `<img src="data:image/png;base64,${qrCodeBase64}" alt="QR Code Pix" style="display:block;margin:16px auto;max-width:220px;" />` : ''}
           ${qrCode ? `<p style="margin: 12px 0; font-size: 12px; word-break: break-all; background:#fff; border:1px solid #e2e5f0; border-radius:8px; padding:12px;">${qrCode}</p>` : ''}
         `
@@ -121,7 +124,7 @@ async function enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode, q
     enviarMensagem(
       empresa.whatsapp_phone_number_id,
       `55${usuario.telefone.replace(/\D/g, '')}`,
-      `Mensalidade do plano ${plano.nome} na ${empresa.nome}: R$ ${Number(plano.preco).toFixed(2)}.\n\nPix copia e cola:\n${qrCode}`
+      `Mensalidade do plano ${plano.nome} na ${empresa.nome}: R$ ${Number(valorCobrado).toFixed(2)}.\n\nPix copia e cola:\n${qrCode}`
     ).catch((err) => console.error('Erro ao enviar WhatsApp de cobrança de assinatura:', err));
   }
 }
@@ -135,17 +138,18 @@ async function enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode, q
 // Mercado Pago não deixa "empurrar" a data de um preapproval já autorizado, então a única forma
 // de mudar o dia de cobrança do cartão é cancelar o antigo e criar um novo com o start_date
 // desejado (proximoStartDateValido cai pra "agora" se dataAlvo já passou).
-async function criarPreapprovalAssinatura({ usuario, empresa, plano, dataAlvo }) {
+async function criarPreapprovalAssinatura({ usuario, empresa, plano, dataAlvo, valor }) {
+  const valorCobrado = valor ?? plano.preco;
   const taxaPercentual = await obterTaxaMarketplace(empresa.id);
   const preapproval = await criarPreapproval({
     accessToken: empresa.mercadopago_access_token,
     reason: `${empresa.nome} - plano ${plano.nome}`,
-    valor: plano.preco,
+    valor: valorCobrado,
     payerEmail: usuario.email,
     externalReference: String(usuario.id),
     backUrl: montarUrlTenant(empresa, '/assinatura'),
     startDate: proximoStartDateValido(dataAlvo),
-    applicationFee: plano.preco * (taxaPercentual / 100)
+    applicationFee: valorCobrado * (taxaPercentual / 100)
   });
 
   await supabase.from('usuarios').update({ mercadopago_preapproval_id: preapproval.id, assinatura_forma_pagamento: 'cartao' }).eq('id', usuario.id);
@@ -163,6 +167,17 @@ async function verificarCobrancaCartao({ usuario, empresa }) {
     preapprovalId: usuario.mercadopago_preapproval_id
   });
   return preapproval.status;
+}
+
+// Escalona o valor da assinatura de cartão do cliente pro próximo ciclo (campanha promocional da
+// empresa, ver services/precificacaoAssinatura.js) — chamado pelo cron depois de confirmar o
+// ciclo atual (cron/cobrancaAssinaturas.js), nunca por webhook (não existe um confiável por
+// ciclo pra assinatura de cliente final, ver comentário em verificarCobrancaCartao acima).
+// Best-effort de propósito, mesmo padrão do resto deste arquivo: se falhar, o próximo ciclo
+// cobra o valor antigo — melhor isso do que travar a confirmação do ciclo que acabou de cair.
+async function atualizarValorAssinaturaCliente({ empresa, preapprovalId, valor }) {
+  if (!empresa?.mercadopago_access_token || !preapprovalId) return;
+  await atualizarValorPreapproval({ accessToken: empresa.mercadopago_access_token, preapprovalId, valor });
 }
 
 // Confirma no ledger que a cobrança de cartão do ciclo atual do cliente caiu — chamado tanto
@@ -260,6 +275,7 @@ module.exports = {
   enviarNotificacaoCobrancaPix,
   criarPreapprovalAssinatura,
   verificarCobrancaCartao,
+  atualizarValorAssinaturaCliente,
   confirmarCicloCartao,
   buscarValorLiquidoCicloCartao,
   marcarInadimplente,

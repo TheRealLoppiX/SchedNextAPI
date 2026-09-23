@@ -554,6 +554,21 @@ const campanhaPrecificacaoSchema = z.object({
 const campanhaAtivaSchema = z.object({
   ativa: z.boolean()
 });
+
+// --- campanhasAssinatura.js (campanhas de preço escalonado da assinatura de cliente final,
+// escopadas por empresa — ver sql/2026_campanhas_assinatura.sql) ---
+
+const campanhaAssinaturaSchema = z.object({
+  plano_assinatura_id: idLike,
+  nome: z.string().trim().min(1, 'Nome da campanha é obrigatório').max(150),
+  inicio: dataSchema.transform((v) => `${v}T00:00:00`),
+  fim: dataSchema.transform((v) => `${v}T23:59:59`),
+  precos_por_ciclo: z.array(z.object({
+    numero_ciclo: z.coerce.number().int().positive('Ciclo deve ser maior que zero'),
+    valor: z.coerce.number().min(0, 'Valor não pode ser negativo')
+  })).min(1, 'Defina o preço de pelo menos um ciclo')
+});
+
 // Competência = mês/ano de referência financeira (regime de competência), separado da data de
 // vencimento/pagamento (regime de caixa) — ver sql/2026_contas_competencia.sql. Input do
 // frontend é <input type="month"> ("AAAA-MM"), convertido aqui pro dia 1 do mês pra bater com a
@@ -655,6 +670,9 @@ const planoPlataformaSchema = z.object({
   permite_api_publica: z.boolean().optional().default(false),
   permite_relatorios_avancados: z.boolean().optional().default(false),
   permite_dominio_customizado: z.boolean().optional().default(false),
+  // Campanhas promocionais de preço escalonado pra assinatura de cliente final (ver
+  // utils/limitesPlano.js:permiteCampanhasAssinatura, routes/campanhasAssinatura.js).
+  permite_campanhas_assinatura: z.boolean().optional().default(false),
   // Fatia (application_fee) que a SchedNext fica de cada Pix cobrado via Mercado Pago nesse
   // plano — ver utils/limitesPlano.js (obterTaxaMarketplace) e routes/mercadopago.js.
   taxa_marketplace_percentual: z.coerce.number().min(0, 'Taxa não pode ser negativa').max(100, 'Taxa não pode passar de 100%').optional().default(0),
@@ -744,6 +762,7 @@ module.exports = {
   empresaTrocarVerticalSchema,
   campanhaPrecificacaoSchema,
   campanhaAtivaSchema,
+  campanhaAssinaturaSchema,
   contaPagarSchema,
   contaPagarBaixaSchema,
   contaReceberSchema,

@@ -33,6 +33,10 @@ const {
 const { buscarPagamentoCicloPlataforma, atualizarValorAssinaturaNoGateway } = require('../services/pagamento');
 const { registrarReceitaPlataforma, registrarTaxaMarketplace } = require('../services/receitaPlataforma');
 const { buscarCampanhaDaEmpresa, precoDoCiclo, confirmarCicloPlataforma } = require('../services/precificacaoPlataforma');
+const {
+  buscarCampanhaParaNovoCadastro,
+  precoDoCiclo: precoDoCicloAssinatura
+} = require('../services/precificacaoAssinatura');
 
 // Valor líquido real recebido num pagamento Pix confirmado (transaction_amount menos a taxa de
 // processamento do Mercado Pago, ver taxaRealDoPagamento) — mesmo princípio já usado pro cartão
@@ -41,6 +45,18 @@ const { buscarCampanhaDaEmpresa, precoDoCiclo, confirmarCicloPlataforma } = requ
 // confirmar o status dele).
 function valorLiquidoDoPagamento(pagamento) {
   return Number(pagamento.transaction_amount || 0) - taxaRealDoPagamento(pagamento);
+}
+
+// Avança o ciclo (1º, 2º, 3º...) da assinatura de cliente final confirmada — usado tanto pelo
+// polling do próprio cliente quanto pelo webhook, pros dois caminhos de confirmação de Pix (ver
+// services/precificacaoAssinatura.js pra onde isso é lido de volta na hora de gerar a PRÓXIMA
+// cobrança). Sem transação/lock: um duplo-disparo bem no mesmo instante poderia avançar 2 ciclos
+// de uma vez, mas isso já era um risco pré-existente da falta de dedupe nesses dois caminhos
+// (webhook + polling podendo confirmar o mesmo pagamento em paralelo), não algo novo introduzido
+// aqui.
+async function avancarCicloAssinatura(usuarioId) {
+  const { data: usuario } = await supabase.from('usuarios').select('ciclo_cobranca_atual').eq('id', usuarioId).maybeSingle();
+  await supabase.from('usuarios').update({ ciclo_cobranca_atual: (usuario?.ciclo_cobranca_atual || 1) + 1 }).eq('id', usuarioId);
 }
 
 const router = express.Router();
@@ -386,11 +402,24 @@ router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, v
     return res.status(400).json({ error: 'Esta barbearia ainda não conectou o Mercado Pago para cobrança automática.' });
   }
 
+  // Campanha promocional da barbearia pra esse plano, se houver uma em vigor agora (recurso de
+  // plano, ver utils/limitesPlano.js:permiteCampanhasAssinatura — só empresas com o flag
+  // conseguem CRIAR campanha em routes/campanhasAssinatura.js, então uma empresa sem o recurso
+  // nunca chega a ter uma pra encontrar aqui). O 1º ciclo já nasce no preço promocional; os
+  // seguintes são ajustados no cartão (cron/cobrancaAssinaturas.js) ou já nascem certos no Pix,
+  // ciclo a ciclo.
+  const campanha = await buscarCampanhaParaNovoCadastro(empresa.id, plano.id);
+  const precoPrimeiroCiclo = precoDoCicloAssinatura(campanha, 1, plano.preco);
+
   if (formaPagamento === 'pix') {
     try {
-      const { qr_code, qr_code_base64 } = await gerarCobrancaPix({ usuario, empresa, plano });
-      await enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode: qr_code, qrCodeBase64: qr_code_base64 });
-      await supabase.from('usuarios').update({ assinatura_forma_pagamento: 'pix' }).eq('id', req.params.id);
+      const { qr_code, qr_code_base64 } = await gerarCobrancaPix({ usuario, empresa, plano, valor: precoPrimeiroCiclo });
+      await enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode: qr_code, qrCodeBase64: qr_code_base64, valor: precoPrimeiroCiclo });
+      await supabase.from('usuarios').update({
+        assinatura_forma_pagamento: 'pix',
+        campanha_assinatura_id: campanha?.id || null,
+        ciclo_cobranca_atual: 1
+      }).eq('id', req.params.id);
       res.json({ qr_code, qr_code_base64 });
     } catch (err) {
       console.error('Erro ao gerar Pix da assinatura do cliente:', err);
@@ -400,7 +429,8 @@ router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, v
   }
 
   try {
-    const checkoutUrl = await criarPreapprovalAssinatura({ usuario, empresa, plano });
+    const checkoutUrl = await criarPreapprovalAssinatura({ usuario, empresa, plano, valor: precoPrimeiroCiclo });
+    await supabase.from('usuarios').update({ campanha_assinatura_id: campanha?.id || null, ciclo_cobranca_atual: 1 }).eq('id', req.params.id);
     res.json({ checkoutUrl });
   } catch (err) {
     console.error('Erro ao criar assinatura do cliente:', err);
@@ -434,6 +464,7 @@ router.get('/usuario/:id/assinatura-cobranca/pix/status', verificarTokenCliente,
     if (pagamento.status === 'approved') {
       await supabase.from('assinatura_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString(), valor_liquido: valorLiquidoDoPagamento(pagamento) }).eq('id', cobranca.id);
       await marcarEmDia(req.params.id);
+      await avancarCicloAssinatura(req.params.id);
       registrarTaxaMarketplace({ pagamento, empresaId: cobranca.empresa_id, descricao: 'Mensalidade cliente final (Pix)' }).catch((err) => console.error('Erro ao registrar taxa de marketplace da mensalidade:', err));
       return res.json({ status: 'pago' });
     }
@@ -871,6 +902,7 @@ router.post('/webhooks/mercadopago', async (req, res) => {
         if (pagamento.status === 'approved') {
           await supabase.from('assinatura_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString(), valor_liquido: valorLiquidoDoPagamento(pagamento) }).eq('id', cobranca.id);
           await marcarEmDia(cobranca.usuario_id);
+          await avancarCicloAssinatura(cobranca.usuario_id);
           registrarTaxaMarketplace({ pagamento, empresaId: cobranca.empresa_id, descricao: 'Mensalidade cliente final (Pix)' }).catch((err) => console.error('Erro ao registrar taxa de marketplace da mensalidade:', err));
         } else if (pagamento.status === 'rejected' || pagamento.status === 'cancelled') {
           await supabase.from('assinatura_cobrancas').update({ status: 'falhou' }).eq('id', cobranca.id);
