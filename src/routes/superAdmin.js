@@ -3,9 +3,18 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
 const supabase = require('../config/supabase');
+const transporter = require('../config/mailer');
 const validate = require('../middleware/validate');
-const { loginLimiter } = require('../middleware/rateLimiters');
-const { superAdminLoginSchema, superAdminCriarSchema, superAdminEditarSchema, leadStatusSchema } = require('../schemas');
+const { loginLimiter, codigoLimiter } = require('../middleware/rateLimiters');
+const { emailHtml, blocoCodigo } = require('../utils/emailTemplate');
+const {
+  superAdminLoginSchema,
+  superAdminCriarSchema,
+  superAdminEditarSchema,
+  leadStatusSchema,
+  recuperarSenhaAdminSchema,
+  resetarSenhaSchema
+} = require('../schemas');
 
 const router = express.Router();
 
@@ -39,6 +48,64 @@ router.post('/super-admin/login', loginLimiter, validate(superAdminLoginSchema),
     { expiresIn: '8h' }
   );
   res.json({ success: true, token });
+});
+
+// --- RECUPERAÇÃO DE SENHA DO ADMIN ABSOLUTO ---
+// Só recuperação, sem cadastro: um super admin novo só é criado por quem já é super admin
+// (POST /super-admin/super-admins acima), nunca por auto-cadastro. Mesmo mecanismo de código
+// de 6 dígitos dos outros dois logins do projeto (ver sql/2026_recuperacao_senha_super_admin.sql).
+router.post('/super-admin/recuperar-senha', codigoLimiter, validate(recuperarSenhaAdminSchema), async (req, res) => {
+  const { email } = req.body;
+  const codigo = Math.floor(100000 + Math.random() * 900000).toString();
+
+  const { data: superAdmin, error } = await supabase
+    .from('super_admins')
+    .update({ codigo_verificacao: codigo })
+    .eq('email', email)
+    .eq('ativo', true)
+    .select('id')
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: 'Erro interno.' });
+  if (!superAdmin) return res.status(404).json({ error: 'E-mail não encontrado.' });
+
+  transporter.sendMail({
+    to: email,
+    subject: 'Recuperação de senha - SchedNext Admin',
+    html: emailHtml({
+      titulo: 'Recuperação de senha',
+      mensagemHtml: `
+        <p style="margin: 0 0 4px;">Use o código abaixo para criar uma nova senha de acesso ao admin absoluto:</p>
+        ${blocoCodigo(codigo)}
+        <p style="margin: 0; color: #666; font-size: 13px;">Se você não pediu isso, pode ignorar este e-mail.</p>
+      `
+    })
+  }).catch((mailErr) => console.error('Erro ao enviar e-mail de recuperação de senha (super admin):', mailErr));
+
+  res.json({ message: 'Código enviado!' });
+});
+
+router.post('/super-admin/resetar-senha', codigoLimiter, validate(resetarSenhaSchema), async (req, res) => {
+  const { email, codigo, novaSenha } = req.body;
+  const novaSenhaHash = await bcrypt.hash(novaSenha, 12);
+
+  const { data: candidatos, error: selError } = await supabase
+    .from('super_admins')
+    .select('id, email')
+    .eq('codigo_verificacao', codigo);
+
+  if (selError) return res.status(500).json({ error: 'Erro interno.' });
+
+  const alvo = (candidatos || []).find((s) => (s.email || '').trim() === (email || '').trim());
+  if (!alvo) return res.status(400).json({ error: 'Código inválido ou expirado.' });
+
+  const { error } = await supabase
+    .from('super_admins')
+    .update({ senha_hash: novaSenhaHash, codigo_verificacao: null })
+    .eq('id', alvo.id);
+
+  if (error) return res.status(400).json({ error: 'Código inválido ou expirado.' });
+  res.json({ message: 'Senha alterada!' });
 });
 
 // Lista os super admins existentes (sem o hash da senha) pra tela de gestão.
