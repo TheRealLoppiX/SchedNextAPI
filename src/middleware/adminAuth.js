@@ -1,12 +1,17 @@
 const jwt = require('jsonwebtoken');
 
-// Protege toda a área /admin/*. O único endpoint sob /admin que fica de fora é o próprio
-// /admin/login (é ele quem emite o token). Todo o resto, incluindo /admin/estoque/*, só é
-// alcançado depois que o dono da empresa já fez login, então exigir esse mesmo token aqui
-// também é o comportamento correto (o sub-login de colaborador de estoque continua existindo
-// como uma segunda checagem por cima desta).
+// Protege toda a área /admin/*. Ficam de fora só os endpoints que precisam ser alcançados por
+// quem AINDA não tem token: o próprio /admin/login (é ele quem emite o token) e o fluxo de
+// recuperação de senha (/admin/recuperar-senha, /admin/resetar-senha — ver routes/auth.js), já
+// que quem esqueceu a senha por definição não consegue logar pra conseguir um token. Todo o
+// resto, incluindo /admin/estoque/*, só é alcançado depois que o dono da empresa já fez login,
+// então exigir esse mesmo token aqui também é o comportamento correto (o sub-login de
+// colaborador de estoque continua existindo como uma segunda checagem por cima desta).
+const ROTAS_PUBLICAS = ['/admin/login', '/admin/recuperar-senha', '/admin/resetar-senha'];
+
 function verificarTokenAdmin(req, res, next) {
-  if (req.originalUrl === '/admin/login' || req.originalUrl.startsWith('/admin/login?')) {
+  const caminho = req.originalUrl.split('?')[0];
+  if (ROTAS_PUBLICAS.includes(caminho)) {
     return next();
   }
 

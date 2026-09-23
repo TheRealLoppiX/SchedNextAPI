@@ -13,6 +13,7 @@ const {
   confirmarCodigoSchema,
   recuperarSenhaSchema,
   resetarSenhaSchema,
+  recuperarSenhaAdminSchema,
   segurancaCodigoSchema,
   segurancaUpdateSchema,
   segurancaValidarSchema
@@ -389,6 +390,93 @@ router.post('/admin/login', loginLimiter, validate(loginSchema), async (req, res
     console.error('Erro no /admin/login (unidade):', e);
     res.status(500).json({ error: 'Erro interno no servidor' });
   }
+});
+
+// --- RECUPERAÇÃO DE SENHA DO LOGIN ADMINISTRATIVO ---
+// Login de barbearia (/admin/login) não é escopado por empresaSlug — busca o e-mail direto em
+// `empresas` (dono) e, se não achar, em `unidade_admins` (admin de uma unidade só). A recuperação
+// segue a mesma ordem, igual ao /admin/login (ver sql/2026_recuperacao_senha_admin.sql).
+router.post('/admin/recuperar-senha', codigoLimiter, validate(recuperarSenhaAdminSchema), async (req, res) => {
+  const { email } = req.body;
+  const codigo = Math.floor(100000 + Math.random() * 900000).toString();
+
+  const { data: empresa, error: empErr } = await supabase
+    .from('empresas')
+    .update({ codigo_verificacao: codigo })
+    .eq('email', email)
+    .select('id')
+    .maybeSingle();
+
+  if (empErr) return res.status(500).json({ error: 'Erro interno.' });
+
+  if (!empresa) {
+    const { data: adminUnidade, error: unidErr } = await supabase
+      .from('unidade_admins')
+      .update({ codigo_verificacao: codigo })
+      .eq('email', email)
+      .select('id')
+      .maybeSingle();
+
+    if (unidErr) return res.status(500).json({ error: 'Erro interno.' });
+    if (!adminUnidade) return res.status(404).json({ error: 'E-mail não encontrado.' });
+  }
+
+  transporter.sendMail({
+    to: email,
+    subject: 'Recuperação de senha - SchedNext',
+    html: emailHtml({
+      titulo: 'Recuperação de senha',
+      mensagemHtml: `
+        <p style="margin: 0 0 4px;">Use o código abaixo para criar uma nova senha de acesso ao painel administrativo:</p>
+        ${blocoCodigo(codigo)}
+        <p style="margin: 0; color: #666; font-size: 13px;">Se você não pediu isso, pode ignorar este e-mail.</p>
+      `
+    })
+  }).catch((mailErr) => console.error('Erro ao enviar e-mail de recuperação de senha (admin):', mailErr));
+
+  res.json({ message: 'Código enviado!' });
+});
+
+router.post('/admin/resetar-senha', codigoLimiter, validate(resetarSenhaSchema), async (req, res) => {
+  const { email, codigo, novaSenha } = req.body;
+  const novaSenhaHash = await bcrypt.hash(novaSenha, 12);
+
+  const { data: candidatosEmpresa, error: empSelErr } = await supabase
+    .from('empresas')
+    .select('id, email')
+    .eq('codigo_verificacao', codigo);
+
+  if (empSelErr) return res.status(500).json({ error: 'Erro interno.' });
+
+  const empresaAlvo = (candidatosEmpresa || []).find((e) => (e.email || '').trim() === (email || '').trim());
+
+  if (empresaAlvo) {
+    const { error } = await supabase
+      .from('empresas')
+      .update({ senha: novaSenhaHash, codigo_verificacao: null })
+      .eq('id', empresaAlvo.id);
+
+    if (error) return res.status(400).json({ error: 'Código inválido ou expirado.' });
+    return res.json({ message: 'Senha alterada!' });
+  }
+
+  const { data: candidatosUnidade, error: unidSelErr } = await supabase
+    .from('unidade_admins')
+    .select('id, email')
+    .eq('codigo_verificacao', codigo);
+
+  if (unidSelErr) return res.status(500).json({ error: 'Erro interno.' });
+
+  const unidadeAlvo = (candidatosUnidade || []).find((u) => (u.email || '').trim() === (email || '').trim());
+  if (!unidadeAlvo) return res.status(400).json({ error: 'Código inválido ou expirado.' });
+
+  const { error } = await supabase
+    .from('unidade_admins')
+    .update({ senha: novaSenhaHash, codigo_verificacao: null })
+    .eq('id', unidadeAlvo.id);
+
+  if (error) return res.status(400).json({ error: 'Código inválido ou expirado.' });
+  res.json({ message: 'Senha alterada!' });
 });
 
 module.exports = router;

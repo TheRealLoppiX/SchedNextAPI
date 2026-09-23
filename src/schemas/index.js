@@ -80,6 +80,13 @@ const resetarSenhaSchema = z.object({
   novaSenha: z.string().min(6, 'Senha deve ter ao menos 6 caracteres').max(100)
 });
 
+// Recuperação de senha do login da barbearia (POST /auth/admin/login) — sem empresaSlug porque
+// esse login não é escopado por tenant (busca direto por e-mail em `empresas`/`unidade_admins`,
+// ver routes/auth.js). O reset reaproveita resetarSenhaSchema (mesmo formato).
+const recuperarSenhaAdminSchema = z.object({
+  email: z.string().trim().toLowerCase().email('E-mail inválido')
+});
+
 const segurancaCodigoSchema = z.object({
   id: idLike
 });
@@ -619,6 +626,7 @@ module.exports = {
   confirmarCodigoSchema,
   recuperarSenhaSchema,
   resetarSenhaSchema,
+  recuperarSenhaAdminSchema,
   segurancaCodigoSchema,
   segurancaUpdateSchema,
   segurancaValidarSchema,

@@ -60,8 +60,8 @@ app.use(cors({
   origin: origemPermitida,
 }));
 
-// Protege toda a área /admin/*. O único endpoint sob /admin que fica de fora é o próprio
-// /admin/login (é ele quem emite o token). Ver src/middleware/adminAuth.js.
+// Protege toda a área /admin/*. Ficam de fora /admin/login e o fluxo de recuperação de senha
+// (quem ainda não tem token). Ver src/middleware/adminAuth.js.
 app.use('/admin', verificarTokenAdmin);
 
 // Teste grátis acabou: trava o painel até assinar (ver src/middleware/trialAuth.js).
