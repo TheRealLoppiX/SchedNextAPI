@@ -325,7 +325,7 @@ router.post('/admin/login', loginLimiter, validate(loginSchema), async (req, res
 
   const { data: empresa, error } = await supabase
     .from('empresas')
-    .select('id, nome, slug, senha, status_assinatura')
+    .select('id, nome, slug, senha, status_assinatura, excluida_em')
     .eq('email', email)
     .maybeSingle();
 
@@ -335,6 +335,11 @@ router.post('/admin/login', loginLimiter, validate(loginSchema), async (req, res
   }
 
   if (empresa) {
+    // Conta excluída pelo admin absoluto (soft delete, ver sql/2026_empresas_exclusao.sql) não
+    // consegue mais logar — checado antes até da suspensão, e antes da senha valer a pena calcular.
+    if (empresa.excluida_em) {
+      return res.status(403).json({ success: false, error: 'Esta conta foi excluída.' });
+    }
     // Conta suspensa pelo admin absoluto (ver routes/superAdminPlataforma.js) não consegue mais
     // logar, mesmo com a senha certa — checado antes da senha valer a pena calcular.
     if (empresa.status_assinatura === 'suspensa') {
@@ -376,7 +381,7 @@ router.post('/admin/login', loginLimiter, validate(loginSchema), async (req, res
   // dá acesso à empresa inteira, só à própria unidade (ver o gate de allowlist em server.js).
   const { data: adminUnidade, error: errUnidade } = await supabase
     .from('unidade_admins')
-    .select('id, empresa_id, unidade_id, nome, senha, ativo, empresas(slug, status_assinatura)')
+    .select('id, empresa_id, unidade_id, nome, senha, ativo, empresas(slug, status_assinatura, excluida_em)')
     .eq('email', email)
     .maybeSingle();
 
@@ -387,6 +392,10 @@ router.post('/admin/login', loginLimiter, validate(loginSchema), async (req, res
 
   if (!adminUnidade || !adminUnidade.ativo) {
     return res.status(401).json({ success: false, error: 'E-mail ou senha incorretos.' });
+  }
+
+  if (adminUnidade.empresas?.excluida_em) {
+    return res.status(403).json({ success: false, error: 'Esta conta foi excluída.' });
   }
 
   if (adminUnidade.empresas?.status_assinatura === 'suspensa') {

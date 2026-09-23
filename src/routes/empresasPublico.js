@@ -60,7 +60,9 @@ router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmp
   const { data: slugExistente } = await supabase.from('empresas').select('id').eq('slug', slug).maybeSingle();
   if (slugExistente) return res.status(400).json({ error: 'Esse endereço já está em uso. Escolha outro.' });
 
-  const { data: emailExistente } = await supabase.from('empresas').select('id').eq('email', email).maybeSingle();
+  // excluida_em de propósito fora do filtro: uma empresa excluída pelo admin absoluto (soft
+  // delete, ver sql/2026_empresas_exclusao.sql) libera o e-mail pra um cadastro novo.
+  const { data: emailExistente } = await supabase.from('empresas').select('id').eq('email', email).is('excluida_em', null).maybeSingle();
   if (emailExistente) return res.status(400).json({ error: 'Já existe uma empresa cadastrada com esse e-mail.' });
 
   // Antifraude: mesmo e-mail (normalizado), telefone ou CPF/CNPJ de uma conta já criada
@@ -172,7 +174,7 @@ router.post('/empresas/confirmar-codigo', codigoLimiter, validate(confirmarCodig
   const { data: slugExistente } = await supabase.from('empresas').select('id').eq('slug', slug).maybeSingle();
   if (slugExistente) return res.status(400).json({ error: 'Esse endereço foi registrado por outra conta enquanto você confirmava. Cadastre-se de novo com outro endereço.' });
 
-  const { data: emailExistente } = await supabase.from('empresas').select('id').eq('email', email).maybeSingle();
+  const { data: emailExistente } = await supabase.from('empresas').select('id').eq('email', email).is('excluida_em', null).maybeSingle();
   if (emailExistente) return res.status(400).json({ error: 'Já existe uma empresa cadastrada com esse e-mail.' });
 
   // Rechecagem antifraude: outra conta pode ter sido criada com esses dados enquanto este

@@ -2,7 +2,14 @@ const express = require('express');
 const supabase = require('../config/supabase');
 const validate = require('../middleware/validate');
 const { cancelarAssinaturaNoGateway } = require('../services/pagamento');
-const { planoPlataformaSchema, planoAtivoSchema, planoTesteSchema, empresaVencimentoSchema, empresaTrocarPlanoSchema } = require('../schemas');
+const {
+  planoPlataformaSchema,
+  planoAtivoSchema,
+  planoTesteSchema,
+  empresaVencimentoSchema,
+  empresaTrocarPlanoSchema,
+  empresaTrocarVerticalSchema
+} = require('../schemas');
 const { limparCacheTrial } = require('../middleware/trialAuth');
 
 const router = express.Router();
@@ -172,7 +179,7 @@ router.get('/super-admin/empresas', async (req, res) => {
   let query = supabase
     .from('empresas')
     .select(`
-      id, nome, slug, email, vertical, criado_em,
+      id, nome, slug, email, vertical, criado_em, excluida_em,
       status_assinatura, proxima_cobranca_em, cancelamento_agendado, chave_ativacao_expira_em,
       plano_plataforma_id, plano_plataforma:plano_plataforma_id(nome, preco_mensal, limite_profissionais, limite_agendamentos_mes),
       plano_plataforma_pendente_id, plano_plataforma_pendente:plano_plataforma_pendente_id(nome, preco_mensal)
@@ -185,7 +192,10 @@ router.get('/super-admin/empresas', async (req, res) => {
     const buscaSegura = String(busca).replace(/[,()]/g, '');
     query = query.or(`nome.ilike.%${buscaSegura}%,slug.ilike.%${buscaSegura}%,email.ilike.%${buscaSegura}%`);
   }
-  if (status) query = query.eq('status_assinatura', status);
+  // "excluida" não é um valor de status_assinatura (é a coluna separada excluida_em, ver
+  // sql/2026_empresas_exclusao.sql) — filtra por ela em vez de tentar um eq normal.
+  if (status === 'excluida') query = query.not('excluida_em', 'is', null);
+  else if (status) query = query.eq('status_assinatura', status);
   if (plano_id) query = query.eq('plano_plataforma_id', plano_id);
 
   const { data, error } = await query.limit(200);
@@ -202,7 +212,7 @@ router.get('/super-admin/empresas/:id', async (req, res) => {
   const { data: empresa, error } = await supabase
     .from('empresas')
     .select(`
-      id, nome, slug, email, vertical, cpf_cnpj, criado_em,
+      id, nome, slug, email, vertical, cpf_cnpj, criado_em, excluida_em,
       status_assinatura, proxima_cobranca_em, cancelamento_agendado, gateway_subscription_id,
       chave_ativacao_expira_em, dominio_customizado, dominio_verificado,
       plano_plataforma_id, plano_plataforma:plano_plataforma_id(nome, preco_mensal, limite_profissionais, limite_agendamentos_mes, limite_admins),
@@ -300,6 +310,67 @@ router.post('/super-admin/empresas/:id/reativar', async (req, res) => {
   const { error } = await supabase.from('empresas').update({ status_assinatura: 'ativa' }).eq('id', req.params.id);
   if (error) return res.status(500).json({ error: 'Erro ao reativar empresa.' });
   res.json({ success: true, message: 'Empresa reativada.' });
+});
+
+// Corrige o tipo de negócio de uma empresa cadastrada errada no self-service (ver comentário do
+// schema em schemas/index.js). Não mexe em mais nada — layout, terminologia etc. da própria
+// empresa já reagem ao campo `vertical` sozinhos, igual reagiriam se tivesse nascido certo.
+router.put('/super-admin/empresas/:id/vertical', validate(empresaTrocarVerticalSchema), async (req, res) => {
+  const { error } = await supabase.from('empresas').update({ vertical: req.body.vertical }).eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: 'Erro ao trocar o tipo de negócio da empresa.' });
+  res.json({ success: true, message: 'Tipo de negócio atualizado.' });
+});
+
+// Exclusão (soft delete, ver sql/2026_empresas_exclusao.sql): não apaga nada, só marca
+// excluida_em e bloqueia login (POST /admin/login, ver routes/auth.js). Cancela qualquer
+// recorrência ativa no Mercado Pago (mesmo cuidado da troca de plano acima, senão o dono
+// continuaria sendo cobrado por uma conta que ele acha excluída) e libera o(s) registro(s) do
+// antifraude dessa empresa (services/antifraude.js) — sem isso, excluir a empresa não bastaria
+// pra liberar o e-mail/telefone/documento pra um novo cadastro, já que o antifraude sobrevive
+// de propósito à exclusão da empresa.
+router.post('/super-admin/empresas/:id/excluir', async (req, res) => {
+  const { data: empresa } = await supabase.from('empresas').select('gateway_subscription_id').eq('id', req.params.id).maybeSingle();
+  if (!empresa) return res.status(404).json({ error: 'Empresa não encontrada.' });
+
+  if (empresa.gateway_subscription_id) {
+    try {
+      await cancelarAssinaturaNoGateway(empresa.gateway_subscription_id);
+    } catch (e) {
+      console.error('Erro ao cancelar assinatura no Mercado Pago (exclusão de empresa pelo admin absoluto):', e);
+    }
+  }
+
+  const { error } = await supabase
+    .from('empresas')
+    .update({
+      excluida_em: new Date().toISOString(),
+      status_assinatura: 'cancelada',
+      cancelamento_agendado: false,
+      gateway_subscription_id: null,
+      plano_plataforma_pendente_id: null,
+      trial_expira_em: null,
+      plano_teste_expira_em: null,
+      plano_teste_anterior_id: null
+    })
+    .eq('id', req.params.id);
+
+  if (error) return res.status(500).json({ error: 'Erro ao excluir empresa.' });
+
+  const { error: antifraudeError } = await supabase
+    .from('cadastro_empresa_registros')
+    .update({ liberado_em: new Date().toISOString() })
+    .eq('empresa_id', req.params.id)
+    .is('liberado_em', null);
+  if (antifraudeError) console.error('Erro ao liberar antifraude na exclusão de empresa:', antifraudeError);
+
+  limparCacheTrial(Number(req.params.id));
+  res.json({ success: true, message: 'Empresa excluída. O e-mail dela já pode fazer um novo cadastro.' });
+});
+
+router.post('/super-admin/empresas/:id/restaurar', async (req, res) => {
+  const { error } = await supabase.from('empresas').update({ excluida_em: null }).eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: 'Erro ao restaurar empresa.' });
+  res.json({ success: true, message: 'Empresa restaurada. Confira o plano e o status da assinatura dela.' });
 });
 
 // --- Métricas gerais da plataforma ---

@@ -55,12 +55,17 @@ const clienteRapidoSchema = z.object({
   empresa_id: idLike
 });
 
+// Reaproveitado pelo cadastro self-service e pela troca manual de vertical do admin absoluto
+// (empresaTrocarVerticalSchema, ver superAdminPlataforma.js) — pra corrigir uma empresa
+// cadastrada com o tipo de negócio errado sem precisar recriar a conta do zero.
+const verticalEnum = z.enum(['barbearia', 'salao', 'estudio_unhas', 'generico']);
+
 const registrarEmpresaSchema = z.object({
   nome: z.string().trim().min(2, 'Nome muito curto').max(150),
   slug: z.string().trim().toLowerCase().regex(/^[a-z0-9-]+$/, 'Use apenas letras minúsculas, números e hífen').min(3).max(60),
   email: z.string().trim().toLowerCase().email('E-mail inválido'),
   senha: z.string().min(6, 'Senha deve ter ao menos 6 caracteres').max(100),
-  vertical: z.enum(['barbearia', 'salao', 'estudio_unhas', 'generico']),
+  vertical: verticalEnum,
   plano_plataforma_id: idLike.optional(),
   // Antifraude (ver services/antifraude.js): telefone e CPF/CNPJ são obrigatórios no cadastro
   // pra impedir várias contas grátis da mesma pessoa/negócio.
@@ -511,6 +516,13 @@ const empresaTrocarPlanoSchema = z.object({
   plano_plataforma_id: idLike
 });
 
+// Corrige o tipo de negócio de uma empresa cadastrada errada (ver POST /empresas/registrar em
+// routes/empresasPublico.js, onde o dono escolhe isso uma vez, no cadastro) — admin absoluto
+// pode ajustar depois sem precisar excluir e recriar a conta.
+const empresaTrocarVerticalSchema = z.object({
+  vertical: verticalEnum
+});
+
 // --- superAdminFinanceiro.js (contas a pagar/receber, ver sql/2026_contas_pagar_receber.sql) ---
 
 const dataSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida');
@@ -702,6 +714,7 @@ module.exports = {
   leadStatusSchema,
   empresaVencimentoSchema,
   empresaTrocarPlanoSchema,
+  empresaTrocarVerticalSchema,
   contaPagarSchema,
   contaPagarBaixaSchema,
   contaReceberSchema,
