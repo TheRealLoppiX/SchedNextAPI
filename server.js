@@ -12,6 +12,7 @@ const iniciarRecuperacaoClientes = require('./src/cron/recuperacaoClientes');
 const iniciarRenovacaoTokenMercadoPago = require('./src/cron/mercadoPago');
 const iniciarCobrancaAssinaturas = require('./src/cron/cobrancaAssinaturas');
 const iniciarTrialPlanos = require('./src/cron/trialPlanos');
+const iniciarResumoProfissionais = require('./src/cron/resumoProfissionais');
 const { bloquearTrialExpirado } = require('./src/middleware/trialAuth');
 
 const app = express();
@@ -121,6 +122,8 @@ app.use(require('./src/routes/dominioCustomizado'));
 app.use(require('./src/routes/financeiro'));
 app.use(require('./src/routes/mercadopago'));
 app.use(require('./src/routes/cobrancaAssinatura'));
+app.use(require('./src/routes/suporte'));
+app.use(require('./src/routes/superAdminSuporte'));
 
 iniciarLembretes();
 iniciarProcessamentoCancelamentos();
@@ -128,6 +131,7 @@ iniciarRecuperacaoClientes();
 iniciarRenovacaoTokenMercadoPago();
 iniciarCobrancaAssinaturas();
 iniciarTrialPlanos();
+iniciarResumoProfissionais();
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Servidor rodando em http://localhost:${PORT}`));

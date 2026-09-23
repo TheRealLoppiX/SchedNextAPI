@@ -21,22 +21,24 @@ router.get('/admin/whatsapp', async (req, res) => {
 
   const { data: empresa, error } = await supabase
     .from('empresas')
-    .select('whatsapp_phone_number_id, whatsapp_bot_modo, whatsapp_bot_nome, whatsapp_bot_personalidade, whatsapp_bot_boas_vindas, whatsapp_bot_temperatura')
+    .select('whatsapp_phone_number_id, whatsapp_bot_modo, whatsapp_bot_nome, whatsapp_bot_personalidade, whatsapp_bot_boas_vindas, whatsapp_bot_temperatura, whatsapp_resumo_profissionais_ativo, whatsapp_resumo_profissionais_horario')
     .eq('id', empresa_id)
     .maybeSingle();
 
   if (error) return res.status(500).json({ error: 'Erro ao buscar configuração de WhatsApp.' });
 
   // Modo livre/personalidade/temperatura são recurso de IA (plano Profissional/Enterprise, ver
-  // permiteIA) — boas_vindas fica liberado pra qualquer plano com o bot ligado, já que é só um
-  // texto fixo substituindo outro texto fixo, sem custo de IA envolvido.
+  // permiteIA) — boas_vindas e resumo_profissionais_* ficam liberados pra qualquer plano com o
+  // bot ligado, já que são textos fixos (resumo diário não usa IA nenhuma).
   const botConfig = {
     permiteIa: await permiteIA(empresa_id),
     modo: empresa?.whatsapp_bot_modo || 'guiado',
     nome: empresa?.whatsapp_bot_nome || '',
     personalidade: empresa?.whatsapp_bot_personalidade || '',
     boasVindas: empresa?.whatsapp_bot_boas_vindas || '',
-    temperatura: empresa?.whatsapp_bot_temperatura != null ? Number(empresa.whatsapp_bot_temperatura) : 0.6
+    temperatura: empresa?.whatsapp_bot_temperatura != null ? Number(empresa.whatsapp_bot_temperatura) : 0.6,
+    resumoProfissionaisAtivo: !!empresa?.whatsapp_resumo_profissionais_ativo,
+    resumoProfissionaisHorario: empresa?.whatsapp_resumo_profissionais_horario || '08:00'
   };
 
   const instancia = empresa?.whatsapp_phone_number_id || null;
@@ -63,9 +65,11 @@ router.put('/admin/whatsapp/bot-config', validate(whatsappBotConfigSchema), asyn
   if (!(await permiteWhatsappBot(empresa_id))) return res.status(403).json({ error: 'Recurso não disponível no seu plano.' });
 
   const iaLiberada = await permiteIA(empresa_id);
-  const { modo, nome, personalidade, boas_vindas, temperatura } = req.body;
+  const { modo, nome, personalidade, boas_vindas, temperatura, resumo_profissionais_ativo, resumo_profissionais_horario } = req.body;
 
   const atualizacao = { whatsapp_bot_boas_vindas: boas_vindas || null };
+  if (resumo_profissionais_ativo !== undefined) atualizacao.whatsapp_resumo_profissionais_ativo = resumo_profissionais_ativo;
+  if (resumo_profissionais_horario !== undefined) atualizacao.whatsapp_resumo_profissionais_horario = resumo_profissionais_horario || null;
 
   // Sem IA no plano, essas colunas ficam travadas nos valores padrão — mesmo que o front não
   // devesse mandar isso pra uma empresa sem o recurso, a rota não confia só na UI.

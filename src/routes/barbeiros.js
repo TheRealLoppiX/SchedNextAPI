@@ -19,7 +19,11 @@ router.get('/barbeiros', async (req, res) => {
 
   if (empErr || !emp) return res.status(500).json([]);
 
-  let query = supabase.from('barbeiros').select('*').eq('empresa_id', emp.id);
+  // Rota pública (sem JWT, consumida pela página de agendamento do cliente) — select explícito
+  // de propósito, NUNCA '*': telefone e percentual_comissao são dados internos do profissional
+  // (o telefone em particular passou a existir só pro resumo diário via WhatsApp, ver
+  // sql/2026_whatsapp_resumo_profissionais.sql) e não podem vazar pra qualquer visitante do site.
+  let query = supabase.from('barbeiros').select('id, nome, foto_url, ativo, unidade_id').eq('empresa_id', emp.id);
   if (req.query.unidade_id) query = query.eq('unidade_id', req.query.unidade_id);
 
   const { data: barbeiros, error } = await query;
@@ -128,7 +132,7 @@ router.put('/admin/barbeiro/status', validate(barbeiroStatusSchema), async (req,
 
 // Cadastrar novo barbeiro
 router.post('/admin/barbeiro', validate(barbeiroCriarSchema), async (req, res) => {
-  const { nome, foto_url, unidade_id } = req.body;
+  const { nome, foto_url, telefone, unidade_id } = req.body;
   const empresa_id = req.empresaId;
 
   if (await limiteProfissionaisAtingido(empresa_id)) {
@@ -144,7 +148,7 @@ router.post('/admin/barbeiro', validate(barbeiroCriarSchema), async (req, res) =
 
   const { data, error } = await supabase
     .from('barbeiros')
-    .insert({ nome, empresa_id, foto_url, ativo: true, unidade_id: unidade_id || null })
+    .insert({ nome, empresa_id, foto_url, telefone: telefone || null, ativo: true, unidade_id: unidade_id || null })
     .select('id')
     .single();
 
@@ -158,8 +162,9 @@ router.post('/admin/barbeiro', validate(barbeiroCriarSchema), async (req, res) =
 });
 
 router.put('/admin/barbeiro/editar', validate(barbeiroEditarSchema), async (req, res) => {
-  const { id, nome, foto_url, percentual_comissao, unidade_id } = req.body;
+  const { id, nome, foto_url, telefone, percentual_comissao, unidade_id } = req.body;
   const atualizacao = { nome, foto_url };
+  if (telefone !== undefined) atualizacao.telefone = telefone || null;
   if (percentual_comissao !== undefined) atualizacao.percentual_comissao = percentual_comissao;
   if (unidade_id !== undefined) {
     if (unidade_id) {

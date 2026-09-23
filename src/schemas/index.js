@@ -31,6 +31,12 @@ const loginClienteSchema = loginSchema.extend({
   empresaSlug: z.string().trim().min(1, 'Empresa não informada')
 });
 
+// --- POST /login-magico (ver services/loginMagico.js) ---
+
+const loginMagicoSchema = z.object({
+  token: z.string().trim().min(1, 'Token não informado')
+});
+
 const agendarSchema = z.object({
   usuario_id: idLike,
   barbeiro_id: idLike,
@@ -169,6 +175,7 @@ const servicoGestaoSchema = z.object({
 const barbeiroCriarSchema = z.object({
   nome: z.string().trim().min(1, 'Nome é obrigatório').max(150),
   foto_url: z.string().trim().optional().nullable(),
+  telefone: z.string().trim().max(20).optional().nullable(),
   unidade_id: idLikeNullable
 });
 
@@ -176,6 +183,7 @@ const barbeiroEditarSchema = z.object({
   id: idLike,
   nome: z.string().trim().min(1, 'Nome é obrigatório').max(150),
   foto_url: z.string().trim().optional().nullable(),
+  telefone: z.string().trim().max(20).optional().nullable(),
   percentual_comissao: z.coerce.number().min(0, 'Comissão não pode ser negativa').max(100, 'Comissão não pode passar de 100%').nullable().optional(),
   unidade_id: idLikeNullable
 });
@@ -319,6 +327,16 @@ const acaoStatusSchema = z.object({
   ativar: z.boolean()
 });
 
+// --- suporte.js ---
+
+const suporteMensagemSchema = z.object({
+  texto: z.string().trim().min(1, 'Digite uma mensagem').max(2000)
+});
+
+const suporteRepassarSchema = z.object({
+  super_admin_id: z.string().uuid('Super admin inválido').nullable().optional()
+});
+
 // --- assinaturas.js ---
 
 const assinaturaPlanoSchema = z.object({
@@ -405,14 +423,17 @@ const whatsappTesteSchema = z.object({
   telefone: z.string().trim().min(8, 'Telefone inválido').max(20)
 });
 
-// boas_vindas fica liberado pra qualquer empresa com o bot ligado; modo/nome/personalidade/
-// temperatura só têm efeito de fato quando o plano também libera IA (checado na rota, não aqui).
+// boas_vindas e resumo_profissionais_* ficam liberados pra qualquer empresa com o bot ligado;
+// modo/nome/personalidade/temperatura só têm efeito de fato quando o plano também libera IA
+// (checado na rota, não aqui) — resumo diário não usa IA nenhuma, é texto fixo.
 const whatsappBotConfigSchema = z.object({
   modo: z.enum(['guiado', 'livre']).optional(),
   nome: z.string().trim().max(40).nullable().optional(),
   personalidade: z.string().trim().max(1000).nullable().optional(),
   boas_vindas: z.string().trim().max(300).nullable().optional(),
-  temperatura: z.coerce.number().min(0).max(1).optional()
+  temperatura: z.coerce.number().min(0).max(1).optional(),
+  resumo_profissionais_ativo: z.boolean().optional(),
+  resumo_profissionais_horario: z.string().trim().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Horário inválido (use HH:MM)').nullable().optional()
 });
 
 // --- dominioCustomizado.js ---
@@ -620,6 +641,9 @@ module.exports = {
   registrarSchema,
   loginSchema,
   loginClienteSchema,
+  loginMagicoSchema,
+  suporteMensagemSchema,
+  suporteRepassarSchema,
   agendarSchema,
   clienteRapidoSchema,
   registrarEmpresaSchema,
