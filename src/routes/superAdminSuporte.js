@@ -39,6 +39,43 @@ router.get('/super-admin/suporte', async (req, res) => {
   res.json((data || []).map(mapConversa));
 });
 
+// Liga/desliga o aviso de "repassado pra você" (ver sql/2026_suporte_repasse_pendente.sql).
+// Separado do update principal de propósito: se a coluna ainda não existir no banco (SQL não
+// rodado), o aceitar/repassar/responder continua funcionando, só sem esse aviso.
+async function marcarRepassePendente(conversaId, pendente) {
+  const { error } = await supabase.from('suporte_conversas').update({ repasse_pendente: pendente }).eq('id', conversaId);
+  if (error) console.error('[suporte] erro ao marcar repasse_pendente:', error.message);
+}
+
+// Pendências do super admin logado, pro balão com contador no menu e o aviso na tela (o front
+// consulta isso a cada poucos segundos): conversas escaladas sem ninguém atendendo + as
+// repassadas pra ele que ele ainda não aceitou/respondeu. Registrada antes de /:id pra
+// "pendencias" não ser lido como id.
+router.get('/super-admin/suporte/pendencias', async (req, res) => {
+  const meuId = req.superAdmin.id;
+  const colunas = 'id, atualizado_em, atendido_por_super_admin_id, empresas(nome)';
+  const { data: semAtendente, error } = await supabase
+    .from('suporte_conversas')
+    .select(colunas)
+    .eq('status', 'aguardando_humano')
+    .is('atendido_por_super_admin_id', null);
+  if (error) return res.status(500).json({ error: 'Erro ao carregar pendências de suporte.' });
+
+  const { data: repassadas, error: erroRepasse } = await supabase
+    .from('suporte_conversas')
+    .select(colunas)
+    .eq('status', 'aguardando_humano')
+    .eq('atendido_por_super_admin_id', meuId)
+    .eq('repasse_pendente', true);
+  if (erroRepasse) console.error('[suporte] pendências de repasse indisponíveis:', erroRepasse.message);
+
+  const mapear = (motivo) => (c) => ({ id: c.id, nome_empresa: c.empresas?.nome || 'Empresa', motivo, atualizado_em: c.atualizado_em });
+  res.json([
+    ...(semAtendente || []).map(mapear('sem_atendente')),
+    ...(repassadas || []).map(mapear('repassada_para_voce'))
+  ]);
+});
+
 router.get('/super-admin/suporte/:id', async (req, res) => {
   const { data: conversa, error: erroConversa } = await supabase
     .from('suporte_conversas')
@@ -77,6 +114,7 @@ router.post('/super-admin/suporte/:id/aceitar', async (req, res) => {
     .update({ atendido_por_super_admin_id: req.superAdmin.id, atualizado_em: new Date().toISOString() })
     .eq('id', conversa.id);
   if (error) return res.status(500).json({ error: 'Erro ao aceitar o caso.' });
+  await marcarRepassePendente(conversa.id, false);
   res.json({ success: true });
 });
 
@@ -97,6 +135,9 @@ router.post('/super-admin/suporte/:id/repassar', validate(suporteRepassarSchema)
     .update({ atendido_por_super_admin_id: req.body.super_admin_id || null, atualizado_em: new Date().toISOString() })
     .eq('id', conversa.id);
   if (error) return res.status(500).json({ error: 'Erro ao repassar o caso.' });
+  // Repassou pra outra pessoa: ela recebe o aviso até aceitar/responder. Liberado (null) já
+  // volta a contar como "sem atendente" pra todo mundo, sem precisar do flag.
+  await marcarRepassePendente(conversa.id, Boolean(req.body.super_admin_id && req.body.super_admin_id !== req.superAdmin.id));
   res.json({ success: true });
 });
 
@@ -126,6 +167,7 @@ router.post('/super-admin/suporte/:id/mensagem', validate(suporteMensagemSchema)
     .from('suporte_conversas')
     .update({ status: 'aguardando_humano', atendido_por_super_admin_id: req.superAdmin.id, atualizado_em: new Date().toISOString() })
     .eq('id', conversa.id);
+  await marcarRepassePendente(conversa.id, false);
 
   res.json({ success: true });
 });
