@@ -42,6 +42,46 @@ function corrigirAcento(valor) {
   return convertido.includes('�') ? valor : convertido;
 }
 
+// A API é chamada direto no domínio do Render (schednextapi.onrender.com), que fica atrás do
+// Cloudflare DO RENDER: ele repassa cf-ipcountry e cf-connecting-ip, mas não cidade/estado (os
+// "visitor location headers" dependem de configurar a zona, que não é nossa). Então, pra sessão
+// nova sem cidade, resolve o IP no ipwho.is (gratuito, sem chave) em segundo plano, sem segurar a
+// resposta. O IP só é usado nessa consulta, nunca gravado. Cache em memória evita repetir a
+// consulta pro mesmo IP (mesma pessoa abrindo várias sessões).
+const cacheGeo = new Map();
+const MAX_CACHE_GEO = 1000;
+
+function ipDoVisitante(req) {
+  const ip = String(req.headers['cf-connecting-ip'] || req.ip || '').replace(/^::ffff:/, '').trim();
+  if (!ip || /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|fc|fd|fe80)/i.test(ip)) return null;
+  return ip;
+}
+
+async function geolocalizarIp(ip) {
+  if (cacheGeo.has(ip)) return cacheGeo.get(ip);
+  try {
+    const resp = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,region,region_code,city`, {
+      signal: AbortSignal.timeout(4000)
+    });
+    const d = await resp.json();
+    const geo = d && d.success ? { pais: d.country_code || null, estado: d.region || null, cidade: d.city || null } : null;
+    if (cacheGeo.size >= MAX_CACHE_GEO) cacheGeo.delete(cacheGeo.keys().next().value);
+    cacheGeo.set(ip, geo);
+    return geo;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function completarLocalizacao(sessaoId, ip) {
+  const geo = await geolocalizarIp(ip);
+  if (!geo || (!geo.estado && !geo.cidade)) return;
+  const campos = { estado: texto(geo.estado, 80), cidade: texto(geo.cidade, 80) };
+  if (geo.pais) campos.pais = texto(geo.pais, 8);
+  const { error } = await supabase.from('analytics_sessoes').update(campos).eq('id', sessaoId).is('cidade', null);
+  if (error) console.error('[analytics] erro ao gravar localização:', error.message);
+}
+
 function hostDe(url) {
   try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch (_) { return null; }
 }
@@ -167,7 +207,9 @@ router.post('/analytics/eventos', eventosLimiter, express.text({ type: 'text/pla
 
   // Primeiro lote da sessão cria a linha com a atribuição; lotes seguintes só atualizam a
   // última atividade (ignoreDuplicates não sobrescreve a origem da entrada).
-  const { error: erroSessao } = await supabase.from('analytics_sessoes').upsert({
+  const estadoCf = texto(corrigirAcento(req.headers['cf-region']), 80);
+  const cidadeCf = texto(corrigirAcento(req.headers['cf-ipcity']), 80);
+  const { data: sessaoCriada, error: erroSessao } = await supabase.from('analytics_sessoes').upsert({
     id: sessao.id,
     visitante_id: sessao.visitante_id,
     iniciada_em: agora,
@@ -185,13 +227,16 @@ router.post('/analytics/eventos', eventosLimiter, express.text({ type: 'text/pla
     idioma: texto(sessao.idioma, 20),
     fuso: texto(sessao.fuso, 60),
     pais: pais && pais !== 'XX' && pais !== 'T1' ? pais : null,
-    estado: texto(corrigirAcento(req.headers['cf-region']), 80),
-    cidade: texto(corrigirAcento(req.headers['cf-ipcity']), 80)
-  }, { onConflict: 'id', ignoreDuplicates: true });
+    estado: estadoCf,
+    cidade: cidadeCf
+  }, { onConflict: 'id', ignoreDuplicates: true }).select('id');
   if (erroSessao) {
     console.error('[analytics] erro ao gravar sessão:', erroSessao.message);
     return res.status(500).end();
   }
+  // Com ignoreDuplicates, o select só devolve a linha quando ela acabou de ser criada.
+  const ip = ipDoVisitante(req);
+  if (sessaoCriada?.length && !cidadeCf && ip) completarLocalizacao(sessao.id, ip);
   await supabase.from('analytics_sessoes').update({ ultima_atividade: agora }).eq('id', sessao.id);
 
   const linhas = eventos
