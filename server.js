@@ -127,6 +127,7 @@ app.use(require('./src/routes/mercadopago'));
 app.use(require('./src/routes/cobrancaAssinatura'));
 app.use(require('./src/routes/suporte'));
 app.use(require('./src/routes/superAdminSuporte'));
+app.use(require('./src/routes/analytics'));
 
 iniciarLembretes();
 iniciarProcessamentoCancelamentos();
