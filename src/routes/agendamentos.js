@@ -27,6 +27,7 @@ const { calcularInicioCiclo, obterUsoServicos } = require('../utils/limitesAssin
 const { verificarEDispararPremioFidelidade, obterPremioDisponivel, registrarResgatePremio } = require('../services/fidelidade');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 const { calcularValorFinalCheckout } = require('../services/pagamentoAgendamento');
+const { paraInstanteReal } = require('../utils/horarioBrasilia');
 const { criarPagamentoPix, buscarPagamento, taxaRealDoPagamento } = require('../services/mercadopago');
 
 const MENSAGEM_LIMITE_AGENDAMENTOS = 'Este estabelecimento atingiu o limite de agendamentos do mês. Peça para o administrador fazer upgrade de plano.';
@@ -729,7 +730,10 @@ router.post('/admin/reagendar-agendamento', validate(reagendarAgendamentoSchema)
   const { agendamento_id, barbeiro_id, data_hora } = req.body;
   const empresa_id = req.empresaId;
 
-  if (new Date(data_hora) < new Date()) {
+  // data_hora vem em horário de Brasília sem fuso (convenção do banco, ver utils/horarioBrasilia.js).
+  // Comparar direto com new Date() tratava como passado qualquer horário até 3h à frente, o que
+  // impedia mover pra mais tarde no mesmo dia o cliente que não veio no horário dele.
+  if (paraInstanteReal(data_hora) < new Date()) {
     return res.status(400).json({ error: 'Não é possível mover o agendamento para um horário que já passou.' });
   }
 

@@ -13,8 +13,14 @@ function paraConvencaoDoBanco(instanteReal) {
 }
 
 // Converte um data_hora do banco (convenção ingênua) para o instante real correspondente.
+// Texto sem fuso ("2026-09-25 17:00:00", como o painel manda) é lido sempre como UTC: sem isso
+// o Node usaria o fuso da máquina e o resultado dependeria de onde o servidor roda.
 function paraInstanteReal(dataHoraDoBanco) {
-  return new Date(new Date(dataHoraDoBanco).getTime() + OFFSET_BRASILIA_MS);
+  let valor = dataHoraDoBanco;
+  if (typeof valor === 'string' && !/(Z|[+-]\d{2}:?\d{2})$/.test(valor.trim())) {
+    valor = `${valor.trim().replace(' ', 'T')}Z`;
+  }
+  return new Date(new Date(valor).getTime() + OFFSET_BRASILIA_MS);
 }
 
 module.exports = { paraConvencaoDoBanco, paraInstanteReal };
