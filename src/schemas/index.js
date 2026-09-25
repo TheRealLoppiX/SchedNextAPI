@@ -43,7 +43,10 @@ const agendarSchema = z.object({
   empresa_slug: z.string().trim().min(1),
   data_hora: z.string().min(1),
   servicos: z.array(z.object({ id: idLike })).min(1, 'Selecione ao menos um serviço'),
-  unidade_id: idLikeNullable
+  unidade_id: idLikeNullable,
+  // Pré-pagamento opcional por Pix (escolha do cliente na tela de agendamento). Ausente = tela
+  // antiga, que sempre gerava o Pix quando a empresa tinha Mercado Pago (ver POST /agendar).
+  pagar_agora: z.boolean().optional()
 });
 
 const clienteRapidoSchema = z.object({

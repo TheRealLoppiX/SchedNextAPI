@@ -37,7 +37,7 @@ const router = express.Router();
 // logado (req.usuarioId). Antes, o usuario_id vinha direto do body, então qualquer chamador
 // podia criar/"trancar" a agenda de outro cliente só sabendo o ID dele.
 router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (req, res) => {
-  const { barbeiro_id, empresa_slug, data_hora, servicos, unidade_id } = req.body;
+  const { barbeiro_id, empresa_slug, data_hora, servicos, unidade_id, pagar_agora } = req.body;
   const usuario_id = req.usuarioId;
 
   // 1. EXTRAI APENAS A DATA (YYYY-MM-DD) PARA VALIDAR O DIA
@@ -126,8 +126,11 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
   // Pagamento antecipado por Pix: só entra em jogo se a empresa já conectou a própria conta
   // Mercado Pago (ver routes/mercadopago.js). Sem isso, o agendamento segue exatamente como
   // sempre funcionou — pix é um extra opcional, nunca um bloqueio pra criar o agendamento.
+  // O cliente escolhe na tela se quer pagar agora (pagar_agora). Se o campo não vier (versão
+  // antiga da tela ainda em cache no navegador), mantém o comportamento anterior: gera sempre.
+  const querPagarAgora = pagar_agora === undefined ? true : pagar_agora === true;
   let pix = null;
-  if (emp.mercadopago_access_token && valorTotal > 0) {
+  if (emp.mercadopago_access_token && valorTotal > 0 && querPagarAgora) {
     try {
       const taxaPercentual = await obterTaxaMarketplace(emp.id);
       const cobranca = await criarPagamentoPix({

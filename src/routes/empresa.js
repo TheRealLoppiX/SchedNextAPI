@@ -69,12 +69,15 @@ router.get('/empresa/slug/:slug', async (req, res) => {
   const slug = obterSlugTenant(req);
   const { empresa: data, error } = await resolverEmpresaPorSlug(
     slug,
-    'nome, logo_url, vertical, cor_principal, cor_destaque, plano_plataforma:plano_plataforma_id(nome, permite_paleta_customizada, permite_whatsapp_bot, permite_remover_marca)'
+    'nome, logo_url, vertical, cor_principal, cor_destaque, mercadopago_access_token, plano_plataforma:plano_plataforma_id(nome, permite_paleta_customizada, permite_whatsapp_bot, permite_remover_marca)'
   );
 
   if (error) return res.status(500).json(error);
   if (!data) return res.status(404).json({ message: 'Empresa não encontrada' });
-  res.json(data);
+  // Rota pública: o token do Mercado Pago nunca sai daqui, só o booleano que a tela de
+  // agendamento usa pra oferecer (ou não) o pré-pagamento por Pix.
+  const { mercadopago_access_token, ...empresaPublica } = data;
+  res.json({ ...empresaPublica, aceita_pix: !!mercadopago_access_token });
 });
 
 module.exports = router;

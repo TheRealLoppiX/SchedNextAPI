@@ -205,13 +205,22 @@ router.get('/disponibilidade-filtro', async (req, res) => {
   const horarioDesejado = new Date(`${data}T${hora}:00Z`);
   const horaDesejada = `${hora}:00`;
 
+  // Só interessa quem começou antes do horário pedido e ainda pode estar em andamento: busca a
+  // janela das 24h anteriores em vez do histórico inteiro da empresa (nenhum atendimento dura
+  // um dia, cada serviço vai até 180 min). Mesmo resultado, sem ler a tabela toda a cada toque
+  // num horário — e sem esbarrar no limite de 1000 linhas por resposta do Supabase.
+  const semZona = (d) => d.toISOString().slice(0, 19);
+  const janelaInicio = new Date(horarioDesejado.getTime() - 24 * 60 * 60000);
+
   // O SQL original filtrava status NOT IN ('cancelado', 'rejeitado'), mas 'rejeitado'
   // nunca foi um valor válido do ENUM real (ver database-schema.md); mantemos só 'cancelado'.
   const { data: agendamentos, error: errAg } = await supabase
     .from('agendamentos')
     .select('barbeiro_id, data_hora, agendamento_servicos(servicos(duracao))')
     .eq('empresa_id', emp.id)
-    .neq('status', 'cancelado');
+    .neq('status', 'cancelado')
+    .gt('data_hora', semZona(janelaInicio))
+    .lte('data_hora', semZona(horarioDesejado));
 
   if (errAg) {
     console.error('Erro SQL Agendamentos:', errAg);
