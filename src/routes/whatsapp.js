@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const express = require('express');
 const supabase = require('../config/supabase');
 const { processarMensagem } = require('../services/whatsapp/bot');
+const { enviarMensagem } = require('../services/whatsapp/provider');
+const { liberarOuAvisarForaDoHorario } = require('../services/whatsapp/horarioBot');
 const { whatsappWebhookLimiter } = require('../middleware/rateLimiters');
 
 const router = express.Router();
@@ -67,6 +69,10 @@ router.post('/whatsapp/webhook', whatsappWebhookLimiter, async (req, res) => {
       .maybeSingle();
 
     if (!empresa || !empresa.plano_plataforma?.permite_whatsapp_bot) return;
+
+    // Horário de funcionamento do bot (opcional, ver services/whatsapp/horarioBot.js): fora dele,
+    // avisa uma vez por período fechado e não passa a mensagem pro bot.
+    if (!(await liberarOuAvisarForaDoHorario({ empresaId: empresa.id, telefone, instancia, enviarMensagem }))) return;
 
     await processarMensagem({ empresaId: empresa.id, telefone, texto, instancia });
   } catch (err) {

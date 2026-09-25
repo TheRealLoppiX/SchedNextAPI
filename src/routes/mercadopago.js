@@ -199,7 +199,7 @@ router.post('/admin/mercadopago/desconectar', async (req, res) => {
 // da rota /admin/finalizar-servico-checkout (ver services/pagamentoAgendamento.js) — precisam
 // bater exatamente, senão o Pix cobra um valor e o fechamento de caixa registra outro.
 router.post('/admin/mercadopago/pix/:agendamentoId', validate(mercadoPagoPixSchema), async (req, res) => {
-  const { produtos_vendidos, servicos_adicionais, valor } = req.body;
+  const { produtos_vendidos, servicos_adicionais, valor, aplicar_premio } = req.body;
   const empresa_id = req.empresaId;
 
   const { data: empresa, error: empErr } = await supabase
@@ -218,7 +218,10 @@ router.post('/admin/mercadopago/pix/:agendamentoId', validate(mercadoPagoPixSche
       empresaId: empresa_id,
       unidadeId: req.unidadeId,
       produtosVendidos: produtos_vendidos,
-      servicosAdicionais: servicos_adicionais
+      servicosAdicionais: servicos_adicionais,
+      // Mesmo cálculo do fechamento de caixa: com a cortesia aplicada, o Pix cobra o valor já com
+      // o desconto (o resgate em si só é registrado quando o caixa fecha).
+      aplicarPremio: aplicar_premio === true
     });
     if (!resultado) return res.status(404).json({ error: 'Agendamento não encontrado.' });
     if (!(resultado.valorFinal > 0)) {
@@ -284,6 +287,7 @@ router.post('/admin/mercadopago/pix/:agendamentoId', validate(mercadoPagoPixSche
     });
   } catch (err) {
     if (err.jaConcluido) return res.status(409).json({ error: err.message });
+    if (err.statusHttp) return res.status(err.statusHttp).json({ error: err.message });
     console.error('Erro ao gerar Pix:', err);
     // Não repassa err.message pro cliente final — vinha cru da API do Mercado Pago
     // (services/mercadopago.js:request), podia expor detalhe interno/nomenclatura da API.

@@ -24,7 +24,7 @@ const {
 } = require('../utils/limitesPlano');
 const { calcularValorComDescontoAssinante } = require('../utils/valorAssinante');
 const { calcularInicioCiclo, obterUsoServicos } = require('../utils/limitesAssinatura');
-const { verificarEDispararPremioFidelidade } = require('../services/fidelidade');
+const { verificarEDispararPremioFidelidade, obterPremioDisponivel, registrarResgatePremio } = require('../services/fidelidade');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 const { calcularValorFinalCheckout } = require('../services/pagamentoAgendamento');
 const { criarPagamentoPix, buscarPagamento, taxaRealDoPagamento } = require('../services/mercadopago');
@@ -516,7 +516,7 @@ router.post('/admin/cancelar-agendamento', validate(cancelarAgendamentoSchema), 
 
 // ROTA DE CHECKOUT (Para finalizar o atendimento e receber o pagamento)
 router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchema), async (req, res) => {
-  const { agendamento_id, produtos_vendidos, servicos_adicionais, forma_pagamento, formas_pagamento } = req.body;
+  const { agendamento_id, produtos_vendidos, servicos_adicionais, forma_pagamento, formas_pagamento, aplicar_premio } = req.body;
 
   if (!agendamento_id) {
     return res.status(400).json({ error: 'ID do agendamento é obrigatório.' });
@@ -536,10 +536,11 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
       unidadeId: req.unidadeId,
       produtosVendidos: produtos_vendidos,
       servicosAdicionais: servicos_adicionais,
-      registrarConsumo: true
+      registrarConsumo: true,
+      aplicarPremio: aplicar_premio === true
     });
     if (!resultado) return res.status(404).json({ error: 'Agendamento não encontrado.' });
-    const { agendamento: agAtual, valorFinal, servicosCobertos, servicosCobrados } = resultado;
+    const { agendamento: agAtual, valorFinal, servicosCobertos, servicosCobrados, premio } = resultado;
 
     // Pagamento dividido: cada perna soma pro valor total, e se uma delas for Pix precisa
     // corresponder a uma cobrança de verdade já APROVADA no Mercado Pago (nunca confia no valor
@@ -615,6 +616,18 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
       .eq('empresa_id', req.empresaId);
     if (updError) throw updError;
 
+    // Cortesia da ação de fidelidade: só registra o uso depois que o atendimento foi de fato
+    // fechado (se algo antes disso falhasse, o prêmio continuaria disponível pro cliente).
+    if (premio) {
+      await registrarResgatePremio({
+        empresaId: req.empresaId,
+        usuarioId: agAtual.usuario_id,
+        agendamentoId: Number(agendamento_id),
+        premio,
+        desconto: premio.desconto
+      });
+    }
+
     // 5. Baixa de estoque dos produtos vendidos
     if (produtos_vendidos && produtos_vendidos.length > 0) {
       for (const produto of produtos_vendidos) {
@@ -653,7 +666,8 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
       message: 'Atendimento finalizado!',
       valor_final: valorFinal,
       servicos_cobertos: servicosCobertos,
-      servicos_cobrados: servicosCobrados
+      servicos_cobrados: servicosCobrados,
+      premio_aplicado: premio ? { descricao: premio.descricao, desconto: premio.desconto } : null
     });
 
     // Disparado depois da resposta: checagem de fidelidade não deve atrasar nem quebrar o
@@ -661,6 +675,7 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
     verificarEDispararPremioFidelidade(agAtual.usuario_id, req.empresaId);
   } catch (err) {
     if (err.jaConcluido) return res.status(409).json({ error: err.message });
+    if (err.statusHttp) return res.status(err.statusHttp).json({ error: err.message });
     console.error('Erro no checkout:', err);
     res.status(500).json({ error: err.message || 'Erro ao processar o fechamento do caixa.' });
   }
@@ -897,6 +912,15 @@ router.get('/admin/agendamento-usuario/:id', async (req, res) => {
 
     const servicosAgendadosIds = [...new Set((asvRows || []).map((r) => r.servico_id))];
 
+    // Cortesia da ação de fidelidade que o cliente já conquistou (o caixa oferece aplicar). Falha
+    // aqui não pode travar o caixa: sem prêmio, o checkout segue como sempre.
+    let premioFidelidade = null;
+    try {
+      premioFidelidade = await obterPremioDisponivel(ag.usuario_id, req.empresaId);
+    } catch (errPremio) {
+      console.error('Erro ao consultar prêmio de fidelidade:', errPremio);
+    }
+
     const usuario = ag.usuarios || {};
     if (!usuario.assinante || !usuario.plano_id || usuario.status_assinatura !== 'em_dia') {
       return res.json({
@@ -905,7 +929,8 @@ router.get('/admin/agendamento-usuario/:id', async (req, res) => {
         inadimplente: usuario.status_assinatura === 'inadimplente',
         servicos_ids: [],
         servicos_agendados_ids: servicosAgendadosIds,
-        restantes: {}
+        restantes: {},
+        premio_fidelidade: premioFidelidade
       });
     }
 
@@ -917,7 +942,8 @@ router.get('/admin/agendamento-usuario/:id', async (req, res) => {
       plano_id: usuario.plano_id,
       servicos_ids: servicosPlanoIds,
       servicos_agendados_ids: servicosAgendadosIds,
-      restantes
+      restantes,
+      premio_fidelidade: premioFidelidade
     });
   } catch (err) {
     console.error('Erro agendamento-usuario:', err);

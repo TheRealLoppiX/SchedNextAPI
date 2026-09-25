@@ -18,8 +18,24 @@ router.get('/admin/acoes/:empresaId', async (req, res) => {
 });
 
 router.post('/admin/acoes', validate(acaoFidelidadeSchema), async (req, res) => {
-  const { nome, data_inicio, data_fim, cortes_necessarios, valor_minimo, premio_descritivo, tipo_premio } = req.body;
+  const { nome, data_inicio, data_fim, cortes_necessarios, valor_minimo, premio_descritivo, tipo_premio, premio_servico_id, premio_produto_id, premio_valor } = req.body;
   const empresa_id = req.empresaId;
+
+  // Prêmio estruturado (aplicado sozinho no caixa, ver services/fidelidade.js): o serviço/produto
+  // escolhido tem que ser desta empresa, e cada tipo só guarda o campo que usa.
+  const tipo = tipo_premio || 'servico';
+  const premio = { premio_servico_id: null, premio_produto_id: null, premio_valor: null };
+  if (tipo === 'servico' && premio_servico_id) {
+    const { data: serv } = await supabase.from('servicos').select('id').eq('id', premio_servico_id).eq('empresa_id', empresa_id).maybeSingle();
+    if (!serv) return res.status(400).json({ error: 'Serviço do prêmio não encontrado.' });
+    premio.premio_servico_id = serv.id;
+  }
+  if (tipo === 'produto' && premio_produto_id) {
+    const { data: prod } = await supabase.from('produtos').select('id').eq('id', premio_produto_id).eq('empresa_id', empresa_id).maybeSingle();
+    if (!prod) return res.status(400).json({ error: 'Produto do prêmio não encontrado.' });
+    premio.premio_produto_id = prod.id;
+  }
+  if ((tipo === 'desconto_percentual' || tipo === 'desconto_valor') && premio_valor) premio.premio_valor = premio_valor;
 
   // Desativa as outras para garantir que só 1 fique ativa por vez ao criar uma nova
   await supabase.from('campanhas_fidelidade').update({ ativa: false }).eq('empresa_id', empresa_id);
@@ -32,7 +48,8 @@ router.post('/admin/acoes', validate(acaoFidelidadeSchema), async (req, res) => 
     cortes_necessarios,
     valor_minimo,
     premio_descritivo,
-    tipo_premio: tipo_premio || 'servico',
+    tipo_premio: tipo,
+    ...premio,
     ativa: true
   }).select('*').single();
 

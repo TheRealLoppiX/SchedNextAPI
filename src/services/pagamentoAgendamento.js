@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase');
 const { calcularValorComLimiteAssinante } = require('../utils/limitesAssinatura');
+const { obterPremioDisponivel, calcularDescontoPremio } = require('./fidelidade');
 
 // Calcula o valor final de um atendimento (serviço(s) já vinculados ao agendamento + serviços
 // adicionais + produtos vendidos no PDV), respeitando o limite mensal por serviço do plano de
@@ -12,7 +13,11 @@ const { calcularValorComLimiteAssinante } = require('../utils/limitesAssinatura'
 // um Pix de prévia no PDV não pode debitar a cota de assinatura do cliente antes do atendimento
 // ser efetivamente confirmado (se o Pix nunca for pago, ou o admin trocar de forma de pagamento
 // depois de gerar o QR, a cota tem que continuar intacta).
-async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId, produtosVendidos, servicosAdicionais, registrarConsumo = false }) {
+//
+// aplicarPremio: usa a cortesia da ação de fidelidade que o cliente já conquistou (ver
+// services/fidelidade.js). Sem o prêmio disponível, ou se ele não se aplica a este atendimento
+// (serviço/produto grátis que não está no caixa), lança erro com statusHttp 400.
+async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId, produtosVendidos, servicosAdicionais, registrarConsumo = false, aplicarPremio = false }) {
   const { data: agAtual, error: agErr } = await supabase
     .from('agendamentos')
     .select('valor_total, empresa_id, usuario_id, status, unidade_id, pagamento_status, mercadopago_payment_id')
@@ -42,8 +47,9 @@ async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId,
   let valorBase;
   let servicosCobertos = [];
   let servicosCobrados = [];
+  let servicosParaCalculo = [];
   if (servicosVinculados && servicosVinculados.length > 0) {
-    const servicosParaCalculo = servicosVinculados
+    servicosParaCalculo = servicosVinculados
       .filter((v) => v.servicos)
       .map((v) => ({ id: v.servico_id, valor: v.servicos.valor }));
     ({ valorBase, servicosCobertos, servicosCobrados } = await calcularValorComLimiteAssinante(
@@ -71,6 +77,7 @@ async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId,
   const valorAdicionais = (servicosAdicionais || []).reduce((acc, s) => acc + (precoPorServico[s.id] || 0), 0);
 
   let valorProdutos = 0;
+  let precoPorProduto = {};
   if (produtosVendidos && produtosVendidos.length > 0) {
     const idsProdutos = produtosVendidos.map((p) => p.id).filter(Boolean);
     const { data: produtosReais, error: errProdutosReais } = await supabase
@@ -79,18 +86,37 @@ async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId,
       .in('id', idsProdutos)
       .eq('empresa_id', agAtual.empresa_id);
     if (errProdutosReais) throw errProdutosReais;
-    const precoPorProduto = Object.fromEntries((produtosReais || []).map((p) => [p.id, Number(p.valor) || 0]));
+    precoPorProduto = Object.fromEntries((produtosReais || []).map((p) => [p.id, Number(p.valor) || 0]));
     valorProdutos = produtosVendidos.reduce((acc, p) => {
       const qtd = parseInt(p.quantidade || 1, 10);
       return acc + (precoPorProduto[p.id] || 0) * qtd;
     }, 0);
   }
 
+  const subtotal = valorBase + valorAdicionais + valorProdutos;
+  let premio = null;
+  if (aplicarPremio) {
+    const disponivel = await obterPremioDisponivel(agAtual.usuario_id, empresaId);
+    const servicosNoCaixa = [
+      ...servicosParaCalculo.map((s) => ({ id: s.id, valor: Number(s.valor) || 0, coberto: servicosCobertos.includes(s.id) })),
+      ...(servicosAdicionais || []).map((s) => ({ id: s.id, valor: precoPorServico[s.id] || 0, coberto: false }))
+    ];
+    const produtosNoCaixa = (produtosVendidos || []).map((p) => ({ id: p.id, valor: precoPorProduto[p.id] || 0, quantidade: parseInt(p.quantidade || 1, 10) }));
+    const { aplicavel, desconto, motivo } = calcularDescontoPremio(disponivel, { servicos: servicosNoCaixa, produtos: produtosNoCaixa, subtotal });
+    if (!aplicavel) {
+      const erro = new Error(motivo);
+      erro.statusHttp = 400;
+      throw erro;
+    }
+    premio = { ...disponivel, desconto };
+  }
+
   return {
     agendamento: agAtual,
-    valorFinal: valorBase + valorAdicionais + valorProdutos,
+    valorFinal: Math.max(0, subtotal - (premio ? premio.desconto : 0)),
     servicosCobertos,
-    servicosCobrados
+    servicosCobrados,
+    premio
   };
 }
 

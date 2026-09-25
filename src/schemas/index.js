@@ -302,7 +302,9 @@ const finalizarCheckoutSchema = z.object({
   formas_pagamento: z.array(z.object({
     forma_pagamento: formaPagamentoEnum,
     valor: z.coerce.number().positive()
-  })).min(1).max(4).optional()
+  })).min(1).max(4).optional(),
+  // Aplica a cortesia da ação de fidelidade que o cliente já conquistou (ver services/fidelidade.js).
+  aplicar_premio: z.boolean().optional()
 });
 
 const agendarEncaixeSchema = z.object({
@@ -328,7 +330,16 @@ const acaoFidelidadeSchema = z.object({
   cortes_necessarios: z.coerce.number().int().positive('Deve ser maior que zero'),
   valor_minimo: z.coerce.number().min(0),
   premio_descritivo: z.string().trim().min(1, 'Descreva o prêmio'),
-  tipo_premio: z.enum(['servico', 'produto', 'desconto']).optional()
+  // 'desconto' fica aceito só pra compatibilidade com telas antigas (prêmio só descritivo).
+  tipo_premio: z.enum(['servico', 'produto', 'desconto', 'desconto_percentual', 'desconto_valor']).optional(),
+  premio_servico_id: idLikeNullable.optional(),
+  premio_produto_id: idLikeNullable.optional(),
+  premio_valor: z.coerce.number().positive().nullable().optional()
+}).superRefine((d, ctx) => {
+  if (d.tipo_premio === 'servico' && !d.premio_servico_id) ctx.addIssue({ code: 'custom', path: ['premio_servico_id'], message: 'Escolha o serviço que sai de graça.' });
+  if (d.tipo_premio === 'produto' && !d.premio_produto_id) ctx.addIssue({ code: 'custom', path: ['premio_produto_id'], message: 'Escolha o produto que sai de graça.' });
+  if ((d.tipo_premio === 'desconto_percentual' || d.tipo_premio === 'desconto_valor') && !(d.premio_valor > 0)) ctx.addIssue({ code: 'custom', path: ['premio_valor'], message: 'Informe o valor do desconto.' });
+  if (d.tipo_premio === 'desconto_percentual' && d.premio_valor > 100) ctx.addIssue({ code: 'custom', path: ['premio_valor'], message: 'O desconto não pode passar de 100%.' });
 });
 
 const acaoStatusSchema = z.object({
@@ -396,7 +407,8 @@ const mercadoPagoPixSchema = z.object({
   servicos_adicionais: z.array(z.object({ id: idLike })).optional(),
   // Presente só em pagamento dividido: cobra esse valor específico via Pix em vez do total do
   // atendimento (o resto fica com outra(s) forma(s) registrada(s) no fechamento de caixa).
-  valor: z.coerce.number().positive().optional()
+  valor: z.coerce.number().positive().optional(),
+  aplicar_premio: z.boolean().optional()
 });
 
 const assinarAssinaturaSchema = z.object({
@@ -444,7 +456,13 @@ const whatsappBotConfigSchema = z.object({
   boas_vindas: z.string().trim().max(300).nullable().optional(),
   temperatura: z.coerce.number().min(0).max(1).optional(),
   resumo_profissionais_ativo: z.boolean().optional(),
-  resumo_profissionais_horario: z.string().trim().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Horário inválido (use HH:MM)').nullable().optional()
+  resumo_profissionais_horario: z.string().trim().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Horário inválido (use HH:MM)').nullable().optional(),
+  // Horário de funcionamento do bot (ver services/whatsapp/horarioBot.js). Desligado = 24h.
+  horario_ativo: z.boolean().optional(),
+  horario_inicio: z.string().trim().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Horário inválido (use HH:MM)').optional(),
+  horario_fim: z.string().trim().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Horário inválido (use HH:MM)').optional(),
+  horario_dias: z.array(z.coerce.number().int().min(0).max(6)).min(1, 'Escolha pelo menos um dia').optional(),
+  mensagem_fora: z.string().trim().max(500).nullable().optional()
 });
 
 // --- dominioCustomizado.js ---

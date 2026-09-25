@@ -4,6 +4,7 @@ const validate = require('../middleware/validate');
 const { whatsappTesteSchema, whatsappBotConfigSchema } = require('../schemas');
 const { permiteWhatsappBot, permiteIA } = require('../utils/limitesPlano');
 const { estaConfigurado, criarInstancia, obterQrCode, obterStatusConexao, removerInstancia, enviarMensagem } = require('../services/whatsapp/provider');
+const { obterHorarioBot, MENSAGEM_PADRAO } = require('../services/whatsapp/horarioBot');
 
 const router = express.Router();
 
@@ -40,6 +41,15 @@ router.get('/admin/whatsapp', async (req, res) => {
     resumoProfissionaisAtivo: !!empresa?.whatsapp_resumo_profissionais_ativo,
     resumoProfissionaisHorario: empresa?.whatsapp_resumo_profissionais_horario || '08:00'
   };
+  // Consulta separada e tolerante a falha (ver obterHorarioBot): sem as colunas no banco ainda,
+  // a tela continua abrindo e mostra o bot como 24h.
+  const horario = await obterHorarioBot(empresa_id);
+  botConfig.horarioAtivo = horario.ativo;
+  botConfig.horarioInicio = horario.inicio || '09:00';
+  botConfig.horarioFim = horario.fim || '18:00';
+  botConfig.horarioDias = horario.dias || [1, 2, 3, 4, 5, 6];
+  botConfig.mensagemFora = horario.mensagemFora || '';
+  botConfig.mensagemForaPadrao = MENSAGEM_PADRAO;
 
   const instancia = empresa?.whatsapp_phone_number_id || null;
   if (!instancia) return res.json({ permitido: true, conectado: false, instancia: null, estado: null, botConfig });
@@ -65,11 +75,16 @@ router.put('/admin/whatsapp/bot-config', validate(whatsappBotConfigSchema), asyn
   if (!(await permiteWhatsappBot(empresa_id))) return res.status(403).json({ error: 'Recurso não disponível no seu plano.' });
 
   const iaLiberada = await permiteIA(empresa_id);
-  const { modo, nome, personalidade, boas_vindas, temperatura, resumo_profissionais_ativo, resumo_profissionais_horario } = req.body;
+  const { modo, nome, personalidade, boas_vindas, temperatura, resumo_profissionais_ativo, resumo_profissionais_horario, horario_ativo, horario_inicio, horario_fim, horario_dias, mensagem_fora } = req.body;
 
   const atualizacao = { whatsapp_bot_boas_vindas: boas_vindas || null };
   if (resumo_profissionais_ativo !== undefined) atualizacao.whatsapp_resumo_profissionais_ativo = resumo_profissionais_ativo;
   if (resumo_profissionais_horario !== undefined) atualizacao.whatsapp_resumo_profissionais_horario = resumo_profissionais_horario || null;
+  if (horario_ativo !== undefined) atualizacao.whatsapp_bot_horario_ativo = horario_ativo;
+  if (horario_inicio !== undefined) atualizacao.whatsapp_bot_horario_inicio = horario_inicio;
+  if (horario_fim !== undefined) atualizacao.whatsapp_bot_horario_fim = horario_fim;
+  if (horario_dias !== undefined) atualizacao.whatsapp_bot_horario_dias = [...new Set(horario_dias)].sort().join(',');
+  if (mensagem_fora !== undefined) atualizacao.whatsapp_bot_mensagem_fora = mensagem_fora || null;
 
   // Sem IA no plano, essas colunas ficam travadas nos valores padrão — mesmo que o front não
   // devesse mandar isso pra uma empresa sem o recurso, a rota não confia só na UI.

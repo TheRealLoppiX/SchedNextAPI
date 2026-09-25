@@ -201,6 +201,14 @@ router.get('/fidelidade/:userId', verificarTokenCliente, async (req, res) => {
   const faltam = campanha.cortes_necessarios - progresso;
   const ganhouPremio = progresso >= campanha.cortes_necessarios;
 
+  // Cortesia já usada no caixa (uma por ação, ver services/fidelidade.js).
+  const { data: resgate } = await supabase
+    .from('fidelidade_resgates')
+    .select('id')
+    .eq('usuario_id', userId)
+    .eq('campanha_id', campanha.id)
+    .maybeSingle();
+
   res.json({
     ativa: true,
     nome: campanha.nome,
@@ -211,7 +219,8 @@ router.get('/fidelidade/:userId', verificarTokenCliente, async (req, res) => {
     premio: campanha.premio_descritivo,
     progresso,
     faltam,
-    ganhouPremio
+    ganhouPremio,
+    premioResgatado: !!resgate
   });
 });
 
