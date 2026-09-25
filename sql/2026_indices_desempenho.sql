@@ -20,7 +20,6 @@ BEGIN
     ('usuarios',             'idx_usuarios_empresa_tipo',         'empresa_id, tipo'),
     ('barbeiros',            'idx_barbeiros_empresa',             'empresa_id'),
     ('servicos',             'idx_servicos_empresa',              'empresa_id'),
-    ('barbeiro_servicos',    'idx_barbeiro_servicos_barbeiro',    'barbeiro_id'),
     ('bloqueios',            'idx_bloqueios_barbeiro',            'barbeiro_id'),
     ('avaliacoes',           'idx_avaliacoes_barbeiro',           'barbeiro_id'),
     ('notificacoes',         'idx_notificacoes_usuario',          'usuario_id')
@@ -46,5 +45,9 @@ SELECT tablename, indexname, indexdef
 FROM pg_indexes
 WHERE schemaname = 'public'
   AND tablename IN ('agendamentos', 'agendamento_servicos', 'usuarios', 'barbeiros', 'servicos',
-                    'barbeiro_servicos', 'bloqueios', 'avaliacoes', 'notificacoes')
+                    'bloqueios', 'avaliacoes', 'notificacoes')
 ORDER BY tablename, indexname;
+
+-- barbeiro_servicos não precisa de índice próprio: a chave primária (barbeiro_id, servico_id)
+-- já atende a busca por profissional. Um idx_barbeiro_servicos_barbeiro chegou a ser criado e
+-- foi removido em seguida por ser redundante.
