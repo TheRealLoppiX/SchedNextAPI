@@ -5,6 +5,7 @@ const { whatsappTesteSchema, whatsappBotConfigSchema } = require('../schemas');
 const { permiteWhatsappBot, permiteIA } = require('../utils/limitesPlano');
 const { estaConfigurado, criarInstancia, obterQrCode, obterStatusConexao, removerInstancia, enviarMensagem } = require('../services/whatsapp/provider');
 const { obterHorarioBot, MENSAGEM_PADRAO } = require('../services/whatsapp/horarioBot');
+const { MODO_LIVRE_BOT_DISPONIVEL } = require('../config/featureFlags');
 
 const router = express.Router();
 
@@ -33,7 +34,10 @@ router.get('/admin/whatsapp', async (req, res) => {
   // bot ligado, já que são textos fixos (resumo diário não usa IA nenhuma).
   const botConfig = {
     permiteIa: await permiteIA(empresa_id),
+    // Preferência salva no banco, sem alterar — a rota (bot.js) que decide se de fato roda
+    // livre ou cai pro guiado, com base em MODO_LIVRE_BOT_DISPONIVEL.
     modo: empresa?.whatsapp_bot_modo || 'guiado',
+    modoLivreDisponivel: MODO_LIVRE_BOT_DISPONIVEL,
     nome: empresa?.whatsapp_bot_nome || '',
     personalidade: empresa?.whatsapp_bot_personalidade || '',
     boasVindas: empresa?.whatsapp_bot_boas_vindas || '',

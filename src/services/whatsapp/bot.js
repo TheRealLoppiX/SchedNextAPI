@@ -8,6 +8,7 @@ const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
 const { montarUrlTenant } = require('../../utils/tenantContext');
 const { gerarLinkAcesso } = require('../loginMagico');
 const { gerarTexto, estaConfigurado: iaConfigurada, MODELOS_CLASSIFICACAO } = require('../groq');
+const { MODO_LIVRE_BOT_DISPONIVEL } = require('../../config/featureFlags');
 const {
   EMAIL_REGEX,
   obterOuCriarSessao,
@@ -194,7 +195,10 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
 
   // Modo livre: a Groq conduz a conversa de ponta a ponta via tool calling (ver agente.js). O
   // guiado abaixo é a máquina de estados de sempre, só com a personalidade/boas-vindas por cima.
-  if (config.modo === 'livre' && iaConfigurada()) {
+  // MODO_LIVRE_BOT_DISPONIVEL (config/featureFlags.js) desligado a pedido — empresas com 'livre'
+  // salvo como preferência não perdem a escolha (fica no banco), mas o bot roda em guiado até a
+  // flag voltar a true.
+  if (config.modo === 'livre' && iaConfigurada() && MODO_LIVRE_BOT_DISPONIVEL) {
     return processarComAgente({ empresaId, telefone, texto, instancia, config });
   }
 
