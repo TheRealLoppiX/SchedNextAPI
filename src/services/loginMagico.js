@@ -1,4 +1,5 @@
-const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const supabase = require('../config/supabase');
 const { montarUrlTenant } = require('../utils/tenantContext');
 
 const VALIDADE_MINUTOS = 15;
@@ -9,17 +10,24 @@ const VALIDADE_MINUTOS = 15;
 // que já resolveu pelo WhatsApp. Sem usuarioId (cliente ainda não identificado/cadastrado), cai
 // pro link comum da loja, que pede login normal.
 //
-// O token aqui NUNCA é usado direto como sessão: é só uma chave de troca de curta duração
-// (tipo:'login_magico' o distingue de um token de sessão de verdade, ver clienteAuth.js), trocada
-// por uma sessão real só na primeira vez que for consumida em POST /login-magico (routes/auth.js).
-// Assinado com o mesmo JWT_SECRET dos outros tokens do projeto — não precisa de tabela nem de
-// limpeza própria, a validade curta já limita a janela de exposição se o link vazar.
-function gerarLinkAcesso(empresaTenant, usuarioId) {
+// Código curto (8 caracteres) em vez de JWT: um token assinado ficava com 150+ caracteres, ruim
+// de mandar por WhatsApp. O código NUNCA é usado direto como sessão — é só uma chave de troca de
+// uso único (apagada assim que consumida, ver POST /login-magico em routes/auth.js), guardada em
+// login_magico_codigos com validade curta. Falha ao gravar cai pro link comum, sem quebrar o
+// fluxo do bot.
+async function gerarLinkAcesso(empresaTenant, usuarioId) {
   if (!empresaTenant) return null;
   if (!usuarioId) return montarUrlTenant(empresaTenant);
 
-  const token = jwt.sign({ id: usuarioId, tipo: 'login_magico' }, process.env.JWT_SECRET, { expiresIn: `${VALIDADE_MINUTOS}m` });
-  return montarUrlTenant(empresaTenant, `/entrar-magico?token=${token}`);
+  const codigo = crypto.randomBytes(6).toString('base64url'); // 8 caracteres, ~48 bits
+  const expiraEm = new Date(Date.now() + VALIDADE_MINUTOS * 60000).toISOString();
+  const { error } = await supabase.from('login_magico_codigos').insert({ codigo, usuario_id: usuarioId, expira_em: expiraEm });
+  if (error) {
+    console.error('Erro ao gerar código de login mágico:', error);
+    return montarUrlTenant(empresaTenant);
+  }
+
+  return montarUrlTenant(empresaTenant, `/entrar-magico?token=${codigo}`);
 }
 
 module.exports = { gerarLinkAcesso };

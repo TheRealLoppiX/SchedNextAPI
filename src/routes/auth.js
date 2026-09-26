@@ -134,21 +134,24 @@ router.post('/login', loginLimiter, validate(loginClienteSchema), async (req, re
 // assinatura do JWT já é o que impede adivinhar um token válido, o rate limit é só pra não deixar
 // alguém martelar o endpoint sem limite nenhum.
 router.post('/login-magico', codigoLimiter, validate(loginMagicoSchema), async (req, res) => {
-  let payload;
-  try {
-    payload = jwt.verify(req.body.token, process.env.JWT_SECRET);
-  } catch (e) {
+  const { data: pendente } = await supabase
+    .from('login_magico_codigos')
+    .select('usuario_id, expira_em')
+    .eq('codigo', req.body.token)
+    .maybeSingle();
+
+  if (!pendente || new Date(pendente.expira_em) < new Date()) {
     return res.status(401).json({ message: 'Link expirado ou inválido. Peça um novo pelo WhatsApp.' });
   }
 
-  if (payload.tipo !== 'login_magico' || !payload.id) {
-    return res.status(401).json({ message: 'Link inválido.' });
-  }
+  // Apaga antes de mais nada — uso único: mesmo que o resto falhe abaixo, o código não pode
+  // ser reaproveitado numa segunda tentativa.
+  await supabase.from('login_magico_codigos').delete().eq('codigo', req.body.token);
 
   const { data: usuario, error } = await supabase
     .from('usuarios')
     .select('id, nome_completo, ativo')
-    .eq('id', payload.id)
+    .eq('id', pendente.usuario_id)
     .maybeSingle();
 
   if (error || !usuario || !usuario.ativo) return res.status(401).json({ message: 'Conta não encontrada ou inativa.' });

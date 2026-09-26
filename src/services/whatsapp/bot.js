@@ -236,8 +236,10 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   const montarMensagemMenu = async () => {
     const saudacao = config.boasVindas || 'Olá!';
     const cliente = await encontrarClientePorTelefone(empresaId, telefone);
-    const link = gerarLinkAcesso(config.empresaTenant, cliente?.id) || config.linkLoja;
-    const linkLojaTexto = link ? ` Prefere marcar direto pelo site? ${link}` : '';
+    const link = (await gerarLinkAcesso(config.empresaTenant, cliente?.id)) || config.linkLoja;
+    // "Já logado" avisa que o link não é só pra marcar — cai direto na conta, dá pra ver e
+    // cancelar horário também, sem digitar senha de novo.
+    const linkLojaTexto = link ? ` Ou pelo site (já logado): ${link}` : '';
     return `${saudacao} O que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.${linkLojaTexto}`;
   };
 
@@ -591,9 +593,9 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sess
 
   // usuario_id sempre setado a essa altura (veio de encontrarClientePorTelefone ou do cadastro
   // que acabou de ser concluído), então dá pra gerar link com login automático de verdade aqui.
-  const linkConfirmacao = gerarLinkAcesso(config.empresaTenant, dados.usuario_id) || config.linkLoja;
+  const linkConfirmacao = (await gerarLinkAcesso(config.empresaTenant, dados.usuario_id)) || config.linkLoja;
   const confirmacao = `Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}` +
-    (linkConfirmacao ? `\n\nAcompanhe pelo site: ${linkConfirmacao}` : '');
+    (linkConfirmacao ? `\n\nGerenciar pelo site (já logado): ${linkConfirmacao}` : '');
 
   // Oferece adiantar o pagamento via Pix só quando a empresa tem Mercado Pago conectado (ver
   // routes/mercadopago.js) — sem conta conectada não tem pra onde gerar a cobrança.

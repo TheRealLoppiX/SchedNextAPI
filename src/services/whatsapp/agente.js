@@ -188,10 +188,11 @@ function montarSistema(config, primeiraMensagem, link) {
   );
   if (link) {
     partes.push(
-      `Link da página pública deste estabelecimento (site onde também dá pra agendar — se o cliente já tem cadastro, este ` +
-      `link específico já abre com ele logado, não peça login de novo): ${link}\n` +
-      'Inclua esse link, exatamente como está aqui, na primeira mensagem da conversa (junto da saudação) e sempre que ' +
-      'confirmar um agendamento criado com sucesso. Nunca altere, abrevie ou reescreva o link.'
+      `Link da página pública deste estabelecimento: ${link}\n` +
+      'Se o cliente já tem cadastro, esse link específico já abre com ele logado (não peça login de novo) — deixe claro ' +
+      'que ele serve tanto pra agendar quanto pra ver/cancelar horários já marcados, não é só pra marcar. Inclua esse ' +
+      'link, exatamente como está aqui, na primeira mensagem da conversa (junto da saudação) e sempre que confirmar um ' +
+      'agendamento criado com sucesso. Nunca altere, abrevie ou reescreva o link.'
     );
   }
   if (primeiraMensagem) {
@@ -440,7 +441,7 @@ async function processar({ empresaId, telefone, texto, instancia, config }) {
   // reaparece de novo depois de um agendamento criado com sucesso, quando a busca é refeita
   // (linkDeveAparecer, mais abaixo).
   const clienteInicial = primeiraMensagem ? await encontrarClientePorTelefone(empresaId, telefone) : null;
-  const linkInicial = gerarLinkAcesso(config.empresaTenant, clienteInicial?.id) || config.linkLoja;
+  const linkInicial = (await gerarLinkAcesso(config.empresaTenant, clienteInicial?.id)) || config.linkLoja;
 
   const sistema = montarSistema(config, primeiraMensagem, linkInicial);
   const mensagens = [...historico, { role: 'user', content: msg }];
@@ -485,7 +486,7 @@ async function processar({ empresaId, telefone, texto, instancia, config }) {
     // na mesma mensagem) — sem isso o link de fallback saía sem login automático bem no caso
     // mais comum de precisar dele.
     const clienteAtual = await encontrarClientePorTelefone(empresaId, telefone);
-    const linkFinal = gerarLinkAcesso(config.empresaTenant, clienteAtual?.id) || config.linkLoja;
+    const linkFinal = (await gerarLinkAcesso(config.empresaTenant, clienteAtual?.id)) || config.linkLoja;
     if (linkFinal && !respostaFinal.includes(linkFinal)) {
       respostaFinal = `${respostaFinal}\n\n${linkFinal}`;
     }
