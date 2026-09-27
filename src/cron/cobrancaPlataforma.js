@@ -1,7 +1,7 @@
 const cron = require('node-cron');
 const supabase = require('../config/supabase');
 const { criarPixAssinaturaPlataforma } = require('../services/pagamento');
-const { buscarCampanhaDaEmpresa, precoDoCiclo } = require('../services/precificacaoPlataforma');
+const { buscarCampanhaDaEmpresa, precoDoCiclo, precoCheioDaEmpresa } = require('../services/precificacaoPlataforma');
 const transporter = require('../config/mailer');
 const { emailHtml } = require('../utils/emailTemplate');
 
@@ -46,7 +46,10 @@ function iniciarCobrancaPlataforma() {
         if (existente) continue;
 
         const campanha = await buscarCampanhaDaEmpresa(empresa.campanha_precificacao_id);
-        const valor = precoDoCiclo(campanha, proximoCiclo, empresa.plano_plataforma?.preco_mensal ?? 0);
+        // Preço cheio travado na assinatura, não o atual do plano: aumento de preço só vale pra
+        // quem assina depois (ver sql/2026_preco_contratado_plataforma.sql).
+        const precoCheio = await precoCheioDaEmpresa(empresa.id, empresa.plano_plataforma?.preco_mensal);
+        const valor = precoDoCiclo(campanha, proximoCiclo, precoCheio);
 
         const cobranca = await criarPixAssinaturaPlataforma({
           empresaId: empresa.id,

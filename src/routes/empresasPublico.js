@@ -36,7 +36,30 @@ router.get('/planos-plataforma', async (req, res) => {
     .order('id');
 
   if (error) return res.status(500).json(error);
-  res.json(data);
+
+  // Campanha em vigor agora pra cada plano (mesmo critério de buscarCampanhaParaNovoCadastro em
+  // services/precificacaoPlataforma.js), pra landing/cadastro mostrarem o preço promocional que
+  // de fato vai ser cobrado — sem isso o site só mostrava preco_mensal cheio.
+  const agora = new Date().toISOString();
+  const { data: campanhas } = await supabase
+    .from('campanhas_precificacao')
+    .select('plano_plataforma_id, nome, campanha_precos_ciclo(numero_ciclo, valor)')
+    .eq('ativa', true)
+    .lte('inicio', agora)
+    .gte('fim', agora);
+
+  res.json((data || []).map((p) => {
+    const c = (campanhas || []).find((x) => x.plano_plataforma_id === p.id);
+    return {
+      ...p,
+      campanha: c ? {
+        nome: c.nome,
+        precos_por_ciclo: (c.campanha_precos_ciclo || [])
+          .map((x) => ({ numero_ciclo: x.numero_ciclo, valor: Number(x.valor) }))
+          .sort((a, b) => a.numero_ciclo - b.numero_ciclo)
+      } : null
+    };
+  }));
 });
 
 router.get('/empresas/slug-disponivel/:slug', async (req, res) => {
@@ -62,8 +85,14 @@ router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmp
 
   // excluida_em de propósito fora do filtro: uma empresa excluída pelo admin absoluto (soft
   // delete, ver sql/2026_empresas_exclusao.sql) libera o e-mail pra um cadastro novo.
-  const { data: emailExistente } = await supabase.from('empresas').select('id').eq('email', email).is('excluida_em', null).maybeSingle();
-  if (emailExistente) return res.status(400).json({ error: 'Já existe uma empresa cadastrada com esse e-mail.' });
+  const { data: emailExistente } = await supabase.from('empresas').select('id, status_assinatura').eq('email', email).is('excluida_em', null).limit(1).maybeSingle();
+  if (emailExistente) {
+    return res.status(400).json({
+      error: emailExistente.status_assinatura === 'suspensa'
+        ? 'Esse e-mail pertence a uma conta suspensa. Fale com o suporte da SchedNext.'
+        : 'Já existe uma empresa cadastrada com esse e-mail.'
+    });
+  }
 
   // Antifraude: mesmo e-mail (normalizado), telefone ou CPF/CNPJ de uma conta já criada
   // bloqueia o cadastro (ver services/antifraude.js). Falha ao consultar NÃO libera o cadastro.

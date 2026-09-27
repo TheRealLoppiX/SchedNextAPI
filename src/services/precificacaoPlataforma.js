@@ -66,4 +66,28 @@ async function confirmarCicloPlataforma({ empresaId, cicloRef, valor, formaPagam
   return data;
 }
 
-module.exports = { buscarCampanhaParaNovoCadastro, buscarCampanhaDaEmpresa, precoDoCiclo, confirmarCicloPlataforma };
+// Preço cheio travado quando a empresa passou a pagar o plano (ver
+// sql/2026_preco_contratado_plataforma.sql) — aumento de preço do plano só vale pra quem assina
+// dali em diante. Consulta/escrita separadas e tolerantes a falha: sem a coluna no banco ainda,
+// cai no preço atual do plano (comportamento antigo) em vez de derrubar cobrança/webhook.
+async function precoCheioDaEmpresa(empresaId, precoPlanoAtual) {
+  const { data, error } = await supabase.from('empresas').select('plataforma_preco_contratado').eq('id', empresaId).maybeSingle();
+  if (error || data?.plataforma_preco_contratado == null) return Number(precoPlanoAtual ?? 0);
+  return Number(data.plataforma_preco_contratado);
+}
+
+async function registrarPrecoContratado(empresaId, planoId) {
+  const { data: plano } = await supabase.from('planos_plataforma').select('preco_mensal').eq('id', planoId).maybeSingle();
+  if (plano?.preco_mensal == null) return;
+  const { error } = await supabase.from('empresas').update({ plataforma_preco_contratado: plano.preco_mensal }).eq('id', empresaId);
+  if (error) console.error('Erro ao registrar preço contratado da plataforma:', error);
+}
+
+module.exports = {
+  buscarCampanhaParaNovoCadastro,
+  buscarCampanhaDaEmpresa,
+  precoDoCiclo,
+  confirmarCicloPlataforma,
+  precoCheioDaEmpresa,
+  registrarPrecoContratado
+};

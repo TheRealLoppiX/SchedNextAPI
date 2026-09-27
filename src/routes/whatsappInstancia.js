@@ -3,9 +3,9 @@ const supabase = require('../config/supabase');
 const validate = require('../middleware/validate');
 const { whatsappTesteSchema, whatsappBotConfigSchema } = require('../schemas');
 const { permiteWhatsappBot, permiteIA } = require('../utils/limitesPlano');
-const { estaConfigurado, criarInstancia, obterQrCode, obterStatusConexao, removerInstancia, enviarMensagem } = require('../services/whatsapp/provider');
+const { estaConfigurado, criarInstancia, obterQrCode, obterCodigoPareamento, obterStatusConexao, removerInstancia, enviarMensagem } = require('../services/whatsapp/provider');
 const { obterHorarioBot, MENSAGEM_PADRAO } = require('../services/whatsapp/horarioBot');
-const { MODO_LIVRE_BOT_DISPONIVEL } = require('../config/featureFlags');
+const { MODO_LIVRE_BOT_DISPONIVEL, PERSONALIDADE_BOT_DISPONIVEL } = require('../config/featureFlags');
 
 const router = express.Router();
 
@@ -38,6 +38,7 @@ router.get('/admin/whatsapp', async (req, res) => {
     // livre ou cai pro guiado, com base em MODO_LIVRE_BOT_DISPONIVEL.
     modo: empresa?.whatsapp_bot_modo || 'guiado',
     modoLivreDisponivel: MODO_LIVRE_BOT_DISPONIVEL,
+    personalidadeDisponivel: PERSONALIDADE_BOT_DISPONIVEL,
     nome: empresa?.whatsapp_bot_nome || '',
     personalidade: empresa?.whatsapp_bot_personalidade || '',
     boasVindas: empresa?.whatsapp_bot_boas_vindas || '',
@@ -66,7 +67,8 @@ router.get('/admin/whatsapp', async (req, res) => {
     const status = await obterStatusConexao(instancia);
     res.json({ permitido: true, instancia, estado: status.state, conectado: status.state === 'open', botConfig });
   } catch (err) {
-    console.error('Erro ao consultar status da conexão de WhatsApp:', err);
+    // Sem stack: isso roda a cada poucos segundos enquanto a tela está aberta.
+    console.error(`Erro ao consultar status da conexão de WhatsApp: ${err.message}`);
     res.json({ permitido: true, instancia, estado: null, conectado: false, erroConsulta: true, botConfig });
   }
 });
@@ -94,6 +96,9 @@ router.put('/admin/whatsapp/bot-config', validate(whatsappBotConfigSchema), asyn
   // devesse mandar isso pra uma empresa sem o recurso, a rota não confia só na UI.
   if (iaLiberada) {
     if (modo !== undefined) atualizacao.whatsapp_bot_modo = modo;
+  }
+  // Em manutenção (config/featureFlags.js): não sobrescreve os valores salvos.
+  if (iaLiberada && PERSONALIDADE_BOT_DISPONIVEL) {
     if (nome !== undefined) atualizacao.whatsapp_bot_nome = nome || null;
     if (personalidade !== undefined) atualizacao.whatsapp_bot_personalidade = personalidade || null;
     if (temperatura !== undefined) atualizacao.whatsapp_bot_temperatura = temperatura;
@@ -173,6 +178,52 @@ router.post('/admin/whatsapp/conectar', async (req, res) => {
   } catch (err) {
     console.error('Erro ao conectar instância de WhatsApp:', err);
     res.status(500).json({ error: err.message || 'Erro ao conectar com o WhatsApp.' });
+  }
+});
+
+// Conexão sem QR Code, pra quem só tem o celular (ver obterCodigoPareamento em
+// services/whatsapp/provider.js). O número informado tem que ser o do WhatsApp que vai ser
+// conectado — é nele que o código é digitado.
+router.post('/admin/whatsapp/codigo-pareamento', validate(whatsappTesteSchema), async (req, res) => {
+  const empresa_id = req.empresaId;
+
+  if (!(await permiteWhatsappBot(empresa_id))) {
+    return res.status(403).json({ error: 'Agendamento por WhatsApp é um recurso exclusivo dos planos Profissional e Enterprise. Fale com o suporte para fazer upgrade.' });
+  }
+  if (!estaConfigurado()) {
+    return res.status(503).json({ error: 'Integração de WhatsApp não está disponível no momento.' });
+  }
+
+  let numero = req.body.telefone.replace(/\D/g, '');
+  if (numero.length === 10 || numero.length === 11) numero = `55${numero}`;
+  if (numero.length < 12 || numero.length > 13) {
+    return res.status(400).json({ error: 'Informe o número do WhatsApp com DDD. Ex: (11) 91234-5678.' });
+  }
+
+  const { data: empresa, error } = await supabase
+    .from('empresas')
+    .select('slug, whatsapp_phone_number_id')
+    .eq('id', empresa_id)
+    .maybeSingle();
+  if (error || !empresa) return res.status(500).json({ error: 'Erro ao buscar empresa.' });
+
+  const instancia = empresa.whatsapp_phone_number_id || empresa.slug;
+
+  try {
+    if (!empresa.whatsapp_phone_number_id) {
+      await criarInstancia(instancia);
+      await supabase.from('empresas').update({ whatsapp_phone_number_id: instancia }).eq('id', empresa_id);
+    }
+
+    const dados = await obterCodigoPareamento(instancia, numero);
+    if (!dados?.pairingCode) {
+      return res.status(409).json({ error: 'Não foi possível gerar o código agora. Se o WhatsApp já estiver conectado, não é preciso conectar de novo; senão, tente pelo QR Code.' });
+    }
+
+    res.json({ instancia, codigo: dados.pairingCode });
+  } catch (err) {
+    console.error('Erro ao gerar código de pareamento do WhatsApp:', err);
+    res.status(500).json({ error: err.message || 'Erro ao gerar o código de conexão.' });
   }
 });
 
