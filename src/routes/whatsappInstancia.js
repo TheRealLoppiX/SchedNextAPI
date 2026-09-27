@@ -5,7 +5,7 @@ const { whatsappTesteSchema, whatsappBotConfigSchema } = require('../schemas');
 const { permiteWhatsappBot, permiteIA } = require('../utils/limitesPlano');
 const { estaConfigurado, criarInstancia, obterQrCode, obterStatusConexao, removerInstancia, enviarMensagem } = require('../services/whatsapp/provider');
 const { obterHorarioBot, MENSAGEM_PADRAO } = require('../services/whatsapp/horarioBot');
-const { MODO_LIVRE_BOT_DISPONIVEL } = require('../config/featureFlags');
+const { MODO_LIVRE_BOT_DISPONIVEL, PERSONALIDADE_BOT_DISPONIVEL } = require('../config/featureFlags');
 
 const router = express.Router();
 
@@ -38,6 +38,7 @@ router.get('/admin/whatsapp', async (req, res) => {
     // livre ou cai pro guiado, com base em MODO_LIVRE_BOT_DISPONIVEL.
     modo: empresa?.whatsapp_bot_modo || 'guiado',
     modoLivreDisponivel: MODO_LIVRE_BOT_DISPONIVEL,
+    personalidadeDisponivel: PERSONALIDADE_BOT_DISPONIVEL,
     nome: empresa?.whatsapp_bot_nome || '',
     personalidade: empresa?.whatsapp_bot_personalidade || '',
     boasVindas: empresa?.whatsapp_bot_boas_vindas || '',
@@ -94,6 +95,9 @@ router.put('/admin/whatsapp/bot-config', validate(whatsappBotConfigSchema), asyn
   // devesse mandar isso pra uma empresa sem o recurso, a rota não confia só na UI.
   if (iaLiberada) {
     if (modo !== undefined) atualizacao.whatsapp_bot_modo = modo;
+  }
+  // Em manutenção (config/featureFlags.js): não sobrescreve os valores salvos.
+  if (iaLiberada && PERSONALIDADE_BOT_DISPONIVEL) {
     if (nome !== undefined) atualizacao.whatsapp_bot_nome = nome || null;
     if (personalidade !== undefined) atualizacao.whatsapp_bot_personalidade = personalidade || null;
     if (temperatura !== undefined) atualizacao.whatsapp_bot_temperatura = temperatura;

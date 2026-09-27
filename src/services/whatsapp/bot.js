@@ -8,7 +8,7 @@ const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
 const { montarUrlTenant } = require('../../utils/tenantContext');
 const { gerarLinkAcesso } = require('../loginMagico');
 const { gerarTexto, estaConfigurado: iaConfigurada, MODELOS_CLASSIFICACAO } = require('../groq');
-const { MODO_LIVRE_BOT_DISPONIVEL } = require('../../config/featureFlags');
+const { MODO_LIVRE_BOT_DISPONIVEL, PERSONALIDADE_BOT_DISPONIVEL } = require('../../config/featureFlags');
 const {
   EMAIL_REGEX,
   obterOuCriarSessao,
@@ -82,11 +82,12 @@ async function obterConfigBot(empresaId) {
     .maybeSingle();
 
   const permiteIa = !!data?.plano_plataforma?.permite_ia;
+  const personalidadeLiberada = permiteIa && PERSONALIDADE_BOT_DISPONIVEL;
   return {
     permiteIa,
     modo: permiteIa ? (data?.whatsapp_bot_modo || 'guiado') : 'guiado',
-    nome: permiteIa ? (data?.whatsapp_bot_nome || null) : null,
-    personalidade: permiteIa ? (data?.whatsapp_bot_personalidade || null) : null,
+    nome: personalidadeLiberada ? (data?.whatsapp_bot_nome || null) : null,
+    personalidade: personalidadeLiberada ? (data?.whatsapp_bot_personalidade || null) : null,
     boasVindas: data?.whatsapp_bot_boas_vindas || null,
     temperatura: data?.whatsapp_bot_temperatura != null ? Number(data.whatsapp_bot_temperatura) : 0.6,
     // Link da página pública da empresa (subdomínio ou domínio próprio verificado, ver

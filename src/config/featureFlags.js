@@ -9,4 +9,11 @@
 // services/whatsapp/bot.js e routes/whatsappInstancia.js).
 const MODO_LIVRE_BOT_DISPONIVEL = false;
 
-module.exports = { MODO_LIVRE_BOT_DISPONIVEL };
+// Nome, personalidade e criatividade do assistente (reescrita de tom por IA em cima das mensagens
+// do modo guiado, ver aplicarPersonalidade em services/whatsapp/bot.js) desligados a pedido —
+// 2026-09-27, junto com o modo livre. Valores salvos são mantidos e voltam a valer quando a flag
+// voltar pra true; enquanto isso o bot responde com os textos fixos e a rota de config não
+// sobrescreve esses campos.
+const PERSONALIDADE_BOT_DISPONIVEL = false;
+
+module.exports = { MODO_LIVRE_BOT_DISPONIVEL, PERSONALIDADE_BOT_DISPONIVEL };
