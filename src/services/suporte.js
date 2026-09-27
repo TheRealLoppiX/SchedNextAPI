@@ -32,7 +32,13 @@ async function responderSuporte(historico, novaMensagem) {
     const mensagens = [...historico, { role: 'user', content: novaMensagem }];
     // maxTokens baixo de propósito: força respostas curtas (ver instrução de concisão no
     // sistema acima) — 500 deixava a IA escrever parágrafos inteiros pra perguntas simples.
-    const resultado = await chat({ mensagens, sistema: SISTEMA_SUPORTE, maxTokens: 220, temperatura: 0.4 });
+    // reasoningEffort:'low' é necessário com maxTokens tão baixo: o modelo padrão (Qwen, ver
+    // groq.js) é de raciocínio e o <think> oculto consome do mesmo teto de tokens — sem isso o
+    // raciocínio come o orçamento inteiro pra perguntas um pouco menos triviais e a resposta
+    // visível sai vazia (mesmo problema documentado em whatsapp/bot.js/interpretarIntencaoMenu).
+    // Sem tool calling aqui, então não se aplica o aviso em groq.js sobre reasoning_effort
+    // atrapalhar a chamada de ferramenta.
+    const resultado = await chat({ mensagens, sistema: SISTEMA_SUPORTE, maxTokens: 220, temperatura: 0.4, reasoningEffort: 'low' });
     return resultado.content || 'Não consegui entender, pode reformular a pergunta?';
   } catch (err) {
     console.error('Erro ao gerar resposta de suporte via IA:', err);

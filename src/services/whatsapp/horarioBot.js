@@ -102,4 +102,4 @@ async function liberarOuAvisarForaDoHorario({ empresaId, telefone, instancia, en
   return false;
 }
 
-module.exports = { liberarOuAvisarForaDoHorario, obterHorarioBot, dentroDoHorario, textoVolta, MENSAGEM_PADRAO };
+module.exports = { liberarOuAvisarForaDoHorario, obterHorarioBot, MENSAGEM_PADRAO };

@@ -5,6 +5,7 @@ const validate = require('../middleware/validate');
 const { perfilAtualizarSchema, avaliarSchema } = require('../schemas');
 const { calcularInicioCiclo, calcularFimCiclo, obterUsoServicos, obterAgendamentosPendentesPorServico } = require('../utils/limitesAssinatura');
 const { paraInstanteReal } = require('../utils/horarioBrasilia');
+const { contarAtendimentosNaAcao } = require('../services/fidelidade');
 
 const router = express.Router();
 
@@ -184,19 +185,10 @@ router.get('/fidelidade/:userId', verificarTokenCliente, async (req, res) => {
   if (campErr) return res.status(500).json({ error: 'Erro ao buscar campanha' });
   if (!campanha) return res.json({ ativa: false });
 
-  // Nota: só 'concluido' é um valor válido do ENUM real (ver comentário em /avaliar acima).
-  const { count, error: countErr } = await supabase
-    .from('agendamentos')
-    .select('id', { count: 'exact', head: true })
-    .eq('usuario_id', userId)
-    .eq('status', 'concluido')
-    .gte('data_hora', `${campanha.data_inicio}T00:00:00`)
-    .lte('data_hora', `${campanha.data_fim}T23:59:59`)
-    .gte('valor_total', campanha.valor_minimo);
-
-  if (countErr) return res.status(500).json({ error: 'Erro ao calcular progresso' });
-
-  const concluidos = count || 0;
+  // Mesma contagem de elegibilidade usada em services/fidelidade.js — fonte única em
+  // contarAtendimentosNaAcao, nenhum dos dois lugares reimplementa a query.
+  const { count: concluidos, error: contagemErr } = await contarAtendimentosNaAcao(userId, campanha);
+  if (contagemErr) return res.status(500).json({ error: 'Erro ao calcular progresso' });
   const progresso = Math.min(concluidos, campanha.cortes_necessarios);
   const faltam = campanha.cortes_necessarios - progresso;
   const ganhouPremio = progresso >= campanha.cortes_necessarios;

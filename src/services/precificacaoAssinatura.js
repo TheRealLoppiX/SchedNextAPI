@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase');
+const { resolverPrecoDoCiclo } = require('../utils/precificacao');
 
 // Campanhas promocionais de preço escalonado por ciclo pra assinatura de CLIENTE FINAL (mensalidade
 // que ele paga pra própria barbearia — não confundir com services/precificacaoPlataforma.js, que
@@ -42,9 +43,7 @@ async function buscarCampanhaDoCliente(campanhaId) {
 // Preço do N-ésimo ciclo: usa a campanha se ela definir esse ciclo específico, senão cai no
 // preço cheio do plano.
 function precoDoCiclo(campanha, numeroCiclo, precoPadrao) {
-  if (!campanha) return Number(precoPadrao);
-  const linha = (campanha.campanha_assinatura_precos_ciclo || []).find((p) => p.numero_ciclo === numeroCiclo);
-  return linha ? Number(linha.valor) : Number(precoPadrao);
+  return resolverPrecoDoCiclo(campanha?.campanha_assinatura_precos_ciclo, numeroCiclo, precoPadrao);
 }
 
 module.exports = { buscarCampanhaParaNovoCadastro, buscarCampanhaDoCliente, precoDoCiclo };

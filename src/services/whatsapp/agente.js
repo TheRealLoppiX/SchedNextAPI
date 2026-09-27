@@ -487,7 +487,15 @@ async function processar({ empresaId, telefone, texto, instancia, config }) {
     // mais comum de precisar dele.
     const clienteAtual = await encontrarClientePorTelefone(empresaId, telefone);
     const linkFinal = (await gerarLinkAcesso(config.empresaTenant, clienteAtual?.id)) || config.linkLoja;
-    if (linkFinal && !respostaFinal.includes(linkFinal)) {
+    // Compara só a parte antes do "?token=": gerarLinkAcesso agora gera um código curto e
+    // aleatório a cada chamada (ver services/loginMagico.js), então este linkFinal NUNCA bate
+    // caractere-por-caractere com o linkInicial que a IA recebeu no system prompt (mesmo quando
+    // ela seguiu a instrução certinho) — comparar a string inteira sempre dava "não achei" e
+    // duplicava o link (um do texto da IA, outro colado aqui, cada um com um código diferente).
+    // A base do link (tudo antes do "?") já é suficiente pra saber se um magico daquele tenant
+    // já está na resposta. `linkFinal &&` precisa vir ANTES do .split() (não só do .includes()):
+    // sem cliente e sem config.linkLoja, linkFinal pode ser null, e null.split() quebra.
+    if (linkFinal && !respostaFinal.includes(linkFinal.split('?')[0])) {
       respostaFinal = `${respostaFinal}\n\n${linkFinal}`;
     }
   }

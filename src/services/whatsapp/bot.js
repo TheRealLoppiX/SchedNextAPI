@@ -238,8 +238,14 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
     const cliente = await encontrarClientePorTelefone(empresaId, telefone);
     const link = (await gerarLinkAcesso(config.empresaTenant, cliente?.id)) || config.linkLoja;
     // "Já logado" avisa que o link não é só pra marcar — cai direto na conta, dá pra ver e
-    // cancelar horário também, sem digitar senha de novo.
-    const linkLojaTexto = link ? ` Ou pelo site (já logado): ${link}` : '';
+    // cancelar horário também, sem digitar senha de novo. Só é verdade quando o link é o de
+    // login automático de verdade (contém /entrar-magico) — sem cliente reconhecido (ou se
+    // gerarLinkAcesso cair no fallback por erro ao gravar), `link` é o link comum da loja, que
+    // pede login normal; rotular esse caso como "já logado" mentiria pro cliente novo, que é o
+    // caso mais comum de mensagem de menu. `link &&` primeiro: sem cliente E sem config.linkLoja,
+    // link pode ser null, e null.includes() quebra.
+    const jaLogado = !!link && link.includes('/entrar-magico');
+    const linkLojaTexto = link ? ` Ou pelo site${jaLogado ? ' (já logado)' : ''}: ${link}` : '';
     return `${saudacao} O que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.${linkLojaTexto}`;
   };
 
@@ -592,10 +598,14 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sess
   }
 
   // usuario_id sempre setado a essa altura (veio de encontrarClientePorTelefone ou do cadastro
-  // que acabou de ser concluído), então dá pra gerar link com login automático de verdade aqui.
+  // que acabou de ser concluído), então a chamada abaixo tenta gerar link com login automático —
+  // mas pode cair no link comum se o insert em login_magico_codigos falhar (ver
+  // services/loginMagico.js), mesmo com usuario_id definido. Por isso o rótulo "já logado" confere
+  // o link de verdade em vez de supor, mesmo padrão de montarMensagemMenu logo acima.
   const linkConfirmacao = (await gerarLinkAcesso(config.empresaTenant, dados.usuario_id)) || config.linkLoja;
+  const jaLogadoConfirmacao = !!linkConfirmacao && linkConfirmacao.includes('/entrar-magico');
   const confirmacao = `Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}` +
-    (linkConfirmacao ? `\n\nGerenciar pelo site (já logado): ${linkConfirmacao}` : '');
+    (linkConfirmacao ? `\n\nGerenciar pelo site${jaLogadoConfirmacao ? ' (já logado)' : ''}: ${linkConfirmacao}` : '');
 
   // Oferece adiantar o pagamento via Pix só quando a empresa tem Mercado Pago conectado (ver
   // routes/mercadopago.js) — sem conta conectada não tem pra onde gerar a cobrança.
