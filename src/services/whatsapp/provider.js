@@ -148,6 +148,20 @@ async function obterQrCode(instancia) {
   return dados; // { base64, code, count, ... } ou {count} se já conectado/sem QR pendente
 }
 
+// Código de pareamento (alternativa ao QR Code): o dono digita esse código de 8 caracteres no
+// próprio WhatsApp em "Aparelhos conectados → Conectar um aparelho → Conectar com número de
+// telefone". Dá pra fazer tudo no mesmo celular, sem precisar de um segundo aparelho pra mostrar
+// o QR. Mesmo endpoint do QR, só que com ?number= (só dígitos, com DDI) — a Evolution devolve
+// `pairingCode` junto.
+async function obterCodigoPareamento(instancia, numero) {
+  const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/instance/connect/${instancia}?number=${encodeURIComponent(numero)}`, {
+    headers: headers(),
+  });
+  const dados = await resposta.json();
+  if (!resposta.ok) throw new Error(dados?.message || 'Erro ao gerar código de pareamento.');
+  return dados; // { pairingCode, code, base64, count } ou {count} se já conectado
+}
+
 async function obterStatusConexao(instancia) {
   const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/instance/connectionState/${instancia}`, {
     headers: headers(),
@@ -181,4 +195,4 @@ async function removerInstancia(instancia) {
   }
 }
 
-module.exports = { estaConfigurado, enviarMensagem, enviarImagem, criarInstancia, atualizarWebhook, obterQrCode, obterStatusConexao, removerInstancia };
+module.exports = { estaConfigurado, enviarMensagem, enviarImagem, criarInstancia, atualizarWebhook, obterQrCode, obterCodigoPareamento, obterStatusConexao, removerInstancia };
