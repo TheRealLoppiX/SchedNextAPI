@@ -378,9 +378,20 @@ router.put('/super-admin/empresas/:id/vertical', validate(empresaTrocarVerticalS
 // antifraude dessa empresa (services/antifraude.js) — sem isso, excluir a empresa não bastaria
 // pra liberar o e-mail/telefone/documento pra um novo cadastro, já que o antifraude sobrevive
 // de propósito à exclusão da empresa.
+// A linha continua em `empresas`, então e-mail e slug precisam sair do caminho: login,
+// recuperação de senha e checagem de endereço buscam por eles esperando uma empresa só (um
+// cadastro novo com o mesmo e-mail quebrava o maybeSingle do login e o slug ficava preso).
+// Ganham um sufixo reversível, desfeito em /restaurar.
+const sufixoExclusao = (id) => `#excluida-${id}`;
+const liberarIdentificadores = (empresa) => ({
+  email: `${empresa.email}${sufixoExclusao(empresa.id)}`,
+  slug: `${empresa.slug}--excluida-${empresa.id}`
+});
+
 router.post('/super-admin/empresas/:id/excluir', async (req, res) => {
-  const { data: empresa } = await supabase.from('empresas').select('gateway_subscription_id').eq('id', req.params.id).maybeSingle();
+  const { data: empresa } = await supabase.from('empresas').select('id, email, slug, excluida_em, gateway_subscription_id').eq('id', req.params.id).maybeSingle();
   if (!empresa) return res.status(404).json({ error: 'Empresa não encontrada.' });
+  if (empresa.excluida_em) return res.status(400).json({ error: 'Esta empresa já está excluída.' });
 
   if (empresa.gateway_subscription_id) {
     try {
@@ -394,6 +405,7 @@ router.post('/super-admin/empresas/:id/excluir', async (req, res) => {
     .from('empresas')
     .update({
       excluida_em: new Date().toISOString(),
+      ...liberarIdentificadores(empresa),
       status_assinatura: 'cancelada',
       cancelamento_agendado: false,
       gateway_subscription_id: null,
@@ -418,7 +430,22 @@ router.post('/super-admin/empresas/:id/excluir', async (req, res) => {
 });
 
 router.post('/super-admin/empresas/:id/restaurar', async (req, res) => {
-  const { error } = await supabase.from('empresas').update({ excluida_em: null }).eq('id', req.params.id);
+  const { data: empresa } = await supabase.from('empresas').select('id, email, slug, excluida_em').eq('id', req.params.id).maybeSingle();
+  if (!empresa) return res.status(404).json({ error: 'Empresa não encontrada.' });
+  if (!empresa.excluida_em) return res.status(400).json({ error: 'Esta empresa não está excluída.' });
+
+  const email = (empresa.email || '').replace(sufixoExclusao(empresa.id), '');
+  const slug = (empresa.slug || '').replace(`--excluida-${empresa.id}`, '');
+
+  // Enquanto estava excluída, o e-mail/endereço pode ter sido usado num cadastro novo.
+  const [{ data: emailEmUso }, { data: slugEmUso }] = await Promise.all([
+    supabase.from('empresas').select('id').eq('email', email).neq('id', empresa.id).limit(1),
+    supabase.from('empresas').select('id').eq('slug', slug).neq('id', empresa.id).limit(1)
+  ]);
+  if (emailEmUso?.length) return res.status(409).json({ error: `O e-mail ${email} já está em uso por outra empresa. Não dá pra restaurar esta.` });
+  if (slugEmUso?.length) return res.status(409).json({ error: `O endereço ${slug} já está em uso por outra empresa. Não dá pra restaurar esta.` });
+
+  const { error } = await supabase.from('empresas').update({ excluida_em: null, email, slug }).eq('id', req.params.id);
   if (error) return res.status(500).json({ error: 'Erro ao restaurar empresa.' });
   res.json({ success: true, message: 'Empresa restaurada. Confira o plano e o status da assinatura dela.' });
 });

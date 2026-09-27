@@ -85,8 +85,14 @@ router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmp
 
   // excluida_em de propósito fora do filtro: uma empresa excluída pelo admin absoluto (soft
   // delete, ver sql/2026_empresas_exclusao.sql) libera o e-mail pra um cadastro novo.
-  const { data: emailExistente } = await supabase.from('empresas').select('id').eq('email', email).is('excluida_em', null).maybeSingle();
-  if (emailExistente) return res.status(400).json({ error: 'Já existe uma empresa cadastrada com esse e-mail.' });
+  const { data: emailExistente } = await supabase.from('empresas').select('id, status_assinatura').eq('email', email).is('excluida_em', null).limit(1).maybeSingle();
+  if (emailExistente) {
+    return res.status(400).json({
+      error: emailExistente.status_assinatura === 'suspensa'
+        ? 'Esse e-mail pertence a uma conta suspensa. Fale com o suporte da SchedNext.'
+        : 'Já existe uma empresa cadastrada com esse e-mail.'
+    });
+  }
 
   // Antifraude: mesmo e-mail (normalizado), telefone ou CPF/CNPJ de uma conta já criada
   // bloqueia o cadastro (ver services/antifraude.js). Falha ao consultar NÃO libera o cadastro.
