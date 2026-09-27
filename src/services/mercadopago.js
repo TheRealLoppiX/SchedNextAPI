@@ -235,6 +235,18 @@ async function buscarUltimoPagamentoAutorizadoProcessado({ accessToken, preappro
 // Taxa real de processamento cobrada pelo Mercado Pago num pagamento (fee_details tipo
 // 'mercadopago_fee') — deliberadamente NÃO conta 'application_fee' (nossa própria comissão de
 // marketplace, ver obterTaxaMarketplace), que é custo de usar a SchedNext, não taxa de maquineta.
+// Quantas mensalidades de um preapproval foram de fato debitadas ('processed', mesmo critério de
+// buscarUltimoPagamentoAutorizadoProcessado). É a fonte da verdade de "em qual mês a assinatura
+// está" pro ajuste de valor de campanha (ver services/sincronizarValorCartao.js) — não depende
+// de nenhum webhook ter chegado.
+async function contarPagamentosAutorizadosProcessados({ accessToken, preapprovalId }) {
+  const resultado = await request(
+    `/authorized_payments/search?preapproval_id=${encodeURIComponent(preapprovalId)}&limit=100`,
+    { accessToken }
+  );
+  return (resultado?.results || []).filter((r) => r.status === 'processed' && r.payment?.id).length;
+}
+
 function taxaRealDoPagamento(pagamento) {
   return (pagamento?.fee_details || [])
     .filter((d) => d.type === 'mercadopago_fee')
@@ -255,5 +267,6 @@ module.exports = {
   atualizarValorPreapproval,
   buscarPagamentoAutorizado,
   buscarUltimoPagamentoAutorizadoProcessado,
+  contarPagamentosAutorizadosProcessados,
   taxaRealDoPagamento
 };

@@ -15,6 +15,7 @@ const iniciarCobrancaAssinaturas = require('./src/cron/cobrancaAssinaturas');
 const iniciarCobrancaPlataforma = require('./src/cron/cobrancaPlataforma');
 const iniciarTrialPlanos = require('./src/cron/trialPlanos');
 const iniciarResumoProfissionais = require('./src/cron/resumoProfissionais');
+const iniciarSincronizacaoValorCartao = require('./src/cron/sincronizarValorCartao');
 const { bloquearTrialExpirado } = require('./src/middleware/trialAuth');
 
 const app = express();
@@ -141,6 +142,7 @@ iniciarCobrancaAssinaturas();
 iniciarCobrancaPlataforma();
 iniciarTrialPlanos();
 iniciarResumoProfissionais();
+iniciarSincronizacaoValorCartao();
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Servidor rodando em http://localhost:${PORT}`));

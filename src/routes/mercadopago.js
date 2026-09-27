@@ -30,9 +30,10 @@ const {
   buscarPagamentoAutorizado,
   taxaRealDoPagamento
 } = require('../services/mercadopago');
-const { buscarPagamentoCicloPlataforma, atualizarValorAssinaturaNoGateway } = require('../services/pagamento');
+const { buscarPagamentoCicloPlataforma } = require('../services/pagamento');
 const { registrarReceitaPlataforma, registrarTaxaMarketplace } = require('../services/receitaPlataforma');
-const { buscarCampanhaDaEmpresa, precoDoCiclo, confirmarCicloPlataforma } = require('../services/precificacaoPlataforma');
+const { confirmarCicloPlataforma, registrarPrecoContratado } = require('../services/precificacaoPlataforma');
+const { sincronizarValorCartaoCampanha } = require('../services/sincronizarValorCartao');
 const {
   buscarCampanhaParaNovoCadastro,
   precoDoCiclo: precoDoCicloAssinatura
@@ -592,6 +593,9 @@ async function processarNotificacaoAssinatura(preapprovalId) {
       atualizacao.proxima_cobranca_em = proxima.toISOString();
     }
     await supabase.from('empresas').update(atualizacao).eq('id', empresaPlataforma.id);
+    // Plano pago acabou de valer: trava o preço cheio dele pra esta empresa (aumento futuro do
+    // plano não atinge quem já assina, ver sql/2026_preco_contratado_plataforma.sql).
+    if (atualizacao.plano_plataforma_id) await registrarPrecoContratado(empresaPlataforma.id, atualizacao.plano_plataforma_id);
 
     // Registra a receita real da assinatura da PLATAFORMA no livro-caixa (ver
     // services/receitaPlataforma.js) — busca o pagamento de verdade desse ciclo (com
@@ -628,23 +632,17 @@ async function processarNotificacaoAssinatura(preapprovalId) {
           if (!confirmado) return; // ciclo já tinha sido processado (webhook duplicado)
 
           const proximoCiclo = cicloConfirmado + 1;
-          // Só mexe no valor cobrado de quem está numa campanha de verdade — sem essa checagem,
-          // um admin editando o preço BASE do plano mais tarde (PUT /super-admin/planos/:id)
-          // repricaria silenciosamente todo assinante já ativo desse plano no próximo ciclo, o
-          // que nunca foi o comportamento esperado (plano mudou de preço só pra quem assina
-          // dali em diante, igual sempre foi).
+          // Só mexe no valor cobrado de quem está numa campanha de verdade — quem assinou sem
+          // campanha segue no valor com que o preapproval nasceu. O cálculo do mês vem da
+          // contagem real de mensalidades no Mercado Pago (services/sincronizarValorCartao.js), e
+          // cron/sincronizarValorCartao.js repete essa conferência a cada 6h caso isto falhe aqui.
           if (empresaPlataforma.campanha_precificacao_id) {
-            const planoAtualId = atualizacao.plano_plataforma_id || empresaPlataforma.plano_plataforma_id;
-            const [{ data: planoAtual }, campanha] = await Promise.all([
-              supabase.from('planos_plataforma').select('preco_mensal').eq('id', planoAtualId).maybeSingle(),
-              buscarCampanhaDaEmpresa(empresaPlataforma.campanha_precificacao_id)
-            ]);
-
-            const precoProximoCiclo = precoDoCiclo(campanha, proximoCiclo, planoAtual?.preco_mensal ?? 0);
-            if (Number(precoProximoCiclo) !== Number(pagamento.transaction_amount)) {
-              atualizarValorAssinaturaNoGateway(preapprovalId, precoProximoCiclo)
-                .catch((err) => console.error('Erro ao ajustar valor da assinatura pro próximo ciclo (campanha promocional):', err));
-            }
+            sincronizarValorCartaoCampanha({
+              empresaId: empresaPlataforma.id,
+              preapprovalId,
+              campanhaId: empresaPlataforma.campanha_precificacao_id,
+              planoId: atualizacao.plano_plataforma_id || empresaPlataforma.plano_plataforma_id
+            }).catch((err) => console.error('Erro ao ajustar valor da assinatura pro próximo ciclo (campanha promocional):', err));
           }
           await supabase.from('empresas').update({ ciclo_cobranca_atual: proximoCiclo }).eq('id', empresaPlataforma.id);
         })
@@ -867,6 +865,7 @@ router.post('/webhooks/mercadopago', async (req, res) => {
               atualizacaoPix.plano_plataforma_pendente_id = null;
             }
             await supabase.from('empresas').update(atualizacaoPix).eq('id', cobrancaPlataforma.empresa_id);
+            if (atualizacaoPix.plano_plataforma_id) await registrarPrecoContratado(cobrancaPlataforma.empresa_id, atualizacaoPix.plano_plataforma_id);
 
             registrarReceitaPlataforma({
               tipo: 'assinatura_plataforma',
