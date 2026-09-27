@@ -67,7 +67,8 @@ router.get('/admin/whatsapp', async (req, res) => {
     const status = await obterStatusConexao(instancia);
     res.json({ permitido: true, instancia, estado: status.state, conectado: status.state === 'open', botConfig });
   } catch (err) {
-    console.error('Erro ao consultar status da conexão de WhatsApp:', err);
+    // Sem stack: isso roda a cada poucos segundos enquanto a tela está aberta.
+    console.error(`Erro ao consultar status da conexão de WhatsApp: ${err.message}`);
     res.json({ permitido: true, instancia, estado: null, conectado: false, erroConsulta: true, botConfig });
   }
 });

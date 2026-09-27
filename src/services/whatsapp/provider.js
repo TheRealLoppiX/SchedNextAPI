@@ -11,6 +11,20 @@ function estaConfigurado() {
   return Boolean(process.env.EVOLUTION_API_URL && process.env.EVOLUTION_API_KEY);
 }
 
+// Quando a Evolution/VPS cai, quem responde costuma ser o proxy com uma página HTML de erro — o
+// resposta.json() cru estourava um SyntaxError com stack inteiro a cada consulta de status (a tela
+// do WhatsApp consulta a cada poucos segundos), inundando o log. Aqui vira um erro de uma linha.
+class EvolutionIndisponivelError extends Error {}
+
+async function lerJson(resposta) {
+  const texto = await resposta.text();
+  try {
+    return texto ? JSON.parse(texto) : {};
+  } catch {
+    throw new EvolutionIndisponivelError(`Evolution API fora do ar ou respondendo sem JSON (HTTP ${resposta.status}).`);
+  }
+}
+
 function headers() {
   return { apikey: process.env.EVOLUTION_API_KEY, 'Content-Type': 'application/json' };
 }
@@ -40,7 +54,7 @@ async function enviarMensagem(instancia, telefone, texto) {
     }),
   });
 
-  const dados = await resposta.json();
+  const dados = await lerJson(resposta);
 
   if (!resposta.ok) {
     console.error('Erro ao enviar WhatsApp via Evolution API:', dados);
@@ -73,7 +87,7 @@ async function enviarImagem(instancia, telefone, base64, legenda) {
     }),
   });
 
-  const dados = await resposta.json();
+  const dados = await lerJson(resposta);
 
   if (!resposta.ok) {
     console.error('Erro ao enviar imagem via Evolution API:', dados);
@@ -115,7 +129,7 @@ async function criarInstancia(instancia) {
     }),
   });
 
-  const dados = await resposta.json();
+  const dados = await lerJson(resposta);
   if (!resposta.ok) throw new Error(dados?.response?.message?.[0] || dados?.message || 'Erro ao criar instância no Evolution API.');
   return dados;
 }
@@ -132,7 +146,7 @@ async function atualizarWebhook(instancia) {
       webhook: { url: urlWebhookComSegredo(), events: ['MESSAGES_UPSERT'] },
     }),
   });
-  const dados = await resposta.json();
+  const dados = await lerJson(resposta);
   if (!resposta.ok) throw new Error(dados?.response?.message?.[0] || dados?.message || 'Erro ao atualizar webhook no Evolution API.');
   return dados;
 }
@@ -143,7 +157,7 @@ async function obterQrCode(instancia) {
   const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/instance/connect/${instancia}`, {
     headers: headers(),
   });
-  const dados = await resposta.json();
+  const dados = await lerJson(resposta);
   if (!resposta.ok) throw new Error(dados?.message || 'Erro ao gerar QR Code.');
   return dados; // { base64, code, count, ... } ou {count} se já conectado/sem QR pendente
 }
@@ -157,7 +171,7 @@ async function obterCodigoPareamento(instancia, numero) {
   const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/instance/connect/${instancia}?number=${encodeURIComponent(numero)}`, {
     headers: headers(),
   });
-  const dados = await resposta.json();
+  const dados = await lerJson(resposta);
   if (!resposta.ok) throw new Error(dados?.message || 'Erro ao gerar código de pareamento.');
   return dados; // { pairingCode, code, base64, count } ou {count} se já conectado
 }
@@ -166,7 +180,7 @@ async function obterStatusConexao(instancia) {
   const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/instance/connectionState/${instancia}`, {
     headers: headers(),
   });
-  const dados = await resposta.json();
+  const dados = await lerJson(resposta);
   if (!resposta.ok) return { state: 'close' };
   return dados?.instance || { state: 'close' };
 }
@@ -195,4 +209,4 @@ async function removerInstancia(instancia) {
   }
 }
 
-module.exports = { estaConfigurado, enviarMensagem, enviarImagem, criarInstancia, atualizarWebhook, obterQrCode, obterCodigoPareamento, obterStatusConexao, removerInstancia };
+module.exports = { EvolutionIndisponivelError, estaConfigurado, enviarMensagem, enviarImagem, criarInstancia, atualizarWebhook, obterQrCode, obterCodigoPareamento, obterStatusConexao, removerInstancia };
