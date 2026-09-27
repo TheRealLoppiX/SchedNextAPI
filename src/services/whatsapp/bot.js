@@ -8,6 +8,7 @@ const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
 const { montarUrlTenant } = require('../../utils/tenantContext');
 const { gerarLinkAcesso } = require('../loginMagico');
 const { gerarTexto, estaConfigurado: iaConfigurada, MODELOS_CLASSIFICACAO } = require('../groq');
+const { MODO_LIVRE_BOT_DISPONIVEL } = require('../../config/featureFlags');
 const {
   EMAIL_REGEX,
   obterOuCriarSessao,
@@ -194,7 +195,10 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
 
   // Modo livre: a Groq conduz a conversa de ponta a ponta via tool calling (ver agente.js). O
   // guiado abaixo é a máquina de estados de sempre, só com a personalidade/boas-vindas por cima.
-  if (config.modo === 'livre' && iaConfigurada()) {
+  // MODO_LIVRE_BOT_DISPONIVEL (config/featureFlags.js) desligado a pedido — empresas com 'livre'
+  // salvo como preferência não perdem a escolha (fica no banco), mas o bot roda em guiado até a
+  // flag voltar a true.
+  if (config.modo === 'livre' && iaConfigurada() && MODO_LIVRE_BOT_DISPONIVEL) {
     return processarComAgente({ empresaId, telefone, texto, instancia, config });
   }
 
@@ -232,8 +236,10 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   const montarMensagemMenu = async () => {
     const saudacao = config.boasVindas || 'Olá!';
     const cliente = await encontrarClientePorTelefone(empresaId, telefone);
-    const link = gerarLinkAcesso(config.empresaTenant, cliente?.id) || config.linkLoja;
-    const linkLojaTexto = link ? ` Prefere marcar direto pelo site? ${link}` : '';
+    const link = (await gerarLinkAcesso(config.empresaTenant, cliente?.id)) || config.linkLoja;
+    // "Já logado" avisa que o link não é só pra marcar — cai direto na conta, dá pra ver e
+    // cancelar horário também, sem digitar senha de novo.
+    const linkLojaTexto = link ? ` Ou pelo site (já logado): ${link}` : '';
     return `${saudacao} O que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.${linkLojaTexto}`;
   };
 
@@ -587,9 +593,9 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sess
 
   // usuario_id sempre setado a essa altura (veio de encontrarClientePorTelefone ou do cadastro
   // que acabou de ser concluído), então dá pra gerar link com login automático de verdade aqui.
-  const linkConfirmacao = gerarLinkAcesso(config.empresaTenant, dados.usuario_id) || config.linkLoja;
+  const linkConfirmacao = (await gerarLinkAcesso(config.empresaTenant, dados.usuario_id)) || config.linkLoja;
   const confirmacao = `Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}` +
-    (linkConfirmacao ? `\n\nAcompanhe pelo site: ${linkConfirmacao}` : '');
+    (linkConfirmacao ? `\n\nGerenciar pelo site (já logado): ${linkConfirmacao}` : '');
 
   // Oferece adiantar o pagamento via Pix só quando a empresa tem Mercado Pago conectado (ver
   // routes/mercadopago.js) — sem conta conectada não tem pra onde gerar a cobrança.

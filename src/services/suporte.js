@@ -20,7 +20,9 @@ O que você sabe sobre o produto:
 - Múltiplas unidades, API pública e domínio próprio são exclusivos do plano Enterprise.
 - Existem quatro planos (Grátis, Essencial, Profissional, Enterprise); pra valores exatos, sempre direcione pra página de planos do painel ou do site — nunca invente preço.
 
-Responda de forma direta e prática, em português do Brasil, só sobre o SchedNext (configuração, dúvidas de uso, cobrança, recursos do produto). Se não tiver certeza de algo específico da conta dele (um valor exato, um erro pontual que só dá pra ver olhando os dados dele), diga que não tem certeza em vez de inventar, e sugira tocar em "Falar com o time".`;
+Responda de forma direta e prática, em português do Brasil, só sobre o SchedNext (configuração, dúvidas de uso, cobrança, recursos do produto). Se não tiver certeza de algo específico da conta dele (um valor exato, um erro pontual que só dá pra ver olhando os dados dele), diga que não tem certeza em vez de inventar, e sugira tocar em "Falar com o time".
+
+Seja extremamente conciso: no máximo 2-3 frases curtas por resposta, direto ao ponto. Sem saudação nem introdução repetindo a pergunta, sem listar tudo que sabe de uma vez — responda só o que foi perguntado. Se a resposta completa exigir mais detalhe, dê o essencial primeiro e pergunte se a pessoa quer que aprofunde.`;
 
 async function responderSuporte(historico, novaMensagem) {
   if (!estaConfigurado()) {
@@ -28,7 +30,9 @@ async function responderSuporte(historico, novaMensagem) {
   }
   try {
     const mensagens = [...historico, { role: 'user', content: novaMensagem }];
-    const resultado = await chat({ mensagens, sistema: SISTEMA_SUPORTE, maxTokens: 500, temperatura: 0.4 });
+    // maxTokens baixo de propósito: força respostas curtas (ver instrução de concisão no
+    // sistema acima) — 500 deixava a IA escrever parágrafos inteiros pra perguntas simples.
+    const resultado = await chat({ mensagens, sistema: SISTEMA_SUPORTE, maxTokens: 220, temperatura: 0.4 });
     return resultado.content || 'Não consegui entender, pode reformular a pergunta?';
   } catch (err) {
     console.error('Erro ao gerar resposta de suporte via IA:', err);
