@@ -112,15 +112,19 @@ function urlWebhookComSegredo() {
 
 // Cria a instância na Evolution API pra uma empresa e já registra o webhook de recebimento
 // (ver routes/whatsapp.js). `qrcode: true` faz a Evolution já devolver o QR Code de pareamento
-// na própria resposta de criação, sem precisar de uma segunda chamada.
-async function criarInstancia(instancia) {
+// na própria resposta de criação, sem precisar de uma segunda chamada — mas também inicia o
+// socket do Baileys direto em modo QR: depois disso, pedir um código de pareamento nessa mesma
+// instância sempre volta `pairingCode: null` (testado contra a Evolution em produção). Por isso
+// o fluxo de código de pareamento (obterCodigoPareamento) cria a instância com `qrcode: false`
+// aqui — quem decide QR ou pareamento é a primeira chamada de connect, não a criação.
+async function criarInstancia(instancia, { qrcode = true } = {}) {
   const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/instance/create`, {
     method: 'POST',
     headers: headers(),
     body: JSON.stringify({
       instanceName: instancia,
       integration: 'WHATSAPP-BAILEYS',
-      qrcode: true,
+      qrcode,
       // Evolution normaliza o nome do evento pra maiúsculo+underscore ("messages.upsert"
       // -> "MESSAGES_UPSERT") antes de checar se está na lista de eventos inscritos do
       // webhook — registrar em minúsculo/com ponto faz essa checagem nunca bater, e o

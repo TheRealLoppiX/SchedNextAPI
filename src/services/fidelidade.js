@@ -33,17 +33,13 @@ async function verificarEDispararPremioFidelidade(usuarioId, empresaId) {
     if (jaNotificado) return;
 
     // Mesma contagem de elegibilidade usada em GET /fidelidade/:userId (routes/perfil.js) —
-    // manter as duas em sincronia se essa regra mudar.
-    const { count } = await supabase
-      .from('agendamentos')
-      .select('id', { count: 'exact', head: true })
-      .eq('usuario_id', usuarioId)
-      .eq('status', 'concluido')
-      .gte('data_hora', `${campanha.data_inicio}T00:00:00`)
-      .lte('data_hora', `${campanha.data_fim}T23:59:59`)
-      .gte('valor_total', campanha.valor_minimo);
+    // contarAtendimentosNaAcao (definida mais abaixo neste arquivo) é a fonte única, nenhum dos
+    // dois lugares reimplementa a query.
+    const { count, error: erroContagem } = await contarAtendimentosNaAcao(usuarioId, campanha);
 
-    if ((count || 0) < campanha.cortes_necessarios) return;
+    // Contagem indisponível (erro na consulta): não dispara com dado incerto, mesmo comportamento
+    // de "ainda não bateu a meta" — o erro já foi logado dentro de contarAtendimentosNaAcao.
+    if (erroContagem || count < campanha.cortes_necessarios) return;
 
     const { data: inserido } = await supabase
       .from('fidelidade_premios_notificados')
@@ -159,8 +155,11 @@ const TIPOS_PREMIO_AUTOMATICO = ['servico', 'produto', 'desconto_percentual', 'd
 const arredondar = (v) => Math.round((Number(v) || 0) * 100) / 100;
 
 // Mesma contagem de elegibilidade de GET /fidelidade/:userId e de verificarEDispararPremioFidelidade.
+// Devolve { count, error } em vez de só o número: quem chama precisa poder diferenciar "zero
+// atendimentos" de "a consulta falhou" — GET /fidelidade/:userId, por exemplo, tem que responder
+// 500 nesse caso, não fingir que o cliente não tem progresso nenhum.
 async function contarAtendimentosNaAcao(usuarioId, campanha) {
-  const { count } = await supabase
+  const { count, error } = await supabase
     .from('agendamentos')
     .select('id', { count: 'exact', head: true })
     .eq('usuario_id', usuarioId)
@@ -168,7 +167,8 @@ async function contarAtendimentosNaAcao(usuarioId, campanha) {
     .gte('data_hora', `${campanha.data_inicio}T00:00:00`)
     .lte('data_hora', `${campanha.data_fim}T23:59:59`)
     .gte('valor_total', campanha.valor_minimo || 0);
-  return count || 0;
+  if (error) console.error('Erro ao contar atendimentos da ação de fidelidade:', error);
+  return { count: count || 0, error };
 }
 
 async function detalharPremio(campanha) {
@@ -218,7 +218,9 @@ async function obterPremioDisponivel(usuarioId, empresaId) {
 
   for (const campanha of campanhas) {
     if (usadas.has(campanha.id)) continue;
-    if ((await contarAtendimentosNaAcao(usuarioId, campanha)) < campanha.cortes_necessarios) continue;
+    // Erro na contagem: pula essa campanha em vez de arriscar liberar cortesia com dado incerto.
+    const { count, error: erroContagem } = await contarAtendimentosNaAcao(usuarioId, campanha);
+    if (erroContagem || count < campanha.cortes_necessarios) continue;
     return detalharPremio(campanha);
   }
   return null;
@@ -268,5 +270,6 @@ module.exports = {
   notificarNovaCampanhaFidelidade,
   obterPremioDisponivel,
   calcularDescontoPremio,
-  registrarResgatePremio
+  registrarResgatePremio,
+  contarAtendimentosNaAcao
 };

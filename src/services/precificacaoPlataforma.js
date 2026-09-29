@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase');
+const { resolverPrecoDoCiclo } = require('../utils/precificacao');
 
 // Campanha ativa pro plano AGORA (janela de tempo + toggle ligado) — usada só na hora de
 // ENTRAR numa promoção (novo cadastro ou upgrade). Depois que a empresa entra, o preço
@@ -36,9 +37,7 @@ async function buscarCampanhaDaEmpresa(campanhaId) {
 // preço cheio do plano — cobre tanto "campanha acabou" (kill-switch ou ciclo além do definido)
 // quanto "nunca teve campanha nenhuma".
 function precoDoCiclo(campanha, numeroCiclo, precoPadrao) {
-  if (!campanha) return Number(precoPadrao);
-  const linha = (campanha.campanha_precos_ciclo || []).find((p) => p.numero_ciclo === numeroCiclo);
-  return linha ? Number(linha.valor) : Number(precoPadrao);
+  return resolverPrecoDoCiclo(campanha?.campanha_precos_ciclo, numeroCiclo, precoPadrao);
 }
 
 // Marca o ciclo `cicloRef` de uma empresa como pago. Idempotente via UNIQUE(empresa_id,

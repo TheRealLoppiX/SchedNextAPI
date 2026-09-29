@@ -134,27 +134,35 @@ router.post('/login', loginLimiter, validate(loginClienteSchema), async (req, re
 // assinatura do JWT já é o que impede adivinhar um token válido, o rate limit é só pra não deixar
 // alguém martelar o endpoint sem limite nenhum.
 router.post('/login-magico', codigoLimiter, validate(loginMagicoSchema), async (req, res) => {
-  const { data: pendente } = await supabase
+  // Delete-and-return atômico (filtra por validade e já devolve a linha apagada numa query só)
+  // em vez de SELECT-depois-DELETE: duas requisições concorrentes com o mesmo código não
+  // conseguem mais passar as duas — só existe uma linha pra apagar, então só a primeira recebe
+  // `pendente` de volta, a outra chega tarde e apaga 0 linhas. É isso que garante o uso único
+  // (antes, as duas podiam passar pelo SELECT antes de qualquer DELETE rodar).
+  const { data: pendente, error } = await supabase
     .from('login_magico_codigos')
-    .select('usuario_id, expira_em')
+    .delete()
     .eq('codigo', req.body.token)
+    .gte('expira_em', new Date().toISOString())
+    .select('usuario_id')
     .maybeSingle();
 
-  if (!pendente || new Date(pendente.expira_em) < new Date()) {
+  if (error) {
+    console.error('Erro ao consumir código de login mágico:', error);
+    return res.status(500).json({ message: 'Erro interno ao autenticar' });
+  }
+
+  if (!pendente) {
     return res.status(401).json({ message: 'Link expirado ou inválido. Peça um novo pelo WhatsApp.' });
   }
 
-  // Apaga antes de mais nada — uso único: mesmo que o resto falhe abaixo, o código não pode
-  // ser reaproveitado numa segunda tentativa.
-  await supabase.from('login_magico_codigos').delete().eq('codigo', req.body.token);
-
-  const { data: usuario, error } = await supabase
+  const { data: usuario, error: erroUsuario } = await supabase
     .from('usuarios')
     .select('id, nome_completo, ativo')
     .eq('id', pendente.usuario_id)
     .maybeSingle();
 
-  if (error || !usuario || !usuario.ativo) return res.status(401).json({ message: 'Conta não encontrada ou inativa.' });
+  if (erroUsuario || !usuario || !usuario.ativo) return res.status(401).json({ message: 'Conta não encontrada ou inativa.' });
 
   const token = jwt.sign({ id: usuario.id }, process.env.JWT_SECRET, { expiresIn: '1h' });
   res.json({ message: 'Sucesso!', token, usuario: { id: usuario.id, nome: usuario.nome_completo } });

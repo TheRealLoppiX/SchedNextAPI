@@ -64,4 +64,4 @@ async function registrarCadastro({ empresaId, nomeEmpresa, ip, ...dados }) {
   if (error) console.error('Erro ao registrar cadastro no antifraude:', error);
 }
 
-module.exports = { verificarCadastro, registrarCadastro, buscarDuplicidades, identificadores };
+module.exports = { verificarCadastro, registrarCadastro };

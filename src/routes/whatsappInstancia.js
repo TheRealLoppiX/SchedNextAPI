@@ -211,7 +211,9 @@ router.post('/admin/whatsapp/codigo-pareamento', validate(whatsappTesteSchema), 
 
   try {
     if (!empresa.whatsapp_phone_number_id) {
-      await criarInstancia(instancia);
+      // qrcode: false de propósito — criar já em modo QR trava o socket do Baileys nesse modo e
+      // o pedido de código de pareamento logo abaixo sempre volta vazio (ver criarInstancia).
+      await criarInstancia(instancia, { qrcode: false });
       await supabase.from('empresas').update({ whatsapp_phone_number_id: instancia }).eq('id', empresa_id);
     }
 
