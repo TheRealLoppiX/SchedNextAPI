@@ -326,16 +326,22 @@ router.post('/seguranca-validar', codigoLimiter, validate(segurancaValidarSchema
 router.post('/admin/login', loginLimiter, validate(loginSchema), async (req, res) => {
   const { email, senha } = req.body;
 
-  const { data: empresa, error } = await supabase
+  // Sem maybeSingle: empresas excluídas antes do sufixo de exclusão (ver superAdminPlataforma.js)
+  // ainda têm o e-mail original, e um cadastro novo com o mesmo e-mail deixa duas linhas aqui.
+  // A ativa tem prioridade; a excluída só aparece se for a única.
+  const { data: empresas, error } = await supabase
     .from('empresas')
     .select('id, nome, slug, senha, status_assinatura, excluida_em')
     .eq('email', email)
-    .maybeSingle();
+    .order('excluida_em', { ascending: false, nullsFirst: true })
+    .limit(1);
 
   if (error) {
     console.error(error);
     return res.status(500).json({ error: 'Erro interno no servidor' });
   }
+
+  const empresa = empresas?.[0];
 
   if (empresa) {
     // Conta excluída pelo admin absoluto (soft delete, ver sql/2026_empresas_exclusao.sql) não
@@ -446,6 +452,7 @@ router.post('/admin/recuperar-senha', codigoLimiter, validate(recuperarSenhaAdmi
     .from('empresas')
     .update({ codigo_verificacao: codigo })
     .eq('email', email)
+    .is('excluida_em', null)
     .select('id')
     .maybeSingle();
 
