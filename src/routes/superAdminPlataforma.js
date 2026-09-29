@@ -332,6 +332,29 @@ router.put('/super-admin/empresas/:id/plano', validate(empresaTrocarPlanoSchema)
   res.json({ success: true, message: `Plano da empresa atualizado.${avisoCobranca}` });
 });
 
+// Suspensão/exclusão derrubam a empresa pro Grátis e zeram tudo de cobrança: reativar (ou
+// restaurar) nunca devolve plano pago de graça, ela precisa assinar e pagar de novo pelo fluxo
+// normal. Zerar já na suspensão (e não só ao reativar) tira a empresa do alcance dos crons de
+// cobrança, chave promocional, teste de plano e cancelamento agendado, que senão podiam
+// reescrever status_assinatura e tirar a suspensão sozinhos.
+async function camposPlanoGratis() {
+  const { data: planoGratis } = await supabase.from('planos_plataforma').select('id').eq('nome', 'Grátis').maybeSingle();
+  if (!planoGratis) throw new Error('Plano Grátis não encontrado.');
+  return {
+    plano_plataforma_id: planoGratis.id,
+    plano_plataforma_pendente_id: null,
+    proxima_cobranca_em: null,
+    cancelamento_agendado: false,
+    gateway_subscription_id: null,
+    campanha_precificacao_id: null,
+    ciclo_cobranca_atual: 1,
+    plataforma_forma_pagamento: null,
+    chave_ativacao_expira_em: null,
+    plano_teste_expira_em: null,
+    plano_teste_anterior_id: null
+  };
+}
+
 // Cancela qualquer recorrência ativa no Mercado Pago antes de suspender (mesmo cuidado da troca
 // de plano e da exclusão acima): sem isso, a empresa continuaria sendo cobrada todo mês mesmo
 // com o painel bloqueado, já que suspender só travava o login, nunca mexeu em gateway_subscription_id.
@@ -347,21 +370,42 @@ router.post('/super-admin/empresas/:id/suspender', async (req, res) => {
     }
   }
 
+  let gratis;
+  try {
+    gratis = await camposPlanoGratis();
+  } catch (e) {
+    console.error('Erro ao suspender empresa:', e);
+    return res.status(500).json({ error: 'Erro interno ao localizar o plano Grátis.' });
+  }
+
   const { error } = await supabase
     .from('empresas')
-    .update({ status_assinatura: 'suspensa', gateway_subscription_id: null, cancelamento_agendado: false })
+    .update({ ...gratis, status_assinatura: 'suspensa' })
     .eq('id', req.params.id);
 
   if (error) return res.status(500).json({ error: 'Erro ao suspender empresa.' });
   limparCacheTrial(Number(req.params.id));
-  res.json({ success: true, message: 'Empresa suspensa. O painel, o site de agendamento e o WhatsApp dela saíram do ar, e a cobrança recorrente (se havia) foi cancelada.' });
+  res.json({ success: true, message: 'Empresa suspensa. O painel, o site de agendamento e o WhatsApp dela saíram do ar, a cobrança recorrente (se havia) foi cancelada e o plano voltou pro Grátis.' });
 });
 
 router.post('/super-admin/empresas/:id/reativar', async (req, res) => {
-  const { error } = await supabase.from('empresas').update({ status_assinatura: 'ativa' }).eq('id', req.params.id);
+  const { data: empresa } = await supabase.from('empresas').select('status_assinatura').eq('id', req.params.id).maybeSingle();
+  if (!empresa) return res.status(404).json({ error: 'Empresa não encontrada.' });
+  if (empresa.status_assinatura !== 'suspensa') return res.status(400).json({ error: 'Esta empresa não está suspensa.' });
+
+  let gratis;
+  try {
+    gratis = await camposPlanoGratis();
+  } catch (e) {
+    console.error('Erro ao reativar empresa:', e);
+    return res.status(500).json({ error: 'Erro interno ao localizar o plano Grátis.' });
+  }
+
+  // Grátis de novo aqui também (não só na suspensão), cobrindo empresas suspensas antes desta regra.
+  const { error } = await supabase.from('empresas').update({ ...gratis, status_assinatura: 'ativa' }).eq('id', req.params.id);
   if (error) return res.status(500).json({ error: 'Erro ao reativar empresa.' });
   limparCacheTrial(Number(req.params.id));
-  res.json({ success: true, message: 'Empresa reativada.' });
+  res.json({ success: true, message: 'Empresa reativada no plano Grátis. O plano pago só volta quando ela assinar e o pagamento for confirmado.' });
 });
 
 // Corrige o tipo de negócio de uma empresa cadastrada errada no self-service (ver comentário do
@@ -403,18 +447,22 @@ router.post('/super-admin/empresas/:id/excluir', async (req, res) => {
     }
   }
 
+  let gratis;
+  try {
+    gratis = await camposPlanoGratis();
+  } catch (e) {
+    console.error('Erro ao excluir empresa:', e);
+    return res.status(500).json({ error: 'Erro interno ao localizar o plano Grátis.' });
+  }
+
   const { error } = await supabase
     .from('empresas')
     .update({
       excluida_em: new Date().toISOString(),
       ...liberarIdentificadores(empresa),
+      ...gratis,
       status_assinatura: 'cancelada',
-      cancelamento_agendado: false,
-      gateway_subscription_id: null,
-      plano_plataforma_pendente_id: null,
-      trial_expira_em: null,
-      plano_teste_expira_em: null,
-      plano_teste_anterior_id: null
+      trial_expira_em: null
     })
     .eq('id', req.params.id);
 
@@ -447,10 +495,19 @@ router.post('/super-admin/empresas/:id/restaurar', async (req, res) => {
   if (emailEmUso?.length) return res.status(409).json({ error: `O e-mail ${email} já está em uso por outra empresa. Não dá pra restaurar esta.` });
   if (slugEmUso?.length) return res.status(409).json({ error: `O endereço ${slug} já está em uso por outra empresa. Não dá pra restaurar esta.` });
 
-  const { error } = await supabase.from('empresas').update({ excluida_em: null, email, slug }).eq('id', req.params.id);
+  let gratis;
+  try {
+    gratis = await camposPlanoGratis();
+  } catch (e) {
+    console.error('Erro ao restaurar empresa:', e);
+    return res.status(500).json({ error: 'Erro interno ao localizar o plano Grátis.' });
+  }
+
+  // Mesma regra da reativação: volta no Grátis, o plano pago só com nova assinatura paga.
+  const { error } = await supabase.from('empresas').update({ ...gratis, status_assinatura: 'ativa', excluida_em: null, email, slug }).eq('id', req.params.id);
   if (error) return res.status(500).json({ error: 'Erro ao restaurar empresa.' });
   limparCacheTrial(empresa.id);
-  res.json({ success: true, message: 'Empresa restaurada. Confira o plano e o status da assinatura dela.' });
+  res.json({ success: true, message: 'Empresa restaurada no plano Grátis. O plano pago só volta quando ela assinar e o pagamento for confirmado.' });
 });
 
 // --- Métricas gerais da plataforma ---

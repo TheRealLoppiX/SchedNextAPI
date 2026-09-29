@@ -103,7 +103,8 @@ function iniciarCobrancaPlataforma() {
     for (const cobranca of pendentesVencidas || []) {
       try {
         await supabase.from('plataforma_cobrancas').update({ status: 'inadimplente' }).eq('id', cobranca.id);
-        await supabase.from('empresas').update({ status_assinatura: 'inadimplente' }).eq('id', cobranca.empresa_id);
+        // Não sobrescreve suspensa/cancelada (Pix gerado antes da suspensão ou exclusão).
+        await supabase.from('empresas').update({ status_assinatura: 'inadimplente' }).eq('id', cobranca.empresa_id).not('status_assinatura', 'in', '(suspensa,cancelada)');
       } catch (err) {
         console.error(`Erro ao marcar cobrança de plataforma vencida ${cobranca.id}:`, err);
       }

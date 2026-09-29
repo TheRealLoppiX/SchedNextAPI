@@ -34,6 +34,7 @@ const { buscarPagamentoCicloPlataforma } = require('../services/pagamento');
 const { registrarReceitaPlataforma, registrarTaxaMarketplace } = require('../services/receitaPlataforma');
 const { confirmarCicloPlataforma, registrarPrecoContratado } = require('../services/precificacaoPlataforma');
 const { sincronizarValorCartaoCampanha } = require('../services/sincronizarValorCartao');
+const { empresaForaDoAr } = require('../utils/tenantContext');
 const {
   buscarCampanhaParaNovoCadastro,
   precoDoCiclo: precoDoCicloAssinatura
@@ -847,9 +848,17 @@ router.post('/webhooks/mercadopago', async (req, res) => {
 
             const { data: empresaPix } = await supabase
               .from('empresas')
-              .select('id, nome, plano_plataforma_id, plano_plataforma_pendente_id')
+              .select('id, nome, plano_plataforma_id, plano_plataforma_pendente_id, status_assinatura, excluida_em')
               .eq('id', cobrancaPlataforma.empresa_id)
               .maybeSingle();
+
+            // Pix gerado antes da suspensão/exclusão e pago depois: o dinheiro entrou (a cobrança
+            // fica paga e a receita registrada abaixo, pra estorno manual), mas não reativa a conta
+            // nem devolve o plano. Só o admin absoluto reativa, e sempre no Grátis.
+            const empresaForaDoArPix = empresaForaDoAr(empresaPix);
+            if (empresaForaDoArPix) {
+              console.warn(`Pix da plataforma pago pela empresa ${cobrancaPlataforma.empresa_id} suspensa/excluída (pagamento ${dataId}): conta não reativada, avaliar estorno.`);
+            }
 
             const atualizacaoPix = {
               status_assinatura: 'ativa',
@@ -864,8 +873,8 @@ router.post('/webhooks/mercadopago', async (req, res) => {
               atualizacaoPix.plano_plataforma_id = empresaPix.plano_plataforma_pendente_id;
               atualizacaoPix.plano_plataforma_pendente_id = null;
             }
-            await supabase.from('empresas').update(atualizacaoPix).eq('id', cobrancaPlataforma.empresa_id);
-            if (atualizacaoPix.plano_plataforma_id) await registrarPrecoContratado(cobrancaPlataforma.empresa_id, atualizacaoPix.plano_plataforma_id);
+            if (!empresaForaDoArPix) await supabase.from('empresas').update(atualizacaoPix).eq('id', cobrancaPlataforma.empresa_id);
+            if (!empresaForaDoArPix && atualizacaoPix.plano_plataforma_id) await registrarPrecoContratado(cobrancaPlataforma.empresa_id, atualizacaoPix.plano_plataforma_id);
 
             registrarReceitaPlataforma({
               tipo: 'assinatura_plataforma',
