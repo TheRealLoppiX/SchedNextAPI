@@ -11,7 +11,8 @@ const {
   ativoSchema,
   estoqueLoginSchema,
   estoqueCriarSubloginSchema,
-  estoqueMovimentarSchema
+  estoqueMovimentarSchema,
+  estoqueExcluirSchema
 } = require('../schemas');
 
 const router = express.Router();
@@ -40,6 +41,7 @@ router.get('/admin/estoque/:empresaId', async (req, res) => {
     .from('produtos')
     .select('*')
     .eq('empresa_id', req.empresaId)
+    .is('excluido_em', null)
     .order('nome', { ascending: true });
   if (['venda', 'uso'].includes(req.query.tipo)) query = query.eq('tipo', req.query.tipo);
 
@@ -56,6 +58,7 @@ router.get('/admin/estoque/codigo/:codigo', async (req, res) => {
     .select('*')
     .eq('empresa_id', req.empresaId)
     .eq('codigo_barras', String(req.params.codigo).trim())
+    .is('excluido_em', null)
     .maybeSingle();
 
   if (error) return res.status(500).json({ error: 'Erro ao buscar produto.' });
@@ -126,6 +129,7 @@ router.put('/admin/estoque/:id', validate(estoqueProdutoSchema), async (req, res
     })
     .eq('id', req.params.id)
     .eq('empresa_id', req.empresaId)
+    .is('excluido_em', null)
     .select('id');
 
   if (error) {
@@ -143,6 +147,7 @@ router.put('/admin/estoque/:id/status', validate(ativoSchema), async (req, res) 
     .update({ ativo: !!ativo })
     .eq('id', req.params.id)
     .eq('empresa_id', req.empresaId)
+    .is('excluido_em', null)
     .select('id');
 
   if (error) return res.status(500).json({ error: 'Erro ao atualizar status' });
@@ -150,17 +155,35 @@ router.put('/admin/estoque/:id/status', validate(ativoSchema), async (req, res) 
   res.json({ message: 'Status atualizado!' });
 });
 
-// Produto com venda registrada não apaga (FK de produto_vendas): a mensagem já sugere inativar.
-router.delete('/admin/estoque/:id', async (req, res) => {
+// Excluir = arquivar com justificativa: o produto some do estoque, do caixa e das buscas, mas a
+// linha fica pra relatórios, vendas e histórico continuarem com o nome dele. A exclusão entra no
+// histórico de auditoria (tipo EXCLUSAO) com operador, quantidade que havia e motivo.
+router.delete('/admin/estoque/:id', validate(estoqueExcluirSchema), async (req, res) => {
+  const { justificativa, usuario_nome } = req.body;
+
   const { data, error } = await supabase
     .from('produtos')
-    .delete()
+    .update({ excluido_em: new Date().toISOString(), ativo: false })
     .eq('id', req.params.id)
     .eq('empresa_id', req.empresaId)
-    .select('id');
+    .is('excluido_em', null)
+    .select('id, quantidade');
 
-  if (error) return res.status(500).json({ error: 'Não é possível excluir. Recomendamos inativar.' });
+  if (error) {
+    console.error('Erro ao excluir produto:', error);
+    return res.status(500).json({ error: 'Erro ao excluir produto.' });
+  }
   if (!data || data.length === 0) return res.status(404).json({ error: 'Produto não encontrado.' });
+
+  const { error: movError } = await supabase.from('estoque_movimentacoes').insert({
+    produto_id: data[0].id,
+    usuario_nome: usuario_nome || 'Administrador',
+    quantidade: Math.max(Number(data[0].quantidade) || 0, 0),
+    tipo: 'EXCLUSAO',
+    justificativa
+  });
+  if (movError) console.error('Erro ao registrar exclusão de produto no histórico:', movError);
+
   res.json({ message: 'Produto excluído!' });
 });
 

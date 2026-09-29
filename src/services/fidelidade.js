@@ -186,7 +186,8 @@ async function detalharPremio(campanha) {
     premio.servico = data ? { id: data.id, nome: data.nome, valor: Number(data.valor) || 0 } : null;
   }
   if (premio.tipo === 'produto' && campanha.premio_produto_id) {
-    const { data } = await supabase.from('produtos').select('id, nome, valor').eq('id', campanha.premio_produto_id).maybeSingle();
+    // Produto excluído do estoque (arquivado) não sai mais de cortesia: vira prêmio manual abaixo.
+    const { data } = await supabase.from('produtos').select('id, nome, valor').eq('id', campanha.premio_produto_id).is('excluido_em', null).maybeSingle();
     premio.produto = data ? { id: data.id, nome: data.nome, valor: Number(data.valor) || 0 } : null;
   }
   // Serviço/produto do prêmio apagado depois: sem o item não há o que dar de graça, vira manual.

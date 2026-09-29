@@ -85,7 +85,8 @@ async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId,
       .select('id, valor')
       .in('id', idsProdutos)
       .eq('empresa_id', agAtual.empresa_id)
-      .eq('tipo', 'venda');
+      .eq('tipo', 'venda')
+      .is('excluido_em', null);
     if (errProdutosReais) throw errProdutosReais;
     // Produto de uso do estabelecimento (ou de outra empresa) não entra no caixa.
     if ((produtosReais || []).length !== new Set(idsProdutos.map(Number)).size) {

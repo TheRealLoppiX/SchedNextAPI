@@ -167,6 +167,12 @@ const estoqueProdutoSchema = z.object({
   }
 });
 
+// Excluir produto do estoque exige motivo (fica no histórico de auditoria, ver routes/estoque.js).
+const estoqueExcluirSchema = z.object({
+  justificativa: z.string().trim().min(5, 'Explique o motivo da exclusão (mínimo 5 caracteres).').max(255),
+  usuario_nome: z.string().trim().max(150).optional()
+});
+
 const estoqueLoginSchema = z.object({
   usuario: z.string().trim().min(1, 'Selecione um operador'),
   senha: z.string().min(1, 'Senha é obrigatória')
@@ -761,6 +767,7 @@ module.exports = {
   estoqueProdutoSchema,
   estoqueLoginSchema,
   estoqueCriarSubloginSchema,
+  estoqueExcluirSchema,
   estoqueMovimentarSchema,
   servicoGestaoSchema,
   barbeiroCriarSchema,
