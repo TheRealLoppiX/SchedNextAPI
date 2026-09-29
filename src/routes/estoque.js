@@ -46,7 +46,10 @@ router.get('/admin/estoque/:empresaId', async (req, res) => {
   if (['venda', 'uso'].includes(req.query.tipo)) query = query.eq('tipo', req.query.tipo);
 
   const { data, error } = await query;
-  if (error) return res.status(500).json({ error: 'Erro ao buscar estoque' });
+  if (error) {
+    console.error('Erro ao listar estoque:', error);
+    return res.status(500).json({ error: 'Erro ao buscar estoque' });
+  }
   res.json(data);
 });
 
