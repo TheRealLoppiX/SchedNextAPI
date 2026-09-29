@@ -2,6 +2,7 @@ const cron = require('node-cron');
 const supabase = require('../config/supabase');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 const { paraConvencaoDoBanco } = require('../utils/horarioBrasilia');
+const { empresaForaDoAr } = require('../utils/tenantContext');
 
 // Resumo diário dos horários de cada profissional via WhatsApp, no horário configurado por
 // empresa em Admin -> WhatsApp (whatsapp_resumo_profissionais_ativo/_horario, ver
@@ -30,7 +31,7 @@ async function processarResumoProfissionais() {
 
   const { data: empresas, error } = await supabase
     .from('empresas')
-    .select('id, nome, whatsapp_phone_number_id, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot)')
+    .select('id, nome, whatsapp_phone_number_id, status_assinatura, excluida_em, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot)')
     .eq('whatsapp_resumo_profissionais_ativo', true)
     .eq('whatsapp_resumo_profissionais_horario', horarioAtual)
     .not('whatsapp_phone_number_id', 'is', null);
@@ -40,7 +41,7 @@ async function processarResumoProfissionais() {
   for (const empresa of empresas || []) {
     // Plano pode ter caído pra um que não inclui mais o bot depois do campo já ter sido ligado —
     // a rota que salva já reconfere no momento de salvar, mas o plano muda com o tempo.
-    if (!empresa.plano_plataforma?.permite_whatsapp_bot) continue;
+    if (!empresa.plano_plataforma?.permite_whatsapp_bot || empresaForaDoAr(empresa)) continue;
 
     try {
       await enviarResumoDaEmpresa(empresa, dataHoje);

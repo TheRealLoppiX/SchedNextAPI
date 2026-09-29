@@ -17,6 +17,12 @@ function obterSlugTenant(req) {
 // EMPRESA_INDISPONIVEL em vez de "não encontrada" (o frontend mostra uma tela própria pra isso).
 const MSG_EMPRESA_INDISPONIVEL = 'Este estabelecimento está temporariamente indisponível.';
 
+// Também usado pelo bot e pelos envios automáticos de WhatsApp/e-mail (routes/whatsapp.js e
+// cron/*), que param junto com o painel e o site.
+function empresaForaDoAr(empresa) {
+  return empresa?.status_assinatura === 'suspensa' || !!empresa?.excluida_em;
+}
+
 function respostaEmpresaIndisponivel(res) {
   return res.status(403).json({ code: 'EMPRESA_INDISPONIVEL', error: MSG_EMPRESA_INDISPONIVEL, message: MSG_EMPRESA_INDISPONIVEL });
 }
@@ -33,7 +39,7 @@ async function resolverEmpresaPorSlug(slug, campos = 'id, nome, nome_fantasia, l
   if (error || !data) return { empresa: null, error };
 
   const { status_assinatura, excluida_em, ...empresa } = data;
-  if (status_assinatura === 'suspensa' || excluida_em) return { empresa: null, error: null, indisponivel: true };
+  if (empresaForaDoAr({ status_assinatura, excluida_em })) return { empresa: null, error: null, indisponivel: true };
   return { empresa, error: null };
 }
 
@@ -52,4 +58,4 @@ function montarUrlTenant(empresa, caminho = '/') {
   return `${base}${caminho}`;
 }
 
-module.exports = { obterSlugTenant, resolverEmpresaPorSlug, respostaEmpresaIndisponivel, montarUrlTenant };
+module.exports = { obterSlugTenant, resolverEmpresaPorSlug, respostaEmpresaIndisponivel, empresaForaDoAr, montarUrlTenant };

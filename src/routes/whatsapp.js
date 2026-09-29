@@ -5,6 +5,7 @@ const { processarMensagem } = require('../services/whatsapp/bot');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 const { liberarOuAvisarForaDoHorario } = require('../services/whatsapp/horarioBot');
 const { whatsappWebhookLimiter } = require('../middleware/rateLimiters');
+const { empresaForaDoAr } = require('../utils/tenantContext');
 
 const router = express.Router();
 
@@ -64,11 +65,12 @@ router.post('/whatsapp/webhook', whatsappWebhookLimiter, async (req, res) => {
 
     const { data: empresa } = await supabase
       .from('empresas')
-      .select('id, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot)')
+      .select('id, status_assinatura, excluida_em, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot)')
       .eq('whatsapp_phone_number_id', instancia)
       .maybeSingle();
 
-    if (!empresa || !empresa.plano_plataforma?.permite_whatsapp_bot) return;
+    // Empresa suspensa/excluída pelo admin absoluto: o bot fica mudo, igual ao painel e ao site.
+    if (!empresa || empresaForaDoAr(empresa) || !empresa.plano_plataforma?.permite_whatsapp_bot) return;
 
     // Horário de funcionamento do bot (opcional, ver services/whatsapp/horarioBot.js): fora dele,
     // avisa uma vez por período fechado e não passa a mensagem pro bot.

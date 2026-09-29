@@ -1,6 +1,7 @@
 const cron = require('node-cron');
 const supabase = require('../config/supabase');
 const { enviarMensagemCliente } = require('../services/mensagensCliente');
+const { empresaForaDoAr } = require('../utils/tenantContext');
 
 const UM_DIA_MS = 24 * 60 * 60 * 1000;
 
@@ -34,7 +35,7 @@ async function processarAniversariantes() {
 
   const { data: clientes, error } = await supabase
     .from('usuarios')
-    .select('id, nome_completo, email, telefone, data_nascimento, ultimo_aniversario_enviado_ano, empresas!inner(nome, whatsapp_phone_number_id, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot))')
+    .select('id, nome_completo, email, telefone, data_nascimento, ultimo_aniversario_enviado_ano, empresas!inner(nome, whatsapp_phone_number_id, status_assinatura, excluida_em, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot))')
     .eq('tipo', 'cliente')
     .eq('ativo', true)
     .not('data_nascimento', 'is', null);
@@ -42,6 +43,7 @@ async function processarAniversariantes() {
   if (error) return console.error('Erro ao buscar aniversariantes:', error);
 
   for (const cliente of clientes || []) {
+    if (empresaForaDoAr(cliente.empresas)) continue;
     if (cliente.ultimo_aniversario_enviado_ano === anoAtual) continue;
     if (!ehAniversarioHoje(cliente.data_nascimento, hoje)) continue;
 
@@ -94,7 +96,7 @@ async function processarClientesInativos() {
 
   const { data: clientes, error: errClientes } = await supabase
     .from('usuarios')
-    .select('id, nome_completo, email, telefone, ultima_recuperacao_enviada_em, empresas!inner(nome, whatsapp_phone_number_id, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot))')
+    .select('id, nome_completo, email, telefone, ultima_recuperacao_enviada_em, empresas!inner(nome, whatsapp_phone_number_id, status_assinatura, excluida_em, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot))')
     .in('id', candidatosIds)
     .eq('tipo', 'cliente')
     .eq('ativo', true);
@@ -102,6 +104,7 @@ async function processarClientesInativos() {
   if (errClientes) return console.error('Erro ao buscar clientes p/ recuperação:', errClientes);
 
   for (const cliente of clientes || []) {
+    if (empresaForaDoAr(cliente.empresas)) continue;
     if (cliente.ultima_recuperacao_enviada_em && new Date(cliente.ultima_recuperacao_enviada_em) > limiteRecorrencia) continue;
 
     try {

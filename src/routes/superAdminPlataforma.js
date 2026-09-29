@@ -354,7 +354,7 @@ router.post('/super-admin/empresas/:id/suspender', async (req, res) => {
 
   if (error) return res.status(500).json({ error: 'Erro ao suspender empresa.' });
   limparCacheTrial(Number(req.params.id));
-  res.json({ success: true, message: 'Empresa suspensa. O painel e o site de agendamento dela saíram do ar, e a cobrança recorrente (se havia) foi cancelada.' });
+  res.json({ success: true, message: 'Empresa suspensa. O painel, o site de agendamento e o WhatsApp dela saíram do ar, e a cobrança recorrente (se havia) foi cancelada.' });
 });
 
 router.post('/super-admin/empresas/:id/reativar', async (req, res) => {
