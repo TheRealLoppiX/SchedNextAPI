@@ -84,8 +84,15 @@ async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId,
       .from('produtos')
       .select('id, valor')
       .in('id', idsProdutos)
-      .eq('empresa_id', agAtual.empresa_id);
+      .eq('empresa_id', agAtual.empresa_id)
+      .eq('tipo', 'venda');
     if (errProdutosReais) throw errProdutosReais;
+    // Produto de uso do estabelecimento (ou de outra empresa) não entra no caixa.
+    if ((produtosReais || []).length !== new Set(idsProdutos.map(Number)).size) {
+      const erro = new Error('Só produtos de venda podem entrar no caixa.');
+      erro.statusHttp = 400;
+      throw erro;
+    }
     precoPorProduto = Object.fromEntries((produtosReais || []).map((p) => [p.id, Number(p.valor) || 0]));
     valorProdutos = produtosVendidos.reduce((acc, p) => {
       const qtd = parseInt(p.quantidade || 1, 10);

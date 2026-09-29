@@ -31,8 +31,9 @@ router.post('/admin/acoes', validate(acaoFidelidadeSchema), async (req, res) => 
     premio.premio_servico_id = serv.id;
   }
   if (tipo === 'produto' && premio_produto_id) {
-    const { data: prod } = await supabase.from('produtos').select('id').eq('id', premio_produto_id).eq('empresa_id', empresa_id).maybeSingle();
-    if (!prod) return res.status(400).json({ error: 'Produto do prêmio não encontrado.' });
+    // Cortesia sai no caixa, então só vale produto de venda (não os de uso do estabelecimento).
+    const { data: prod } = await supabase.from('produtos').select('id').eq('id', premio_produto_id).eq('empresa_id', empresa_id).eq('tipo', 'venda').maybeSingle();
+    if (!prod) return res.status(400).json({ error: 'Produto do prêmio não encontrado entre os produtos de venda.' });
     premio.premio_produto_id = prod.id;
   }
   if ((tipo === 'desconto_percentual' || tipo === 'desconto_valor') && premio_valor) premio.premio_valor = premio_valor;

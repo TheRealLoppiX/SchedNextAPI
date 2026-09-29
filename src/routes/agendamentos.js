@@ -627,13 +627,17 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
       });
     }
 
-    // 5. Baixa de estoque dos produtos vendidos
+    // 5. Baixa de estoque dos produtos vendidos + registro da venda (preço e custo congelados
+    // agora, pro relatório de receita líquida por produto em routes/estoque.js). O produto dado
+    // de cortesia pela ação de fidelidade sai com preço zero em 1 unidade.
     if (produtos_vendidos && produtos_vendidos.length > 0) {
+      let cortesiaPendente = premio?.tipo === 'produto' ? Number(premio.produto?.id) : null;
       for (const produto of produtos_vendidos) {
+        const quantidade = parseInt(produto.quantidade || 1, 10);
         try {
           const { data: produtoAtual } = await supabase
             .from('produtos')
-            .select('quantidade')
+            .select('quantidade, valor, custo')
             .eq('id', produto.id)
             .eq('empresa_id', agAtual.empresa_id)
             .maybeSingle();
@@ -641,10 +645,31 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
           if (produtoAtual) {
             await supabase
               .from('produtos')
-              .update({ quantidade: produtoAtual.quantidade - produto.quantidade })
+              .update({ quantidade: produtoAtual.quantidade - quantidade })
               .eq('id', produto.id)
               .eq('empresa_id', agAtual.empresa_id);
-            console.log(`Baixa de estoque: Produto ID ${produto.id} | Qtd: -${produto.quantidade}`);
+
+            const custo = produtoAtual.custo != null ? Number(produtoAtual.custo) : null;
+            const base = { empresa_id: agAtual.empresa_id, produto_id: Number(produto.id), agendamento_id: Number(agendamento_id), custo_unitario: custo };
+            const linhas = [];
+            let pagas = quantidade;
+            if (cortesiaPendente === Number(produto.id)) {
+              linhas.push({ ...base, quantidade: 1, preco_unitario: 0 });
+              pagas -= 1;
+              cortesiaPendente = null;
+            }
+            if (pagas > 0) linhas.push({ ...base, quantidade: pagas, preco_unitario: Number(produtoAtual.valor) || 0 });
+            const { error: vendaErr } = await supabase.from('produto_vendas').insert(linhas);
+            if (vendaErr) console.error('Erro ao registrar venda de produto:', vendaErr);
+
+            const { error: movErr } = await supabase.from('estoque_movimentacoes').insert({
+              produto_id: Number(produto.id),
+              usuario_nome: 'Caixa',
+              quantidade,
+              tipo: 'VENDA',
+              justificativa: `Venda no atendimento #${agendamento_id}`
+            });
+            if (movErr) console.error('Erro ao registrar saída de estoque da venda:', movErr);
           }
         } catch (errEstoque) {
           console.error('Erro ao baixar estoque:', errEstoque);
