@@ -353,12 +353,14 @@ router.post('/super-admin/empresas/:id/suspender', async (req, res) => {
     .eq('id', req.params.id);
 
   if (error) return res.status(500).json({ error: 'Erro ao suspender empresa.' });
-  res.json({ success: true, message: 'Empresa suspensa. O login do admin dela fica bloqueado e a cobrança recorrente (se havia) foi cancelada.' });
+  limparCacheTrial(Number(req.params.id));
+  res.json({ success: true, message: 'Empresa suspensa. O painel e o site de agendamento dela saíram do ar, e a cobrança recorrente (se havia) foi cancelada.' });
 });
 
 router.post('/super-admin/empresas/:id/reativar', async (req, res) => {
   const { error } = await supabase.from('empresas').update({ status_assinatura: 'ativa' }).eq('id', req.params.id);
   if (error) return res.status(500).json({ error: 'Erro ao reativar empresa.' });
+  limparCacheTrial(Number(req.params.id));
   res.json({ success: true, message: 'Empresa reativada.' });
 });
 
@@ -447,6 +449,7 @@ router.post('/super-admin/empresas/:id/restaurar', async (req, res) => {
 
   const { error } = await supabase.from('empresas').update({ excluida_em: null, email, slug }).eq('id', req.params.id);
   if (error) return res.status(500).json({ error: 'Erro ao restaurar empresa.' });
+  limparCacheTrial(empresa.id);
   res.json({ success: true, message: 'Empresa restaurada. Confira o plano e o status da assinatura dela.' });
 });
 

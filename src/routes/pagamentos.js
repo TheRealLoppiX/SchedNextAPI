@@ -171,8 +171,8 @@ router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgr
   }
 });
 
-// Cancela a COBRANÇA. O plano atual continua ativo até proxima_cobranca_em, e só nessa
-// data (processado pelo cron em src/cron/assinaturas.js) a conta cai pro plano Grátis. No
+// Cancela a COBRANÇA. O plano atual continua ativo até o dia anterior a proxima_cobranca_em, e
+// nessa data (processado pelo cron em src/cron/assinaturas.js) a conta cai pro plano Grátis. No
 // gateway, a assinatura é cancelada JÁ (impede a próxima cobrança) — o acesso continuar até a
 // data prometida é só um controle local, não depende de nenhuma cobrança futura acontecer.
 router.post('/admin/assinatura-plataforma/cancelar-cobranca', async (req, res) => {
@@ -196,7 +196,10 @@ router.post('/admin/assinatura-plataforma/cancelar-cobranca', async (req, res) =
   }
 
   await supabase.from('empresas').update({ cancelamento_agendado: true }).eq('id', empresaId);
-  res.json({ message: `Cobrança cancelada. Seu plano continua ativo até ${new Date(empresa.proxima_cobranca_em).toLocaleDateString('pt-BR')}, quando a conta passa pro plano Grátis automaticamente.` });
+  // Usa até o dia anterior ao vencimento; no dia do vencimento o cron (src/cron/assinaturas.js) passa pro Grátis.
+  const acessoAte = new Date(new Date(empresa.proxima_cobranca_em).getTime() - 24 * 60 * 60 * 1000)
+    .toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+  res.json({ message: `Cobrança cancelada. Seu plano continua ativo até ${acessoAte}. Depois disso, a conta passa pro plano Grátis automaticamente.` });
 });
 
 // Desfaz o cancelamento agendado. Recria a assinatura no gateway com a mesma data de próxima

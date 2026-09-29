@@ -12,16 +12,29 @@ function obterSlugTenant(req) {
   return req.query.empresa || req.params.empresaSlug || req.params.slug || null;
 }
 
+// Empresa suspensa pelo admin absoluto (ou excluída) sai do ar também no site público, não só no
+// painel: o resolver devolve empresa null + indisponivel, e as rotas respondem com
+// EMPRESA_INDISPONIVEL em vez de "não encontrada" (o frontend mostra uma tela própria pra isso).
+const MSG_EMPRESA_INDISPONIVEL = 'Este estabelecimento está temporariamente indisponível.';
+
+function respostaEmpresaIndisponivel(res) {
+  return res.status(403).json({ code: 'EMPRESA_INDISPONIVEL', error: MSG_EMPRESA_INDISPONIVEL, message: MSG_EMPRESA_INDISPONIVEL });
+}
+
 async function resolverEmpresaPorSlug(slug, campos = 'id, nome, nome_fantasia, logo_url, cor_principal, horarios_funcionamento, vertical, plano_plataforma_id') {
   if (!slug) return { empresa: null, error: null };
 
   const { data, error } = await supabase
     .from('empresas')
-    .select(campos)
+    .select(`${campos}, status_assinatura, excluida_em`)
     .eq('slug', slug)
     .maybeSingle();
 
-  return { empresa: data, error };
+  if (error || !data) return { empresa: null, error };
+
+  const { status_assinatura, excluida_em, ...empresa } = data;
+  if (status_assinatura === 'suspensa' || excluida_em) return { empresa: null, error: null, indisponivel: true };
+  return { empresa, error: null };
 }
 
 // Monta uma URL absoluta e navegável (pra WhatsApp, e-mail, backUrl de checkout) pro site do
@@ -39,4 +52,4 @@ function montarUrlTenant(empresa, caminho = '/') {
   return `${base}${caminho}`;
 }
 
-module.exports = { obterSlugTenant, resolverEmpresaPorSlug, montarUrlTenant };
+module.exports = { obterSlugTenant, resolverEmpresaPorSlug, respostaEmpresaIndisponivel, montarUrlTenant };

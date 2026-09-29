@@ -4,6 +4,7 @@ const bcrypt = require('bcrypt');
 const supabase = require('../config/supabase');
 const transporter = require('../config/mailer');
 const { emailHtml } = require('../utils/emailTemplate');
+const { resolverEmpresaPorSlug, respostaEmpresaIndisponivel } = require('../utils/tenantContext');
 const validate = require('../middleware/validate');
 const verificarTokenCliente = require('../middleware/clienteAuth');
 const {
@@ -58,11 +59,8 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
     return res.status(400).json({ error: 'Você já possui um agendamento para este dia.' });
   }
 
-  const { data: emp, error: empErr } = await supabase
-    .from('empresas')
-    .select('id, nome, whatsapp_phone_number_id, mercadopago_access_token')
-    .eq('slug', empresa_slug)
-    .maybeSingle();
+  const { empresa: emp, error: empErr, indisponivel } = await resolverEmpresaPorSlug(empresa_slug, 'id, nome, whatsapp_phone_number_id, mercadopago_access_token');
+  if (indisponivel) return respostaEmpresaIndisponivel(res);
 
   if (empErr || !emp) return res.status(404).json({ error: 'Empresa não encontrada' });
 

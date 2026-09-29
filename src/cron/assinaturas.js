@@ -1,9 +1,17 @@
 const cron = require('node-cron');
 const supabase = require('../config/supabase');
 
-// Roda uma vez por dia: empresas que cancelaram a cobrança (cancelamento_agendado=true) e
-// já passaram da data da próxima cobrança caem pro plano Grátis automaticamente. O cliente
-// continua com o plano pago até a data prometida, sem downgrade prematuro.
+// Início do dia seguinte no fuso de Brasília (03:00 UTC), usado como corte do cancelamento.
+function inicioDoProximoDiaBrasilia() {
+  const hojeBrasilia = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const corte = new Date(`${hojeBrasilia}T03:00:00Z`);
+  corte.setUTCDate(corte.getUTCDate() + 1);
+  return corte;
+}
+
+// Roda uma vez por dia (03:00 UTC = meia-noite em Brasília): empresas que cancelaram a cobrança
+// (cancelamento_agendado=true) caem pro plano Grátis no dia do vencimento, ou seja, usam o plano
+// pago até o dia anterior (acesso_ate em routes/empresa.js segue a mesma regra).
 function iniciarProcessamentoCancelamentos() {
   cron.schedule('0 3 * * *', async () => {
     console.log('Verificando cancelamentos de assinatura agendados...');
@@ -15,7 +23,7 @@ function iniciarProcessamentoCancelamentos() {
       .from('empresas')
       .select('id, nome')
       .eq('cancelamento_agendado', true)
-      .lte('proxima_cobranca_em', new Date().toISOString());
+      .lt('proxima_cobranca_em', inicioDoProximoDiaBrasilia().toISOString());
 
     if (error) return console.error('Erro ao buscar cancelamentos agendados:', error);
 

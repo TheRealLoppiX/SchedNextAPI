@@ -24,11 +24,11 @@ function rotaLiberada(req) {
 
 async function carregarSituacao(empresaId) {
   const cacheado = cache.get(empresaId);
-  if (cacheado && cacheado.ate > Date.now()) return cacheado.expirado;
+  if (cacheado && cacheado.ate > Date.now()) return cacheado.situacao;
 
   const { data } = await supabase
     .from('empresas')
-    .select('trial_expira_em, chave_ativacao_expira_em, plano_teste_expira_em, status_assinatura, plano_plataforma:plano_plataforma_id(preco_mensal)')
+    .select('trial_expira_em, chave_ativacao_expira_em, plano_teste_expira_em, status_assinatura, excluida_em, plano_plataforma:plano_plataforma_id(preco_mensal)')
     .eq('id', empresaId)
     .maybeSingle();
 
@@ -42,15 +42,27 @@ async function carregarSituacao(empresaId) {
     && !emVigor(data.chave_ativacao_expira_em)
     && !emVigor(data.plano_teste_expira_em);
 
-  cache.set(empresaId, { expirado, ate: agora + CACHE_MS });
-  return expirado;
+  // Suspensa/excluída pelo admin absoluto: trava o painel inteiro, sem as rotas liberadas do
+  // trial, e derruba também quem já estava logado (o token de 8h continua válido, este não).
+  const bloqueada = data?.status_assinatura === 'suspensa' || !!data?.excluida_em;
+
+  const situacao = { expirado, bloqueada };
+  cache.set(empresaId, { situacao, ate: agora + CACHE_MS });
+  return situacao;
 }
 
 async function bloquearTrialExpirado(req, res, next) {
-  if (!req.empresaId || rotaLiberada(req)) return next();
+  if (!req.empresaId) return next();
 
   try {
-    if (await carregarSituacao(req.empresaId)) {
+    const { expirado, bloqueada } = await carregarSituacao(req.empresaId);
+    if (bloqueada) {
+      return res.status(403).json({
+        code: 'CONTA_SUSPENSA',
+        error: 'Esta conta foi suspensa. Entre em contato com o suporte da SchedNext.'
+      });
+    }
+    if (expirado && !rotaLiberada(req)) {
       return res.status(403).json({
         code: 'TRIAL_EXPIRADO',
         error: 'Seu período de teste acabou. Assine um plano para continuar usando a SchedNext.'
