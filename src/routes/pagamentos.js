@@ -14,13 +14,46 @@ const { iniciarUpgradeSchema } = require('../schemas');
 const router = express.Router();
 
 // Protegida pelo mesmo verificarTokenAdmin de toda a área /admin/* (ver server.js).
+// Plano exclusivo oferecido a esta empresa pelo admin absoluto, no mesmo formato de
+// GET /planos-plataforma (com a campanha, se houver), pra tela Conta listar junto dos públicos.
+// Sob /admin/assinatura-plataforma/ pra continuar acessível com o teste grátis expirado.
+router.get('/admin/assinatura-plataforma/plano-exclusivo', async (req, res) => {
+  const { data: plano } = await supabase
+    .from('planos_plataforma')
+    .select('*')
+    .eq('empresa_exclusiva_id', req.empresaId)
+    .eq('ativo', true)
+    .maybeSingle();
+  if (!plano) return res.json(null);
+
+  const { data: campanha } = await supabase
+    .from('campanhas_precificacao')
+    .select('nome, campanha_precos_ciclo(numero_ciclo, valor)')
+    .eq('plano_plataforma_id', plano.id)
+    .eq('ativa', true)
+    .order('id', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  res.json({
+    ...plano,
+    exclusivo: true,
+    campanha: campanha ? {
+      nome: campanha.nome,
+      precos_por_ciclo: (campanha.campanha_precos_ciclo || [])
+        .map((x) => ({ numero_ciclo: x.numero_ciclo, valor: Number(x.valor) }))
+        .sort((a, b) => a.numero_ciclo - b.numero_ciclo)
+    } : null
+  });
+});
+
 router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgradeSchema), async (req, res) => {
   const empresaId = req.empresaId;
   const { plano_plataforma_id, forma_pagamento } = req.body;
 
   const { data: plano, error } = await supabase
     .from('planos_plataforma')
-    .select('id, nome, preco_mensal, ativo, publico')
+    .select('id, nome, preco_mensal, ativo, publico, empresa_exclusiva_id')
     .eq('id', plano_plataforma_id)
     .maybeSingle();
 
@@ -29,7 +62,10 @@ router.post('/admin/assinatura-plataforma/iniciar-upgrade', validate(iniciarUpgr
   // Plano desligado/oculto (área de teste do admin absoluto) não é contratável pelo próprio
   // cliente — só o admin absoluto aplica. Sem isso, um plano de R$0 com todos os recursos
   // criado só pra testar cairia no branch "preco <= 0" abaixo e seria ativado de graça.
-  if (!plano.ativo || !plano.publico) return res.status(400).json({ error: 'Este plano não está disponível no momento.' });
+  // Exceção: o plano exclusivo que o admin absoluto montou pra esta empresa (ver
+  // superAdminPlataforma.js), contratável só por ela.
+  const exclusivoDestaEmpresa = plano.empresa_exclusiva_id != null && String(plano.empresa_exclusiva_id) === String(empresaId);
+  if (!plano.ativo || (!plano.publico && !exclusivoDestaEmpresa)) return res.status(400).json({ error: 'Este plano não está disponível no momento.' });
 
   // Enterprise (e qualquer plano futuro "sob consulta") não tem preço fixo — preco_mensal vem
   // null do banco. Sem essa checagem, `null <= 0` é true em JS e cairia no branch de downgrade

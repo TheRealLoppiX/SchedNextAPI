@@ -754,6 +754,18 @@ const planoPlataformaSchema = z.object({
 
 const planoAtivoSchema = z.object({ ativo: z.boolean() });
 
+// Plano exclusivo de uma empresa (ver routes/superAdminPlataforma.js): mesmas regras de um plano
+// normal, sem ativo/publico (sempre oculto do site), mais a campanha de preço por ciclo própria
+// (vazia = sem campanha) e a opção de já aplicar o plano na empresa.
+const planoExclusivoSchema = planoPlataformaSchema.omit({ ativo: true, publico: true }).extend({
+  precos_por_ciclo: z.array(z.object({
+    numero_ciclo: z.coerce.number().int().positive('Ciclo deve ser maior que zero'),
+    valor: z.coerce.number().min(0, 'Valor não pode ser negativo')
+  })).optional().default([]),
+  aplicar_agora: z.boolean().optional().default(false),
+  gerar_cobranca: z.boolean().optional().default(false)
+});
+
 // Área de teste de planos: aplica um plano (mesmo desligado/oculto) numa empresa escolhida por
 // alguns dias; ao acabar, ela volta ao plano anterior (cron/assinaturas.js).
 const planoTesteSchema = z.object({
@@ -844,6 +856,7 @@ module.exports = {
   superAdminEditarSchema,
   planoPlataformaSchema,
   planoAtivoSchema,
+  planoExclusivoSchema,
   planoTesteSchema,
   chaveAtivacaoCriarSchema,
   chaveAtivacaoResgatarSchema
