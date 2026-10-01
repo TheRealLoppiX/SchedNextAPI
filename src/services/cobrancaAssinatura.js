@@ -61,8 +61,11 @@ async function obterOuCriarCobrancaCicloAtual({ usuario, empresa, plano, formaPa
 // idempotente, então gerar de novo no mesmo ciclo — ex: cliente perdeu o QR — devolve/atualiza a
 // mesma linha em vez de duplicar). applicationFee usa a mesma taxa de marketplace do Pix avulso
 // e do preapproval (obterTaxaMarketplace).
-async function gerarCobrancaPix({ usuario, empresa, plano, valor }) {
-  const cicloRef = calcularInicioCiclo(usuario.assinante_desde);
+// cicloRef/ajusteVencimento: cobrança fora do dia da âncora, a 1ª de quem assina entre os
+// vencimentos no modo de dias fixos (ver services/vencimentoAssinatura.js). ajusteVencimento
+// marca a proporcional, que não conta como ciclo (não avança ciclo_cobranca_atual).
+async function gerarCobrancaPix({ usuario, empresa, plano, valor, cicloRef: cicloRefFixo = null, ajusteVencimento = false }) {
+  const cicloRef = cicloRefFixo || calcularInicioCiclo(usuario.assinante_desde);
   const valorCobrado = valor ?? plano.preco;
   const taxaPercentual = await obterTaxaMarketplace(empresa.id);
 
@@ -85,6 +88,7 @@ async function gerarCobrancaPix({ usuario, empresa, plano, valor }) {
       valor: valorCobrado,
       forma_pagamento: 'pix',
       status: 'pendente',
+      ajuste_vencimento: ajusteVencimento,
       mercadopago_payment_id: String(cobranca.id)
     }, { onConflict: 'usuario_id,ciclo_ref' })
     .select('id')

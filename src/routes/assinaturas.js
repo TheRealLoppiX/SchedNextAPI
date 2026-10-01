@@ -1,7 +1,9 @@
 const express = require('express');
 const supabase = require('../config/supabase');
 const validate = require('../middleware/validate');
-const { assinaturaPlanoSchema, ativoSchema, clientePlanoSchema } = require('../schemas');
+const { assinaturaPlanoSchema, ativoSchema, clientePlanoSchema, assinaturaConfigSchema } = require('../schemas');
+const { calcularProximaCobranca } = require('../utils/limitesAssinatura');
+const { proximaDataComAlgumDia } = require('../services/vencimentoAssinatura');
 
 const router = express.Router();
 
@@ -11,7 +13,7 @@ router.get('/admin/assinaturas/:empresaId', async (req, res) => {
 
   const { data: planos, error } = await supabase
     .from('planos_assinatura')
-    .select('id, nome, preco, descricao, ativo, criado_em, plano_servicos(servicos(id, nome), limite_mensal)')
+    .select('id, nome, preco, descricao, ativo, criado_em, dias_semana, plano_servicos(servicos(id, nome), limite_mensal)')
     .eq('empresa_id', empresaId)
     .order('criado_em', { ascending: false });
 
@@ -49,6 +51,7 @@ router.get('/admin/assinaturas/:empresaId', async (req, res) => {
       descricao: p.descricao,
       ativo: p.ativo,
       criado_em: p.criado_em,
+      dias_semana: p.dias_semana || null,
       servicos_nomes: servicosUnicos.map((s) => s.nome).join(', ') || null,
       servicos_ids: servicosUnicos.map((s) => s.id),
       servicos: servicosUnicos.map((s) => ({ id: s.id, nome: s.nome, limite_mensal: s.limite_mensal })),
@@ -64,7 +67,7 @@ router.get('/admin/assinaturas/:empresaId', async (req, res) => {
 router.get('/assinaturas/plano/:id', async (req, res) => {
   const { data, error } = await supabase
     .from('planos_assinatura')
-    .select('id, nome, preco')
+    .select('id, nome, preco, dias_semana')
     .eq('id', req.params.id)
     .maybeSingle();
 
@@ -74,13 +77,13 @@ router.get('/assinaturas/plano/:id', async (req, res) => {
 
 // Criar plano
 router.post('/admin/assinaturas', validate(assinaturaPlanoSchema), async (req, res) => {
-  const { nome, preco, descricao, servicos } = req.body;
+  const { nome, preco, descricao, servicos, dias_semana } = req.body;
   const empresa_id = req.empresaId;
 
   try {
     const { data: plano, error } = await supabase
       .from('planos_assinatura')
-      .insert({ empresa_id, nome, preco, descricao: descricao || null })
+      .insert({ empresa_id, nome, preco, descricao: descricao || null, dias_semana: dias_semana ?? null })
       .select('id')
       .single();
 
@@ -102,7 +105,7 @@ router.post('/admin/assinaturas', validate(assinaturaPlanoSchema), async (req, r
 // Atualizar plano
 router.put('/admin/assinaturas/:id', validate(assinaturaPlanoSchema), async (req, res) => {
   const { id } = req.params;
-  const { nome, preco, descricao, servicos } = req.body;
+  const { nome, preco, descricao, servicos, dias_semana } = req.body;
 
   try {
     const { data: planoAtual } = await supabase.from('planos_assinatura').select('empresa_id').eq('id', id).maybeSingle();
@@ -110,7 +113,7 @@ router.put('/admin/assinaturas/:id', validate(assinaturaPlanoSchema), async (req
 
     const { error } = await supabase
       .from('planos_assinatura')
-      .update({ nome, preco, descricao: descricao || null })
+      .update({ nome, preco, descricao: descricao || null, dias_semana: dias_semana ?? null })
       .eq('id', id);
     if (error) throw error;
 
@@ -128,6 +131,89 @@ router.put('/admin/assinaturas/:id', validate(assinaturaPlanoSchema), async (req
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// --- Vencimento das mensalidades (ver services/vencimentoAssinatura.js) ---
+// Caminho fora de /admin/assinaturas/* de propósito: /admin/assinaturas/:empresaId engoliria
+// "/admin/assinaturas/config".
+router.get('/admin/assinatura-config', async (req, res) => {
+  const { data, error } = await supabase
+    .from('empresas')
+    .select('assinatura_modo_vencimento, assinatura_dias_vencimento, assinatura_primeira_cobranca')
+    .eq('id', req.empresaId)
+    .maybeSingle();
+  if (error || !data) return res.status(500).json({ error: 'Erro ao buscar a configuração.' });
+
+  // Quantos já estão com a migração pros dias fixos agendada (aparece na tela).
+  const { count } = await supabase
+    .from('usuarios')
+    .select('id', { count: 'exact', head: true })
+    .eq('empresa_id', req.empresaId)
+    .not('vencimento_migrar_em', 'is', null);
+
+  res.json({
+    modo_vencimento: data.assinatura_modo_vencimento,
+    dias_vencimento: data.assinatura_dias_vencimento || [],
+    primeira_cobranca: data.assinatura_primeira_cobranca,
+    migracoes_agendadas: count || 0
+  });
+});
+
+router.put('/admin/assinatura-config', validate(assinaturaConfigSchema), async (req, res) => {
+  const { modo_vencimento, dias_vencimento, primeira_cobranca, migrar_atuais } = req.body;
+  const diasFixos = modo_vencimento === 'dias_fixos';
+
+  const { error } = await supabase
+    .from('empresas')
+    .update({
+      assinatura_modo_vencimento: modo_vencimento,
+      assinatura_dias_vencimento: diasFixos ? dias_vencimento : null,
+      assinatura_primeira_cobranca: primeira_cobranca
+    })
+    .eq('id', req.empresaId);
+  if (error) return res.status(500).json({ error: 'Erro ao salvar a configuração.' });
+
+  // Voltar pro modo normal desfaz migrações ainda não aplicadas.
+  if (!diasFixos) {
+    await supabase.from('usuarios')
+      .update({ vencimento_migrar_em: null, vencimento_nova_ancora: null })
+      .eq('empresa_id', req.empresaId)
+      .not('vencimento_migrar_em', 'is', null);
+    return res.json({ success: true, message: 'Configuração salva.' });
+  }
+
+  if (!migrar_atuais) return res.json({ success: true, message: 'Configuração salva. Os dias fixos valem pras novas assinaturas.' });
+
+  // Migra quem já assina: agenda a troca pra próxima cobrança de cada um (o cron aplica nesse
+  // dia, ver cron/cobrancaAssinaturas.js). Cartão fica na data atual: mudar o dia do cartão exige
+  // o cliente autorizar um cartão de novo (dá pra fazer um a um em "alterar vencimento").
+  const { data: assinantes, error: errAss } = await supabase
+    .from('usuarios')
+    .select('id, assinante_desde, assinatura_forma_pagamento')
+    .eq('empresa_id', req.empresaId)
+    .eq('assinante', true)
+    .not('plano_id', 'is', null)
+    .not('assinante_desde', 'is', null);
+  if (errAss) return res.status(500).json({ error: 'Configuração salva, mas não foi possível migrar os assinantes atuais.' });
+
+  let agendados = 0;
+  let jaNoDia = 0;
+  let cartao = 0;
+  for (const a of assinantes || []) {
+    if (a.assinatura_forma_pagamento === 'cartao') { cartao += 1; continue; }
+    const proxima = calcularProximaCobranca(a.assinante_desde);
+    if (dias_vencimento.includes(Number(proxima.slice(8, 10)))) { jaNoDia += 1; continue; }
+    const { error: migErr } = await supabase.from('usuarios')
+      .update({ vencimento_migrar_em: proxima, vencimento_nova_ancora: proximaDataComAlgumDia(proxima, dias_vencimento) })
+      .eq('id', a.id);
+    if (migErr) console.error(`Erro ao agendar migração de vencimento do cliente ${a.id}:`, migErr);
+    else agendados += 1;
+  }
+
+  const partes = [`${agendados} assinante(s) passam pro dia fixo na próxima cobrança`];
+  if (jaNoDia) partes.push(`${jaNoDia} já vencem num dos dias escolhidos`);
+  if (cartao) partes.push(`${cartao} no cartão continuam na data atual`);
+  res.json({ success: true, message: `Configuração salva. ${partes.join('; ')}.` });
 });
 
 // Ativar/desativar plano

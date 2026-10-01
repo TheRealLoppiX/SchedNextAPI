@@ -99,7 +99,8 @@ router.put('/admin/clientes/:id/assinatura/vencimento', validate(vencimentoAssin
   if (!cliente.plano_id || !cliente.assinante_desde) return res.status(400).json({ error: 'Este cliente ainda não tem uma assinatura ativa.' });
 
   if (cliente.assinatura_forma_pagamento !== 'cartao') {
-    const { error } = await supabase.from('usuarios').update({ assinante_desde: vencimento }).eq('id', cliente.id);
+    // Vencimento escolhido na mão cancela a migração pros dias fixos ainda não aplicada.
+    const { error } = await supabase.from('usuarios').update({ assinante_desde: vencimento, vencimento_migrar_em: null, vencimento_nova_ancora: null }).eq('id', cliente.id);
     if (error) return res.status(500).json({ error: 'Não foi possível atualizar o vencimento agora.' });
     return res.json({ success: true });
   }
@@ -129,7 +130,7 @@ router.put('/admin/clientes/:id/assinatura/vencimento', validate(vencimentoAssin
 
     const { error: errUpdate } = await supabase
       .from('usuarios')
-      .update({ assinante_desde: vencimento, status_assinatura: 'pendente' })
+      .update({ assinante_desde: vencimento, status_assinatura: 'pendente', vencimento_migrar_em: null, vencimento_nova_ancora: null })
       .eq('id', cliente.id);
     if (errUpdate) throw errUpdate;
 

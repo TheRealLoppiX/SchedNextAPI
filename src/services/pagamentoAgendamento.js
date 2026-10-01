@@ -20,7 +20,7 @@ const { obterPremioDisponivel, calcularDescontoPremio } = require('./fidelidade'
 async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId, produtosVendidos, servicosAdicionais, registrarConsumo = false, aplicarPremio = false }) {
   const { data: agAtual, error: agErr } = await supabase
     .from('agendamentos')
-    .select('valor_total, empresa_id, usuario_id, status, unidade_id, pagamento_status, mercadopago_payment_id')
+    .select('valor_total, data_hora, empresa_id, usuario_id, status, unidade_id, pagamento_status, mercadopago_payment_id')
     .eq('id', agendamentoId)
     .maybeSingle();
   if (agErr) throw agErr;
@@ -55,7 +55,7 @@ async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId,
     ({ valorBase, servicosCobertos, servicosCobrados } = await calcularValorComLimiteAssinante(
       agAtual.usuario_id,
       servicosParaCalculo,
-      { registrarConsumo }
+      { registrarConsumo, dataHora: agAtual.data_hora }
     ));
   } else {
     // Agendamentos sem serviço vinculado (ex: encaixe legado que só grava valor_total direto)

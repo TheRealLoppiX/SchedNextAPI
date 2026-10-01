@@ -24,7 +24,7 @@ const {
   obterTaxaMarketplace
 } = require('../utils/limitesPlano');
 const { calcularValorComDescontoAssinante } = require('../utils/valorAssinante');
-const { calcularInicioCiclo, obterUsoServicos } = require('../utils/limitesAssinatura');
+const { calcularInicioCiclo, obterUsoServicos, planoValeNoDia, obterDiasSemanaPlano } = require('../utils/limitesAssinatura');
 const { verificarEDispararPremioFidelidade, obterPremioDisponivel, registrarResgatePremio } = require('../services/fidelidade');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 const { calcularValorFinalCheckout } = require('../services/pagamentoAgendamento');
@@ -93,7 +93,7 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
   // Desconta os serviços que já estão inclusos no plano de assinatura do cliente (se ele for
   // assinante) — antes isso somava o preço cheio de tudo, cobrando de novo o que já tinha sido
   // pago na mensalidade.
-  const valorTotal = await calcularValorComDescontoAssinante(usuario_id, servicosInfo);
+  const valorTotal = await calcularValorComDescontoAssinante(usuario_id, servicosInfo, data_hora);
 
   const { data: novoAgendamento, error: insErr } = await supabase
     .from('agendamentos')
@@ -835,7 +835,8 @@ router.post('/admin/agendar-encaixe', validate(agendarEncaixeSchema), async (req
     const valorTotal = servicos && servicos.length > 0
       ? await calcularValorComDescontoAssinante(
           usuario_id,
-          servicos.map((s) => ({ id: s.id, valor: parseFloat(String(s.preco || s.valor || '0').replace(',', '.')) }))
+          servicos.map((s) => ({ id: s.id, valor: parseFloat(String(s.preco || s.valor || '0').replace(',', '.')) })),
+          data_hora
         )
       : 0;
 
@@ -924,7 +925,7 @@ router.get('/admin/agendamento-usuario/:id', async (req, res) => {
   try {
     const { data: ag } = await supabase
       .from('agendamentos')
-      .select('usuario_id, valor_total, empresa_id, unidade_id, usuarios(id, assinante, plano_id, assinante_desde, status_assinatura)')
+      .select('usuario_id, valor_total, data_hora, empresa_id, unidade_id, usuarios(id, assinante, plano_id, assinante_desde, status_assinatura)')
       .eq('id', req.params.id)
       .maybeSingle();
 
@@ -954,6 +955,19 @@ router.get('/admin/agendamento-usuario/:id', async (req, res) => {
         usuario_id: ag.usuario_id,
         assinante: false,
         inadimplente: usuario.status_assinatura === 'inadimplente',
+        servicos_ids: [],
+        servicos_agendados_ids: servicosAgendadosIds,
+        restantes: {},
+        premio_fidelidade: premioFidelidade
+      });
+    }
+
+    // Atendimento num dia da semana fora do plano: o caixa trata como cliente comum.
+    if (!planoValeNoDia(await obterDiasSemanaPlano(usuario.plano_id), ag.data_hora)) {
+      return res.json({
+        usuario_id: ag.usuario_id,
+        assinante: false,
+        fora_do_dia_plano: true,
         servicos_ids: [],
         servicos_agendados_ids: servicosAgendadosIds,
         restantes: {},

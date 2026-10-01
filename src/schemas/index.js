@@ -391,11 +391,28 @@ const assinaturaPlanoSchema = z.object({
   servicos: z.array(z.object({
     id: idLike,
     limite_mensal: z.coerce.number().int().positive().optional().nullable()
-  })).optional()
+  })).optional(),
+  // Dias da semana em que o plano vale (0 = domingo ... 6 = sábado). Vazio/null = todos os dias.
+  dias_semana: z.array(z.coerce.number().int().min(0).max(6)).max(7).optional().nullable()
+    .transform((d) => (d && d.length > 0 && d.length < 7 ? [...new Set(d)].sort() : null))
 });
 
 const clientePlanoSchema = z.object({
   plano_id: idLikeNullable
+});
+
+// Vencimento das mensalidades (ver services/vencimentoAssinatura.js). Dias de 1 a 28 pra todo mês
+// ter o dia. migrar_atuais aplica os dias fixos em quem já é assinante.
+const assinaturaConfigSchema = z.object({
+  modo_vencimento: z.enum(['data_assinatura', 'dias_fixos']),
+  dias_vencimento: z.array(z.coerce.number().int().min(1, 'Dia inválido').max(28, 'Use dias de 1 a 28')).max(28).optional().default([])
+    .transform((d) => [...new Set(d)].sort((a, b) => a - b)),
+  primeira_cobranca: z.enum(['proporcional', 'cheia_ciclo_longo', 'no_dia_fixo']).optional().default('proporcional'),
+  migrar_atuais: z.boolean().optional().default(false)
+}).superRefine((d, ctx) => {
+  if (d.modo_vencimento === 'dias_fixos' && d.dias_vencimento.length === 0) {
+    ctx.addIssue({ code: 'custom', path: ['dias_vencimento'], message: 'Escolha ao menos um dia de vencimento.' });
+  }
 });
 
 // --- pagamentos.js ---
@@ -440,7 +457,9 @@ const mercadoPagoPixSchema = z.object({
 const assinarAssinaturaSchema = z.object({
   // 'cartao' (padrão, mantém o fluxo de preapproval de sempre) ou 'pix' (gera uma cobrança Pix
   // avulsa pro ciclo atual — Mercado Pago não tem Pix recorrente, ver cron/cobrancaAssinaturas.js).
-  forma_pagamento: z.enum(['cartao', 'pix']).optional()
+  forma_pagamento: z.enum(['cartao', 'pix']).optional(),
+  // Só no modo de dias fixos: em qual dos dias liberados pela empresa o cliente quer pagar.
+  dia_vencimento: z.coerce.number().int().min(1).max(28).optional()
 });
 
 // --- cobrancaAssinatura.js ---
@@ -799,6 +818,7 @@ module.exports = {
   assinarAssinaturaSchema,
   baixaManualAssinaturaSchema,
   vencimentoAssinaturaSchema,
+  assinaturaConfigSchema,
   apiPublicaAgendamentoSchema,
   whatsappTesteSchema,
   whatsappBotConfigSchema,

@@ -39,6 +39,7 @@ const {
   buscarCampanhaParaNovoCadastro,
   precoDoCiclo: precoDoCicloAssinatura
 } = require('../services/precificacaoAssinatura');
+const { planejarNovaAssinatura, hojeBrasilia } = require('../services/vencimentoAssinatura');
 
 // Valor líquido real recebido num pagamento Pix confirmado (transaction_amount menos a taxa de
 // processamento do Mercado Pago, ver taxaRealDoPagamento) — mesmo princípio já usado pro cartão
@@ -403,9 +404,15 @@ router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, v
   const { data: plano } = await supabase.from('planos_assinatura').select('id, nome, preco').eq('id', usuario.plano_id).maybeSingle();
   if (!plano) return res.status(404).json({ error: 'Plano não encontrado.' });
 
-  const { data: empresa } = await supabase.from('empresas').select('id, nome, slug, dominio_customizado, dominio_verificado, mercadopago_access_token, whatsapp_phone_number_id').eq('id', usuario.empresa_id).maybeSingle();
+  const { data: empresa } = await supabase.from('empresas').select('id, nome, slug, dominio_customizado, dominio_verificado, mercadopago_access_token, whatsapp_phone_number_id, assinatura_modo_vencimento, assinatura_dias_vencimento, assinatura_primeira_cobranca').eq('id', usuario.empresa_id).maybeSingle();
   if (!empresa?.mercadopago_access_token) {
     return res.status(400).json({ error: 'Esta barbearia ainda não conectou o Mercado Pago para cobrança automática.' });
+  }
+
+  // Dias fixos de vencimento: o cliente escolhe um dos dias liberados pela empresa.
+  const diasFixos = empresa.assinatura_modo_vencimento === 'dias_fixos' ? (empresa.assinatura_dias_vencimento || []).map(Number) : [];
+  if (diasFixos.length > 0 && !diasFixos.includes(Number(req.body.dia_vencimento))) {
+    return res.status(400).json({ error: `Escolha o dia de vencimento: ${diasFixos.map((d) => `dia ${d}`).join(', ')}.` });
   }
 
   // Campanha promocional da barbearia pra esse plano, se houver uma em vigor agora (recurso de
@@ -417,16 +424,52 @@ router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, v
   const campanha = await buscarCampanhaParaNovoCadastro(empresa.id, plano.id);
   const precoPrimeiroCiclo = precoDoCicloAssinatura(campanha, 1, plano.preco);
 
+  // Modo de dias fixos: reancora o ciclo no dia escolhido e decide a 1ª cobrança pela regra da
+  // empresa (ver services/vencimentoAssinatura.js). Sem dias fixos, segue o fluxo de sempre.
+  let planoVencimento = null;
+  if (diasFixos.length > 0) {
+    planoVencimento = planejarNovaAssinatura({
+      dia: Number(req.body.dia_vencimento),
+      regra: empresa.assinatura_primeira_cobranca || 'proporcional',
+      formaPagamento,
+      valorCiclo: precoPrimeiroCiclo
+    });
+    const { error: ancoraErr } = await supabase.from('usuarios').update({ assinante_desde: planoVencimento.assinanteDesde }).eq('id', usuario.id);
+    if (ancoraErr) return res.status(500).json({ error: 'Não foi possível definir o vencimento agora.' });
+    usuario.assinante_desde = planoVencimento.assinanteDesde;
+  }
+  const primeiraCobrancaEm = planoVencimento?.assinanteDesde || null;
+
   if (formaPagamento === 'pix') {
     try {
-      const { qr_code, qr_code_base64 } = await gerarCobrancaPix({ usuario, empresa, plano, valor: precoPrimeiroCiclo });
-      await enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode: qr_code, qrCodeBase64: qr_code_base64, valor: precoPrimeiroCiclo });
+      // Regra "só no dia fixo": nada a pagar agora, o plano já vale até a 1ª cobrança.
+      if (planoVencimento && !planoVencimento.cobrancaAgora) {
+        await supabase.from('usuarios').update({
+          assinatura_forma_pagamento: 'pix',
+          campanha_assinatura_id: campanha?.id || null,
+          ciclo_cobranca_atual: 1,
+          status_assinatura: 'em_dia'
+        }).eq('id', req.params.id);
+        return res.json({ sem_cobranca_agora: true, primeira_cobranca_em: primeiraCobrancaEm });
+      }
+
+      const cobrancaAgora = planoVencimento?.cobrancaAgora;
+      const valorAgora = cobrancaAgora ? cobrancaAgora.valor : precoPrimeiroCiclo;
+      const { qr_code, qr_code_base64 } = await gerarCobrancaPix({
+        usuario,
+        empresa,
+        plano,
+        valor: valorAgora,
+        // Fora do dia da âncora: a cobrança de hoje tem a data de hoje como referência.
+        ...(planoVencimento && planoVencimento.assinanteDesde !== hojeBrasilia() ? { cicloRef: hojeBrasilia(), ajusteVencimento: cobrancaAgora.ajuste } : {})
+      });
+      await enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode: qr_code, qrCodeBase64: qr_code_base64, valor: valorAgora });
       await supabase.from('usuarios').update({
         assinatura_forma_pagamento: 'pix',
         campanha_assinatura_id: campanha?.id || null,
         ciclo_cobranca_atual: 1
       }).eq('id', req.params.id);
-      res.json({ qr_code, qr_code_base64 });
+      res.json({ qr_code, qr_code_base64, valor: valorAgora, primeira_cobranca_em: primeiraCobrancaEm });
     } catch (err) {
       console.error('Erro ao gerar Pix da assinatura do cliente:', err);
       res.status(500).json({ error: 'Não foi possível gerar o Pix da assinatura agora. Tente novamente em instantes.' });
@@ -435,7 +478,9 @@ router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, v
   }
 
   try {
-    const checkoutUrl = await criarPreapprovalAssinatura({ usuario, empresa, plano, valor: precoPrimeiroCiclo });
+    // Dias fixos no cartão: o Mercado Pago começa a cobrar no dia escolhido e repete todo mês;
+    // o plano já vale desde a autorização do cartão.
+    const checkoutUrl = await criarPreapprovalAssinatura({ usuario, empresa, plano, valor: precoPrimeiroCiclo, dataAlvo: primeiraCobrancaEm ? `${primeiraCobrancaEm}T09:00:00-03:00` : undefined });
     await supabase.from('usuarios').update({ campanha_assinatura_id: campanha?.id || null, ciclo_cobranca_atual: 1 }).eq('id', req.params.id);
     res.json({ checkoutUrl });
   } catch (err) {
@@ -451,7 +496,7 @@ router.get('/usuario/:id/assinatura-cobranca/pix/status', verificarTokenCliente,
 
   const { data: cobranca, error } = await supabase
     .from('assinatura_cobrancas')
-    .select('id, empresa_id, mercadopago_payment_id, status')
+    .select('id, empresa_id, mercadopago_payment_id, status, ajuste_vencimento')
     .eq('usuario_id', req.params.id)
     .eq('forma_pagamento', 'pix')
     .order('criado_em', { ascending: false })
@@ -470,7 +515,8 @@ router.get('/usuario/:id/assinatura-cobranca/pix/status', verificarTokenCliente,
     if (pagamento.status === 'approved') {
       await supabase.from('assinatura_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString(), valor_liquido: valorLiquidoDoPagamento(pagamento) }).eq('id', cobranca.id);
       await marcarEmDia(req.params.id);
-      await avancarCicloAssinatura(req.params.id);
+      // Proporcional de ajuste até o dia fixo não é um ciclo (ver services/vencimentoAssinatura.js).
+      if (!cobranca.ajuste_vencimento) await avancarCicloAssinatura(req.params.id);
       registrarTaxaMarketplace({ pagamento, empresaId: cobranca.empresa_id, descricao: 'Mensalidade cliente final (Pix)' }).catch((err) => console.error('Erro ao registrar taxa de marketplace da mensalidade:', err));
       return res.json({ status: 'pago' });
     }
@@ -900,7 +946,7 @@ router.post('/webhooks/mercadopago', async (req, res) => {
     // payload: só marca pago depois de reconfirmar direto na API.
     const { data: cobranca } = await supabase
       .from('assinatura_cobrancas')
-      .select('id, usuario_id, empresa_id, status')
+      .select('id, usuario_id, empresa_id, status, ajuste_vencimento')
       .eq('mercadopago_payment_id', dataId)
       .maybeSingle();
 
@@ -914,7 +960,7 @@ router.post('/webhooks/mercadopago', async (req, res) => {
         if (pagamento.status === 'approved') {
           await supabase.from('assinatura_cobrancas').update({ status: 'pago', pago_em: new Date().toISOString(), valor_liquido: valorLiquidoDoPagamento(pagamento) }).eq('id', cobranca.id);
           await marcarEmDia(cobranca.usuario_id);
-          await avancarCicloAssinatura(cobranca.usuario_id);
+          if (!cobranca.ajuste_vencimento) await avancarCicloAssinatura(cobranca.usuario_id);
           registrarTaxaMarketplace({ pagamento, empresaId: cobranca.empresa_id, descricao: 'Mensalidade cliente final (Pix)' }).catch((err) => console.error('Erro ao registrar taxa de marketplace da mensalidade:', err));
         } else if (pagamento.status === 'rejected' || pagamento.status === 'cancelled') {
           await supabase.from('assinatura_cobrancas').update({ status: 'falhou' }).eq('id', cobranca.id);

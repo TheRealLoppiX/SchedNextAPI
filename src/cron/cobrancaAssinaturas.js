@@ -11,6 +11,71 @@ const {
 } = require('../services/cobrancaAssinatura');
 const { registrarTaxaMarketplace } = require('../services/receitaPlataforma');
 const { buscarCampanhaDoCliente, precoDoCiclo } = require('../services/precificacaoAssinatura');
+const { planejarTransicao } = require('../services/vencimentoAssinatura');
+
+// Migração pros dias fixos de vencimento agendada pra hoje (ver PUT /admin/assinatura-config em
+// routes/assinaturas.js): troca a âncora (assinante_desde) e gera a cobrança de transição pela
+// regra da empresa (ver services/vencimentoAssinatura.js). Roda ANTES da passada normal, que com
+// a âncora nova já não cobra o ciclo antigo hoje. Sem cobrança automática (pagamento na mão), só
+// troca a âncora: a transição fica com o admin.
+async function aplicarMigracoesDeVencimento(hoje) {
+  const { data: migrar, error } = await supabase
+    .from('usuarios')
+    .select('id, empresa_id, plano_id, nome_completo, email, telefone, assinante, assinante_desde, assinatura_forma_pagamento, ciclo_cobranca_atual, campanha_assinatura_id')
+    .not('vencimento_migrar_em', 'is', null)
+    .lte('vencimento_migrar_em', hoje);
+  if (error) return console.error('Erro ao buscar migrações de vencimento:', error);
+
+  for (const usuario of migrar || []) {
+    const limpar = { vencimento_migrar_em: null, vencimento_nova_ancora: null };
+    try {
+      const { data: empresa } = await supabase
+        .from('empresas')
+        .select('id, nome, mercadopago_access_token, whatsapp_phone_number_id, assinatura_modo_vencimento, assinatura_dias_vencimento, assinatura_primeira_cobranca')
+        .eq('id', usuario.empresa_id)
+        .maybeSingle();
+      const dias = (empresa?.assinatura_dias_vencimento || []).map(Number);
+      const { data: plano } = usuario.plano_id
+        ? await supabase.from('planos_assinatura').select('id, nome, preco').eq('id', usuario.plano_id).maybeSingle()
+        : { data: null };
+
+      // Deixou de ser assinante, empresa voltou pro modo normal ou já vence no dia certo.
+      if (!usuario.assinante || !plano || empresa?.assinatura_modo_vencimento !== 'dias_fixos' || dias.length === 0) {
+        await supabase.from('usuarios').update(limpar).eq('id', usuario.id);
+        continue;
+      }
+
+      const campanha = await buscarCampanhaDoCliente(usuario.campanha_assinatura_id);
+      const valorCiclo = precoDoCiclo(campanha, usuario.ciclo_cobranca_atual || 1, plano.preco);
+      const planoVencimento = planejarTransicao({
+        dataTransicao: hoje,
+        dias,
+        regra: empresa.assinatura_primeira_cobranca || 'proporcional',
+        formaPagamento: usuario.assinatura_forma_pagamento,
+        valorCiclo
+      });
+
+      await supabase.from('usuarios').update({ ...limpar, assinante_desde: planoVencimento.assinanteDesde }).eq('id', usuario.id);
+      console.log(`Vencimento de ${usuario.nome_completo} migrado pro dia fixo (nova âncora ${planoVencimento.assinanteDesde}).`);
+
+      // Âncora caiu hoje: a passada normal logo abaixo já cobra o ciclo.
+      if (!planoVencimento.cobrancaAgora || planoVencimento.assinanteDesde === hoje) continue;
+      if (usuario.assinatura_forma_pagamento !== 'pix' || !empresa.mercadopago_access_token) continue;
+
+      const { qr_code, qr_code_base64 } = await gerarCobrancaPix({
+        usuario: { ...usuario, assinante_desde: planoVencimento.assinanteDesde },
+        empresa,
+        plano,
+        valor: planoVencimento.cobrancaAgora.valor,
+        cicloRef: hoje,
+        ajusteVencimento: planoVencimento.cobrancaAgora.ajuste
+      });
+      await enviarNotificacaoCobrancaPix({ usuario, empresa, plano, qrCode: qr_code, qrCodeBase64: qr_code_base64, valor: planoVencimento.cobrancaAgora.valor });
+    } catch (err) {
+      console.error(`Erro ao migrar vencimento do cliente ${usuario.id}:`, err);
+    }
+  }
+}
 
 // Roda uma vez por dia: cobrança recorrente da assinatura do CLIENTE FINAL (mensalidade que ele
 // paga pra própria barbearia). Só considera quem tem assinatura_forma_pagamento configurada —
@@ -23,6 +88,8 @@ function iniciarCobrancaAssinaturas() {
     console.log('Verificando cobrança recorrente de assinaturas de clientes...');
 
     const hoje = new Date().toISOString().slice(0, 10);
+
+    await aplicarMigracoesDeVencimento(hoje);
 
     const { data: assinantes, error } = await supabase
       .from('usuarios')
