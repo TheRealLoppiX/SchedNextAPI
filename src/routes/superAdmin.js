@@ -263,18 +263,15 @@ router.post('/super-admin/leads-enterprise/:id/ativar-empresa', async (req, res)
   if (!lead) return res.status(404).json({ error: 'Lead não encontrado.' });
   if (!lead.empresa_id) return res.status(400).json({ error: 'Esse lead não está vinculado a uma empresa cadastrada.' });
 
-  const { data: planoEnterprise } = await supabase.from('planos_plataforma').select('id').eq('nome', 'Enterprise').maybeSingle();
-  if (!planoEnterprise) return res.status(500).json({ error: 'Plano Enterprise não encontrado.' });
-
-  const { error } = await supabase
-    .from('empresas')
-    .update({ plano_plataforma_id: planoEnterprise.id, status_assinatura: 'ativa', cancelamento_agendado: false })
-    .eq('id', lead.empresa_id);
-
-  if (error) return res.status(500).json({ error: 'Erro ao ativar o plano Enterprise pra essa empresa.' });
-
+  // Enterprise não tem preço fixo e todo plano pago é pago: em vez de ativar direto (antes a
+  // empresa ganhava o Enterprise sem cobrança nenhuma), o fechamento é um plano exclusivo com o
+  // valor negociado, que cobra a empresa ao salvar (ver routes/superAdminPlataforma.js).
   await supabase.from('leads_enterprise').update({ status: 'fechado' }).eq('id', req.params.id);
-  res.json({ success: true, message: 'Empresa ativada no plano Enterprise.' });
+  res.json({
+    success: true,
+    empresa_id: lead.empresa_id,
+    message: 'Lead fechado. Agora monte o plano exclusivo da empresa com o valor negociado: a cobrança é enviada ao salvar e o plano vale depois de pago.'
+  });
 });
 
 module.exports = router;

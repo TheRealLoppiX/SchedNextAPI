@@ -4,6 +4,8 @@ const validate = require('../middleware/validate');
 const transporter = require('../config/mailer');
 const { emailHtml } = require('../utils/emailTemplate');
 const { criarPagamentoBoleto } = require('../services/mercadopago');
+const { estaConfigurado, criarInstancia, obterCodigoPareamento, obterStatusConexao, removerInstancia } = require('../services/whatsapp/provider');
+const { CHAVE_INSTANCIA, NOME_INSTANCIA, obterInstanciaPlataforma } = require('../services/whatsappPlataforma');
 const {
   contaPagarSchema,
   contaPagarBaixaSchema,
@@ -12,7 +14,8 @@ const {
   contaReceberBoletoSchema,
   contaReceberEnviarCobrancaSchema,
   lancamentoEmMassaSchema,
-  plataformaConfiguracaoSchema
+  plataformaConfiguracaoSchema,
+  whatsappTesteSchema
 } = require('../schemas');
 
 const router = express.Router();
@@ -571,6 +574,59 @@ router.put('/super-admin/configuracoes', validate(plataformaConfiguracaoSchema),
     .single();
   if (error) return res.status(500).json({ error: 'Erro ao salvar configuração.' });
   res.json({ message: 'Configuração salva.', configuracao: data });
+});
+
+// --- WhatsApp próprio da SchedNext (cobrança/avisos às empresas, ver services/whatsappPlataforma.js).
+// Conexão por código de pareamento, igual à das empresas (routes/whatsappInstancia.js).
+router.get('/super-admin/whatsapp-plataforma', async (req, res) => {
+  if (!estaConfigurado()) return res.json({ disponivel: false, conectado: false });
+  const instancia = await obterInstanciaPlataforma();
+  if (!instancia) return res.json({ disponivel: true, conectado: false });
+  try {
+    const status = await obterStatusConexao(instancia);
+    res.json({ disponivel: true, instancia, conectado: status.state === 'open' });
+  } catch (err) {
+    res.json({ disponivel: true, instancia, conectado: false });
+  }
+});
+
+router.post('/super-admin/whatsapp-plataforma/codigo', validate(whatsappTesteSchema), async (req, res) => {
+  if (!estaConfigurado()) return res.status(503).json({ error: 'Integração de WhatsApp não está disponível no momento.' });
+
+  let numero = req.body.telefone.replace(/\D/g, '');
+  if (numero.length === 10 || numero.length === 11) numero = `55${numero}`;
+  if (numero.length < 12 || numero.length > 13) return res.status(400).json({ error: 'Informe o número do WhatsApp com DDD. Ex: (11) 91234-5678.' });
+
+  try {
+    let instancia = await obterInstanciaPlataforma();
+    if (!instancia) {
+      // qrcode: false de propósito, senão o pedido de código volta vazio (ver criarInstancia).
+      instancia = NOME_INSTANCIA;
+      await criarInstancia(instancia, { qrcode: false });
+      await supabase.from('plataforma_configuracoes').upsert({ chave: CHAVE_INSTANCIA, valor: instancia, atualizado_em: new Date().toISOString() }, { onConflict: 'chave' });
+    }
+    await supabase.from('plataforma_configuracoes').upsert({ chave: 'whatsapp_numero_cobranca', valor: numero, atualizado_em: new Date().toISOString() }, { onConflict: 'chave' });
+
+    const dados = await obterCodigoPareamento(instancia, numero);
+    if (!dados?.pairingCode) return res.status(409).json({ error: 'Não foi possível gerar o código agora. Se o WhatsApp já estiver conectado, não é preciso conectar de novo.' });
+    res.json({ codigo: dados.pairingCode });
+  } catch (err) {
+    console.error('Erro ao conectar o WhatsApp da plataforma:', err);
+    res.status(500).json({ error: err.message || 'Erro ao gerar o código de conexão.' });
+  }
+});
+
+router.post('/super-admin/whatsapp-plataforma/desconectar', async (req, res) => {
+  const instancia = await obterInstanciaPlataforma();
+  if (instancia) {
+    try {
+      await removerInstancia(instancia);
+    } catch (err) {
+      console.error('Erro ao remover a instância de WhatsApp da plataforma:', err);
+    }
+  }
+  await supabase.from('plataforma_configuracoes').delete().eq('chave', CHAVE_INSTANCIA);
+  res.json({ success: true, message: 'WhatsApp da SchedNext desconectado.' });
 });
 
 module.exports = router;

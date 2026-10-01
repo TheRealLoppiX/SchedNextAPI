@@ -4,6 +4,7 @@ const transporter = require('../config/mailer');
 const { emailHtml } = require('../utils/emailTemplate');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 const { paraConvencaoDoBanco, paraInstanteReal } = require('../utils/horarioBrasilia');
+const { empresaForaDoAr } = require('../utils/tenantContext');
 
 function iniciarLembretes() {
   let executando = false;
@@ -30,7 +31,7 @@ async function processarLembretes() {
 
     const { data: agendamentos, error } = await supabase
       .from('agendamentos')
-      .select('id, data_hora, usuario_id, usuarios!inner(email, nome_completo, telefone), barbeiros!inner(nome), empresas!inner(whatsapp_phone_number_id, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot))')
+      .select('id, data_hora, usuario_id, usuarios!inner(email, nome_completo, telefone), barbeiros!inner(nome), empresas!inner(whatsapp_phone_number_id, status_assinatura, excluida_em, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot))')
       .gte('data_hora', paraConvencaoDoBanco(agora).toISOString())
       .lte('data_hora', paraConvencaoDoBanco(limite).toISOString())
       .neq('status', 'cancelado')
@@ -39,6 +40,8 @@ async function processarLembretes() {
     if (error) return console.error('Erro no SQL do Cron:', error);
 
     for (const ag of agendamentos || []) {
+      // Empresa suspensa/excluída: nenhum lembrete sai (nem WhatsApp, nem e-mail).
+      if (empresaForaDoAr(ag.empresas)) continue;
       try {
         const dataAgendamentoBanco = new Date(ag.data_hora);
         const instanteReal = paraInstanteReal(ag.data_hora);

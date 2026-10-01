@@ -3,11 +3,11 @@ const supabase = require('../config/supabase');
 async function obterLimitesEmpresa(empresaId) {
   const { data } = await supabase
     .from('empresas')
-    .select('plano_plataforma:plano_plataforma_id(limite_profissionais, limite_agendamentos_mes, permite_multi_unidade, permite_api_publica, permite_ia, permite_relatorios_avancados, permite_dominio_customizado, permite_whatsapp_bot, permite_campanhas_assinatura, taxa_marketplace_percentual)')
+    .select('plano_plataforma:plano_plataforma_id(limite_profissionais, limite_agendamentos_mes, permite_multi_unidade, permite_api_publica, permite_ia, permite_relatorios_avancados, permite_dominio_customizado, permite_whatsapp_bot, permite_campanhas_assinatura, permite_relatorio_produtos, taxa_marketplace_percentual)')
     .eq('id', empresaId)
     .maybeSingle();
 
-  return data?.plano_plataforma || { limite_profissionais: null, limite_agendamentos_mes: null, permite_multi_unidade: false, permite_api_publica: false, permite_ia: false, permite_relatorios_avancados: false, permite_dominio_customizado: false, permite_whatsapp_bot: false, permite_campanhas_assinatura: false, taxa_marketplace_percentual: 0 };
+  return data?.plano_plataforma || { limite_profissionais: null, limite_agendamentos_mes: null, permite_multi_unidade: false, permite_api_publica: false, permite_ia: false, permite_relatorios_avancados: false, permite_dominio_customizado: false, permite_whatsapp_bot: false, permite_campanhas_assinatura: false, permite_relatorio_produtos: false, taxa_marketplace_percentual: 0 };
 }
 
 // Multi-unidade e API pública são recursos do plano Enterprise (ver §3 do plano de plataforma).
@@ -43,6 +43,12 @@ async function permiteWhatsappBot(empresaId) {
 async function permiteCampanhasAssinatura(empresaId) {
   const { permite_campanhas_assinatura } = await obterLimitesEmpresa(empresaId);
   return !!permite_campanhas_assinatura;
+}
+
+// Relatório de receita líquida por produto vendido (ver routes/estoque.js), do Profissional pra cima.
+async function permiteRelatorioProdutos(empresaId) {
+  const { permite_relatorio_produtos } = await obterLimitesEmpresa(empresaId);
+  return !!permite_relatorio_produtos;
 }
 
 // Fatia que a SchedNext fica de cada Pix cobrado via Mercado Pago (application_fee), definida
@@ -148,5 +154,6 @@ module.exports = {
   permiteDominioCustomizado,
   permiteWhatsappBot,
   permiteCampanhasAssinatura,
+  permiteRelatorioProdutos,
   obterTaxaMarketplace
 };

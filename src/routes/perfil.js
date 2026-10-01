@@ -3,7 +3,7 @@ const supabase = require('../config/supabase');
 const verificarTokenCliente = require('../middleware/clienteAuth');
 const validate = require('../middleware/validate');
 const { perfilAtualizarSchema, avaliarSchema } = require('../schemas');
-const { calcularInicioCiclo, calcularFimCiclo, obterUsoServicos, obterAgendamentosPendentesPorServico } = require('../utils/limitesAssinatura');
+const { calcularInicioCiclo, calcularFimCiclo, calcularProximaCobranca, obterUsoServicos, obterAgendamentosPendentesPorServico, obterDiasSemanaPlano } = require('../utils/limitesAssinatura');
 const { paraInstanteReal } = require('../utils/horarioBrasilia');
 const { contarAtendimentosNaAcao } = require('../services/fidelidade');
 
@@ -222,11 +222,18 @@ router.get('/usuario/:id/assinante', verificarTokenCliente, async (req, res) => 
 
   const { data: usuario, error } = await supabase
     .from('usuarios')
-    .select('assinante, plano_id, assinante_desde, status_assinatura, assinatura_forma_pagamento')
+    .select('empresa_id, assinante, plano_id, assinante_desde, status_assinatura, assinatura_forma_pagamento')
     .eq('id', req.params.id)
     .maybeSingle();
 
   if (error || !usuario) return res.json({ assinante: false, servicos_ids: [], restantes: {}, pendentes: {} });
+
+  // Dias da semana do plano (tela de agendamento mostra "incluso" só neles) e dias de vencimento
+  // liberados pela empresa (o cliente escolhe um ao ativar a cobrança automática).
+  const [diasSemana, { data: empresaCfg }] = await Promise.all([
+    obterDiasSemanaPlano(usuario.plano_id),
+    supabase.from('empresas').select('assinatura_modo_vencimento, assinatura_dias_vencimento').eq('id', usuario.empresa_id).maybeSingle()
+  ]);
 
   let servicosIds = [];
   let restantes = {};
@@ -261,6 +268,12 @@ router.get('/usuario/:id/assinante', verificarTokenCliente, async (req, res) => 
     status_assinatura: usuario.status_assinatura,
     assinatura_forma_pagamento: usuario.assinatura_forma_pagamento,
     servicos_ids: servicosIds,
+    dias_semana: diasSemana,
+    proxima_cobranca: usuario.assinante_desde ? calcularProximaCobranca(usuario.assinante_desde) : null,
+    vencimento: {
+      modo: empresaCfg?.assinatura_modo_vencimento || 'data_assinatura',
+      dias: empresaCfg?.assinatura_modo_vencimento === 'dias_fixos' ? (empresaCfg.assinatura_dias_vencimento || []) : []
+    },
     pendentes,
     restantes
   });

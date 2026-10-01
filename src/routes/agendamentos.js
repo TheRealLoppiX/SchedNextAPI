@@ -4,6 +4,7 @@ const bcrypt = require('bcrypt');
 const supabase = require('../config/supabase');
 const transporter = require('../config/mailer');
 const { emailHtml } = require('../utils/emailTemplate');
+const { resolverEmpresaPorSlug, respostaEmpresaIndisponivel } = require('../utils/tenantContext');
 const validate = require('../middleware/validate');
 const verificarTokenCliente = require('../middleware/clienteAuth');
 const {
@@ -23,7 +24,7 @@ const {
   obterTaxaMarketplace
 } = require('../utils/limitesPlano');
 const { calcularValorComDescontoAssinante } = require('../utils/valorAssinante');
-const { calcularInicioCiclo, obterUsoServicos } = require('../utils/limitesAssinatura');
+const { calcularInicioCiclo, obterUsoServicos, planoValeNoDia, obterDiasSemanaPlano } = require('../utils/limitesAssinatura');
 const { verificarEDispararPremioFidelidade, obterPremioDisponivel, registrarResgatePremio } = require('../services/fidelidade');
 const { enviarMensagem } = require('../services/whatsapp/provider');
 const { calcularValorFinalCheckout } = require('../services/pagamentoAgendamento');
@@ -58,11 +59,8 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
     return res.status(400).json({ error: 'Você já possui um agendamento para este dia.' });
   }
 
-  const { data: emp, error: empErr } = await supabase
-    .from('empresas')
-    .select('id, nome, whatsapp_phone_number_id, mercadopago_access_token')
-    .eq('slug', empresa_slug)
-    .maybeSingle();
+  const { empresa: emp, error: empErr, indisponivel } = await resolverEmpresaPorSlug(empresa_slug, 'id, nome, whatsapp_phone_number_id, mercadopago_access_token');
+  if (indisponivel) return respostaEmpresaIndisponivel(res);
 
   if (empErr || !emp) return res.status(404).json({ error: 'Empresa não encontrada' });
 
@@ -95,7 +93,7 @@ router.post('/agendar', verificarTokenCliente, validate(agendarSchema), async (r
   // Desconta os serviços que já estão inclusos no plano de assinatura do cliente (se ele for
   // assinante) — antes isso somava o preço cheio de tudo, cobrando de novo o que já tinha sido
   // pago na mensalidade.
-  const valorTotal = await calcularValorComDescontoAssinante(usuario_id, servicosInfo);
+  const valorTotal = await calcularValorComDescontoAssinante(usuario_id, servicosInfo, data_hora);
 
   const { data: novoAgendamento, error: insErr } = await supabase
     .from('agendamentos')
@@ -629,13 +627,17 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
       });
     }
 
-    // 5. Baixa de estoque dos produtos vendidos
+    // 5. Baixa de estoque dos produtos vendidos + registro da venda (preço e custo congelados
+    // agora, pro relatório de receita líquida por produto em routes/estoque.js). O produto dado
+    // de cortesia pela ação de fidelidade sai com preço zero em 1 unidade.
     if (produtos_vendidos && produtos_vendidos.length > 0) {
+      let cortesiaPendente = premio?.tipo === 'produto' ? Number(premio.produto?.id) : null;
       for (const produto of produtos_vendidos) {
+        const quantidade = parseInt(produto.quantidade || 1, 10);
         try {
           const { data: produtoAtual } = await supabase
             .from('produtos')
-            .select('quantidade')
+            .select('quantidade, valor, custo')
             .eq('id', produto.id)
             .eq('empresa_id', agAtual.empresa_id)
             .maybeSingle();
@@ -643,10 +645,31 @@ router.post('/admin/finalizar-servico-checkout', validate(finalizarCheckoutSchem
           if (produtoAtual) {
             await supabase
               .from('produtos')
-              .update({ quantidade: produtoAtual.quantidade - produto.quantidade })
+              .update({ quantidade: produtoAtual.quantidade - quantidade })
               .eq('id', produto.id)
               .eq('empresa_id', agAtual.empresa_id);
-            console.log(`Baixa de estoque: Produto ID ${produto.id} | Qtd: -${produto.quantidade}`);
+
+            const custo = produtoAtual.custo != null ? Number(produtoAtual.custo) : null;
+            const base = { empresa_id: agAtual.empresa_id, produto_id: Number(produto.id), agendamento_id: Number(agendamento_id), custo_unitario: custo };
+            const linhas = [];
+            let pagas = quantidade;
+            if (cortesiaPendente === Number(produto.id)) {
+              linhas.push({ ...base, quantidade: 1, preco_unitario: 0 });
+              pagas -= 1;
+              cortesiaPendente = null;
+            }
+            if (pagas > 0) linhas.push({ ...base, quantidade: pagas, preco_unitario: Number(produtoAtual.valor) || 0 });
+            const { error: vendaErr } = await supabase.from('produto_vendas').insert(linhas);
+            if (vendaErr) console.error('Erro ao registrar venda de produto:', vendaErr);
+
+            const { error: movErr } = await supabase.from('estoque_movimentacoes').insert({
+              produto_id: Number(produto.id),
+              usuario_nome: 'Caixa',
+              quantidade,
+              tipo: 'VENDA',
+              justificativa: `Venda no atendimento #${agendamento_id}`
+            });
+            if (movErr) console.error('Erro ao registrar saída de estoque da venda:', movErr);
           }
         } catch (errEstoque) {
           console.error('Erro ao baixar estoque:', errEstoque);
@@ -812,7 +835,8 @@ router.post('/admin/agendar-encaixe', validate(agendarEncaixeSchema), async (req
     const valorTotal = servicos && servicos.length > 0
       ? await calcularValorComDescontoAssinante(
           usuario_id,
-          servicos.map((s) => ({ id: s.id, valor: parseFloat(String(s.preco || s.valor || '0').replace(',', '.')) }))
+          servicos.map((s) => ({ id: s.id, valor: parseFloat(String(s.preco || s.valor || '0').replace(',', '.')) })),
+          data_hora
         )
       : 0;
 
@@ -901,7 +925,7 @@ router.get('/admin/agendamento-usuario/:id', async (req, res) => {
   try {
     const { data: ag } = await supabase
       .from('agendamentos')
-      .select('usuario_id, valor_total, empresa_id, unidade_id, usuarios(id, assinante, plano_id, assinante_desde, status_assinatura)')
+      .select('usuario_id, valor_total, data_hora, empresa_id, unidade_id, usuarios(id, assinante, plano_id, assinante_desde, status_assinatura)')
       .eq('id', req.params.id)
       .maybeSingle();
 
@@ -931,6 +955,19 @@ router.get('/admin/agendamento-usuario/:id', async (req, res) => {
         usuario_id: ag.usuario_id,
         assinante: false,
         inadimplente: usuario.status_assinatura === 'inadimplente',
+        servicos_ids: [],
+        servicos_agendados_ids: servicosAgendadosIds,
+        restantes: {},
+        premio_fidelidade: premioFidelidade
+      });
+    }
+
+    // Atendimento num dia da semana fora do plano: o caixa trata como cliente comum.
+    if (!planoValeNoDia(await obterDiasSemanaPlano(usuario.plano_id), ag.data_hora)) {
+      return res.json({
+        usuario_id: ag.usuario_id,
+        assinante: false,
+        fora_do_dia_plano: true,
         servicos_ids: [],
         servicos_agendados_ids: servicosAgendadosIds,
         restantes: {},

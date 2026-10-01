@@ -20,7 +20,7 @@ const { obterPremioDisponivel, calcularDescontoPremio } = require('./fidelidade'
 async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId, produtosVendidos, servicosAdicionais, registrarConsumo = false, aplicarPremio = false }) {
   const { data: agAtual, error: agErr } = await supabase
     .from('agendamentos')
-    .select('valor_total, empresa_id, usuario_id, status, unidade_id, pagamento_status, mercadopago_payment_id')
+    .select('valor_total, data_hora, empresa_id, usuario_id, status, unidade_id, pagamento_status, mercadopago_payment_id')
     .eq('id', agendamentoId)
     .maybeSingle();
   if (agErr) throw agErr;
@@ -55,7 +55,7 @@ async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId,
     ({ valorBase, servicosCobertos, servicosCobrados } = await calcularValorComLimiteAssinante(
       agAtual.usuario_id,
       servicosParaCalculo,
-      { registrarConsumo }
+      { registrarConsumo, dataHora: agAtual.data_hora }
     ));
   } else {
     // Agendamentos sem serviço vinculado (ex: encaixe legado que só grava valor_total direto)
@@ -84,8 +84,16 @@ async function calcularValorFinalCheckout({ agendamentoId, empresaId, unidadeId,
       .from('produtos')
       .select('id, valor')
       .in('id', idsProdutos)
-      .eq('empresa_id', agAtual.empresa_id);
+      .eq('empresa_id', agAtual.empresa_id)
+      .eq('tipo', 'venda')
+      .is('excluido_em', null);
     if (errProdutosReais) throw errProdutosReais;
+    // Produto de uso do estabelecimento (ou de outra empresa) não entra no caixa.
+    if ((produtosReais || []).length !== new Set(idsProdutos.map(Number)).size) {
+      const erro = new Error('Só produtos de venda podem entrar no caixa.');
+      erro.statusHttp = 400;
+      throw erro;
+    }
     precoPorProduto = Object.fromEntries((produtosReais || []).map((p) => [p.id, Number(p.valor) || 0]));
     valorProdutos = produtosVendidos.reduce((acc, p) => {
       const qtd = parseInt(p.quantidade || 1, 10);

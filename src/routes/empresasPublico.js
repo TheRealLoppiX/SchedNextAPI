@@ -33,6 +33,8 @@ router.get('/planos-plataforma', async (req, res) => {
     .select('*')
     .eq('ativo', true)
     .eq('publico', true)
+    // Plano exclusivo de uma empresa nunca vai pro site, mesmo marcado como visível.
+    .is('empresa_exclusiva_id', null)
     .order('id');
 
   if (error) return res.status(500).json(error);

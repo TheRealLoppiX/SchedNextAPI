@@ -23,6 +23,24 @@ function calcularInicioCiclo(assinanteDesde, referencia = new Date()) {
   return cicloInicio < inicio ? inicio.toISOString().slice(0, 10) : cicloInicio.toISOString().slice(0, 10);
 }
 
+// Dias da semana do plano (planos_assinatura.dias_semana, 0 = domingo ... 6 = sábado; null =
+// todos). Fora deles o assinante paga como cliente comum. data_hora no banco é o horário de
+// parede de Brasília (ver utils/horarioBrasilia.js), então a parte da data já é a data local.
+function diaDaSemana(dataHora) {
+  return new Date(`${String(dataHora).slice(0, 10)}T12:00:00Z`).getUTCDay();
+}
+
+function planoValeNoDia(diasSemana, dataHora) {
+  if (!Array.isArray(diasSemana) || diasSemana.length === 0 || !dataHora) return true;
+  return diasSemana.map(Number).includes(diaDaSemana(dataHora));
+}
+
+async function obterDiasSemanaPlano(planoId) {
+  if (!planoId) return null;
+  const { data } = await supabase.from('planos_assinatura').select('dias_semana').eq('id', planoId).maybeSingle();
+  return data?.dias_semana || null;
+}
+
 // Clampa pro ultimo dia do mes quando o mes de referencia e mais curto que o dia-ancora
 // (ex.: assinou dia 31 -> em fevereiro o ciclo comeca no dia 28/29).
 function diaClampado(ano, mes, dia) {
@@ -128,7 +146,7 @@ async function registrarUsoServico(usuarioId, servicoId, cicloRef, limite) {
 // outros chamadores de calcularValorComDescontoAssinante (/agendar, /admin/agendar-encaixe) só
 // mostram uma estimativa no momento de agendar — a cobrança de verdade sempre passa pelo
 // checkout, que é o único lugar que precisa (e deve) saber sobre limite/consumo.
-async function calcularValorComLimiteAssinante(usuarioId, servicos, { registrarConsumo = false } = {}) {
+async function calcularValorComLimiteAssinante(usuarioId, servicos, { registrarConsumo = false, dataHora = null } = {}) {
   const valorCheio = servicos.reduce((acc, s) => acc + Number(s.valor || 0), 0);
   const resultado = { valorBase: valorCheio, servicosCobertos: [], servicosCobrados: servicos.map((s) => s.id) };
   if (!usuarioId) return resultado;
@@ -148,6 +166,9 @@ async function calcularValorComLimiteAssinante(usuarioId, servicos, { registrarC
   // (manual ou pagamento confirmado) — sem essa allowlist ele ganharia o preço de assinante
   // antes de qualquer cobrança de verdade acontecer.
   if (!usuario?.assinante || !usuario.plano_id || usuario.status_assinatura !== 'em_dia') return resultado;
+
+  // Dia fora do plano: atendimento cobrado normal e nenhuma cota consumida.
+  if (!planoValeNoDia(await obterDiasSemanaPlano(usuario.plano_id), dataHora)) return resultado;
 
   const idsServicos = servicos.map((s) => s.id);
   const { data: psRows } = await supabase
@@ -206,5 +227,7 @@ module.exports = {
   obterUsoServicos,
   obterAgendamentosPendentesPorServico,
   registrarUsoServico,
-  calcularValorComLimiteAssinante
+  calcularValorComLimiteAssinante,
+  planoValeNoDia,
+  obterDiasSemanaPlano
 };

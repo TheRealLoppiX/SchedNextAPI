@@ -144,10 +144,33 @@ const empresaAtualizarSchema = z.object({
 
 // --- estoque.js ---
 
+// Campos opcionais chegam do formulário como '' quando ficam em branco.
+const vazioParaNull = (v) => (v === '' || v === undefined ? null : v);
+const dinheiroOpcional = z.preprocess(vazioParaNull, z.coerce.number().min(0, 'Valor não pode ser negativo').nullable());
+const dataOpcional = z.preprocess(vazioParaNull, z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida').nullable());
+
+// tipo 'venda' aparece no caixa e exige preço de venda; 'uso' é consumo interno do
+// estabelecimento, sem preço de venda. codigo_barras vazio = o sistema gera um código interno.
 const estoqueProdutoSchema = z.object({
   nome: z.string().trim().min(1, 'Nome do produto é obrigatório').max(150),
-  valor: z.coerce.number().min(0, 'Valor não pode ser negativo'),
-  quantidade: z.coerce.number().int('Quantidade deve ser um número inteiro')
+  tipo: z.enum(['venda', 'uso']).optional().default('venda'),
+  codigo_barras: z.preprocess(vazioParaNull, z.string().trim().regex(/^[0-9A-Za-z-]{3,40}$/, 'Código de barras inválido').nullable()).optional(),
+  valor: dinheiroOpcional.optional(),
+  custo: dinheiroOpcional.optional(),
+  data_compra: dataOpcional.optional(),
+  quantidade: z.coerce.number().int('Quantidade deve ser um número inteiro').min(0, 'Quantidade não pode ser negativa').optional().default(0),
+  // Operador do estoque logado, só pro histórico do estoque inicial.
+  usuario_nome: z.string().trim().max(150).optional()
+}).superRefine((d, ctx) => {
+  if (d.tipo === 'venda' && (d.valor === null || d.valor === undefined)) {
+    ctx.addIssue({ code: 'custom', path: ['valor'], message: 'Informe o preço de venda.' });
+  }
+});
+
+// Excluir produto do estoque exige motivo (fica no histórico de auditoria, ver routes/estoque.js).
+const estoqueExcluirSchema = z.object({
+  justificativa: z.string().trim().min(5, 'Explique o motivo da exclusão (mínimo 5 caracteres).').max(255),
+  usuario_nome: z.string().trim().max(150).optional()
 });
 
 const estoqueLoginSchema = z.object({
@@ -165,8 +188,11 @@ const estoqueMovimentarSchema = z.object({
   produto_id: idLike,
   usuario_nome: z.string().trim().min(1),
   quantidade: z.coerce.number().int().positive('Quantidade deve ser maior que zero'),
-  tipo: z.enum(['ADICIONAR', 'REMOVER']),
-  justificativa: textoOpcionalNullable
+  // RETIRAR é o nome antigo (banco veio do MySQL), tratado como REMOVER em routes/estoque.js.
+  tipo: z.enum(['ADICIONAR', 'REMOVER', 'RETIRAR']),
+  justificativa: textoOpcionalNullable,
+  custo_unitario: dinheiroOpcional.optional(),
+  data_compra: dataOpcional.optional()
 });
 
 // --- servicos.js (rotas de gestão) ---
@@ -365,11 +391,28 @@ const assinaturaPlanoSchema = z.object({
   servicos: z.array(z.object({
     id: idLike,
     limite_mensal: z.coerce.number().int().positive().optional().nullable()
-  })).optional()
+  })).optional(),
+  // Dias da semana em que o plano vale (0 = domingo ... 6 = sábado). Vazio/null = todos os dias.
+  dias_semana: z.array(z.coerce.number().int().min(0).max(6)).max(7).optional().nullable()
+    .transform((d) => (d && d.length > 0 && d.length < 7 ? [...new Set(d)].sort() : null))
 });
 
 const clientePlanoSchema = z.object({
   plano_id: idLikeNullable
+});
+
+// Vencimento das mensalidades (ver services/vencimentoAssinatura.js). Dias de 1 a 28 pra todo mês
+// ter o dia. migrar_atuais aplica os dias fixos em quem já é assinante.
+const assinaturaConfigSchema = z.object({
+  modo_vencimento: z.enum(['data_assinatura', 'dias_fixos']),
+  dias_vencimento: z.array(z.coerce.number().int().min(1, 'Dia inválido').max(28, 'Use dias de 1 a 28')).max(28).optional().default([])
+    .transform((d) => [...new Set(d)].sort((a, b) => a - b)),
+  primeira_cobranca: z.enum(['proporcional', 'cheia_ciclo_longo', 'no_dia_fixo']).optional().default('proporcional'),
+  migrar_atuais: z.boolean().optional().default(false)
+}).superRefine((d, ctx) => {
+  if (d.modo_vencimento === 'dias_fixos' && d.dias_vencimento.length === 0) {
+    ctx.addIssue({ code: 'custom', path: ['dias_vencimento'], message: 'Escolha ao menos um dia de vencimento.' });
+  }
 });
 
 // --- pagamentos.js ---
@@ -414,7 +457,9 @@ const mercadoPagoPixSchema = z.object({
 const assinarAssinaturaSchema = z.object({
   // 'cartao' (padrão, mantém o fluxo de preapproval de sempre) ou 'pix' (gera uma cobrança Pix
   // avulsa pro ciclo atual — Mercado Pago não tem Pix recorrente, ver cron/cobrancaAssinaturas.js).
-  forma_pagamento: z.enum(['cartao', 'pix']).optional()
+  forma_pagamento: z.enum(['cartao', 'pix']).optional(),
+  // Só no modo de dias fixos: em qual dos dias liberados pela empresa o cliente quer pagar.
+  dia_vencimento: z.coerce.number().int().min(1).max(28).optional()
 });
 
 // --- cobrancaAssinatura.js ---
@@ -697,6 +742,8 @@ const planoPlataformaSchema = z.object({
   // Campanhas promocionais de preço escalonado pra assinatura de cliente final (ver
   // utils/limitesPlano.js:permiteCampanhasAssinatura, routes/campanhasAssinatura.js).
   permite_campanhas_assinatura: z.boolean().optional().default(false),
+  // Relatório de receita líquida por produto vendido (ver routes/estoque.js).
+  permite_relatorio_produtos: z.boolean().optional().default(false),
   // Fatia (application_fee) que a SchedNext fica de cada Pix cobrado via Mercado Pago nesse
   // plano — ver utils/limitesPlano.js (obterTaxaMarketplace) e routes/mercadopago.js.
   taxa_marketplace_percentual: z.coerce.number().min(0, 'Taxa não pode ser negativa').max(100, 'Taxa não pode passar de 100%').optional().default(0),
@@ -709,6 +756,18 @@ const planoPlataformaSchema = z.object({
 });
 
 const planoAtivoSchema = z.object({ ativo: z.boolean() });
+
+// Plano exclusivo de uma empresa (ver routes/superAdminPlataforma.js): mesmas regras de um plano
+// normal, sem ativo/publico (sempre oculto do site), mais a campanha de preço por ciclo própria
+// (vazia = sem campanha) e a opção de já aplicar o plano na empresa.
+const planoExclusivoSchema = planoPlataformaSchema.omit({ ativo: true, publico: true }).extend({
+  precos_por_ciclo: z.array(z.object({
+    numero_ciclo: z.coerce.number().int().positive('Ciclo deve ser maior que zero'),
+    valor: z.coerce.number().min(0, 'Valor não pode ser negativo')
+  })).optional().default([]),
+  aplicar_agora: z.boolean().optional().default(false),
+  gerar_cobranca: z.boolean().optional().default(false)
+});
 
 // Área de teste de planos: aplica um plano (mesmo desligado/oculto) numa empresa escolhida por
 // alguns dias; ao acabar, ela volta ao plano anterior (cron/assinaturas.js).
@@ -742,6 +801,7 @@ module.exports = {
   estoqueProdutoSchema,
   estoqueLoginSchema,
   estoqueCriarSubloginSchema,
+  estoqueExcluirSchema,
   estoqueMovimentarSchema,
   servicoGestaoSchema,
   barbeiroCriarSchema,
@@ -773,6 +833,7 @@ module.exports = {
   assinarAssinaturaSchema,
   baixaManualAssinaturaSchema,
   vencimentoAssinaturaSchema,
+  assinaturaConfigSchema,
   apiPublicaAgendamentoSchema,
   whatsappTesteSchema,
   whatsappBotConfigSchema,
@@ -798,6 +859,7 @@ module.exports = {
   superAdminEditarSchema,
   planoPlataformaSchema,
   planoAtivoSchema,
+  planoExclusivoSchema,
   planoTesteSchema,
   chaveAtivacaoCriarSchema,
   chaveAtivacaoResgatarSchema
