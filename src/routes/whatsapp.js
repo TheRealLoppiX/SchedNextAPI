@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const express = require('express');
 const supabase = require('../config/supabase');
 const { processarMensagem } = require('../services/whatsapp/bot');
-const { enviarMensagem } = require('../services/whatsapp/provider');
+const { enviarMensagem, contatoSalvo } = require('../services/whatsapp/provider');
 const { liberarOuAvisarForaDoHorario } = require('../services/whatsapp/horarioBot');
 const { whatsappWebhookLimiter } = require('../middleware/rateLimiters');
 
@@ -64,11 +64,18 @@ router.post('/whatsapp/webhook', whatsappWebhookLimiter, async (req, res) => {
 
     const { data: empresa } = await supabase
       .from('empresas')
-      .select('id, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot)')
+      .select('id, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot), whatsapp_bot_ignorar_salvos, whatsapp_bot_numeros_bloqueados')
       .eq('whatsapp_phone_number_id', instancia)
       .maybeSingle();
 
     if (!empresa || !empresa.plano_plataforma?.permite_whatsapp_bot) return;
+
+    // Filtro de contatos pessoais (configurável em /admin/whatsapp, ver routes/whatsappInstancia.js)
+    // — de propósito antes até da checagem de horário: um número bloqueado/pessoal não deve nem
+    // receber o aviso de "fora do horário", só silêncio total.
+    const numerosBloqueados = (empresa.whatsapp_bot_numeros_bloqueados || '').split(',').filter(Boolean);
+    if (numerosBloqueados.includes(telefone)) return;
+    if (empresa.whatsapp_bot_ignorar_salvos && (await contatoSalvo(instancia, telefone))) return;
 
     // Horário de funcionamento do bot (opcional, ver services/whatsapp/horarioBot.js): fora dele,
     // avisa uma vez por período fechado e não passa a mensagem pro bot.

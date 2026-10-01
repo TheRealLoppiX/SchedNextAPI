@@ -4,6 +4,7 @@ const validate = require('../middleware/validate');
 const { whatsappTesteSchema, whatsappBotConfigSchema } = require('../schemas');
 const { permiteWhatsappBot, permiteIA } = require('../utils/limitesPlano');
 const { estaConfigurado, criarInstancia, obterQrCode, obterCodigoPareamento, obterStatusConexao, removerInstancia, enviarMensagem } = require('../services/whatsapp/provider');
+const { normalizarTelefoneBR } = require('../utils/telefone');
 const { obterHorarioBot, MENSAGEM_PADRAO } = require('../services/whatsapp/horarioBot');
 const { MODO_LIVRE_BOT_DISPONIVEL, PERSONALIDADE_BOT_DISPONIVEL } = require('../config/featureFlags');
 
@@ -23,7 +24,7 @@ router.get('/admin/whatsapp', async (req, res) => {
 
   const { data: empresa, error } = await supabase
     .from('empresas')
-    .select('whatsapp_phone_number_id, whatsapp_bot_modo, whatsapp_bot_nome, whatsapp_bot_personalidade, whatsapp_bot_boas_vindas, whatsapp_bot_temperatura, whatsapp_resumo_profissionais_ativo, whatsapp_resumo_profissionais_horario')
+    .select('whatsapp_phone_number_id, whatsapp_bot_modo, whatsapp_bot_nome, whatsapp_bot_personalidade, whatsapp_bot_boas_vindas, whatsapp_bot_temperatura, whatsapp_resumo_profissionais_ativo, whatsapp_resumo_profissionais_horario, whatsapp_bot_ignorar_salvos, whatsapp_bot_numeros_bloqueados')
     .eq('id', empresa_id)
     .maybeSingle();
 
@@ -44,7 +45,9 @@ router.get('/admin/whatsapp', async (req, res) => {
     boasVindas: empresa?.whatsapp_bot_boas_vindas || '',
     temperatura: empresa?.whatsapp_bot_temperatura != null ? Number(empresa.whatsapp_bot_temperatura) : 0.6,
     resumoProfissionaisAtivo: !!empresa?.whatsapp_resumo_profissionais_ativo,
-    resumoProfissionaisHorario: empresa?.whatsapp_resumo_profissionais_horario || '08:00'
+    resumoProfissionaisHorario: empresa?.whatsapp_resumo_profissionais_horario || '08:00',
+    ignorarContatosSalvos: !!empresa?.whatsapp_bot_ignorar_salvos,
+    numerosBloqueados: (empresa?.whatsapp_bot_numeros_bloqueados || '').split(',').map((n) => n.trim()).filter(Boolean)
   };
   // Consulta separada e tolerante a falha (ver obterHorarioBot): sem as colunas no banco ainda,
   // a tela continua abrindo e mostra o bot como 24h.
@@ -81,7 +84,7 @@ router.put('/admin/whatsapp/bot-config', validate(whatsappBotConfigSchema), asyn
   if (!(await permiteWhatsappBot(empresa_id))) return res.status(403).json({ error: 'Recurso não disponível no seu plano.' });
 
   const iaLiberada = await permiteIA(empresa_id);
-  const { modo, nome, personalidade, boas_vindas, temperatura, resumo_profissionais_ativo, resumo_profissionais_horario, horario_ativo, horario_inicio, horario_fim, horario_dias, mensagem_fora } = req.body;
+  const { modo, nome, personalidade, boas_vindas, temperatura, resumo_profissionais_ativo, resumo_profissionais_horario, horario_ativo, horario_inicio, horario_fim, horario_dias, mensagem_fora, ignorar_contatos_salvos, numeros_bloqueados } = req.body;
 
   const atualizacao = { whatsapp_bot_boas_vindas: boas_vindas || null };
   if (resumo_profissionais_ativo !== undefined) atualizacao.whatsapp_resumo_profissionais_ativo = resumo_profissionais_ativo;
@@ -91,6 +94,17 @@ router.put('/admin/whatsapp/bot-config', validate(whatsappBotConfigSchema), asyn
   if (horario_fim !== undefined) atualizacao.whatsapp_bot_horario_fim = horario_fim;
   if (horario_dias !== undefined) atualizacao.whatsapp_bot_horario_dias = [...new Set(horario_dias)].sort().join(',');
   if (mensagem_fora !== undefined) atualizacao.whatsapp_bot_mensagem_fora = mensagem_fora || null;
+  if (ignorar_contatos_salvos !== undefined) atualizacao.whatsapp_bot_ignorar_salvos = ignorar_contatos_salvos;
+  if (numeros_bloqueados !== undefined) {
+    // Normalizado pro mesmo formato do `telefone` no webhook (DDI 55 + DDD + número, só dígitos,
+    // ver routes/whatsapp.js) — comparar formatos diferentes nunca bateria.
+    const limpos = [...new Set(
+      numeros_bloqueados
+        .map((n) => `55${normalizarTelefoneBR(n)}`)
+        .filter((n) => n.length === 12 || n.length === 13)
+    )];
+    atualizacao.whatsapp_bot_numeros_bloqueados = limpos.length ? limpos.join(',') : null;
+  }
 
   // Sem IA no plano, essas colunas ficam travadas nos valores padrão — mesmo que o front não
   // devesse mandar isso pra uma empresa sem o recurso, a rota não confia só na UI.

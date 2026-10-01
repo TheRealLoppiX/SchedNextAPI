@@ -462,7 +462,10 @@ const whatsappBotConfigSchema = z.object({
   horario_inicio: z.string().trim().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Horário inválido (use HH:MM)').optional(),
   horario_fim: z.string().trim().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Horário inválido (use HH:MM)').optional(),
   horario_dias: z.array(z.coerce.number().int().min(0).max(6)).min(1, 'Escolha pelo menos um dia').optional(),
-  mensagem_fora: z.string().trim().max(500).nullable().optional()
+  mensagem_fora: z.string().trim().max(500).nullable().optional(),
+  // Filtro de contatos pessoais (ver routes/whatsapp.js e services/whatsapp/provider.js).
+  ignorar_contatos_salvos: z.boolean().optional(),
+  numeros_bloqueados: z.array(z.string().trim().max(20)).max(200).optional()
 });
 
 // --- dominioCustomizado.js ---

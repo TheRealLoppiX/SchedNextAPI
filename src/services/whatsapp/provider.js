@@ -180,6 +180,26 @@ async function obterCodigoPareamento(instancia, numero) {
   return dados; // { pairingCode, code, base64, count } ou {count} se já conectado
 }
 
+// Verifica se o número está salvo na agenda do celular conectado (ver whatsapp_bot_ignorar_salvos
+// em routes/whatsapp.js) — não é "já teve uma conversa", é de fato ter um nome salvo no telefone
+// (contato sincronizado pelo próprio WhatsApp). Falha de rede/instância indisponível cai pra
+// "não salvo" (false) de propósito: esse filtro nunca deve travar o bot inteiro por causa de uma
+// consulta extra que falhou.
+async function contatoSalvo(instancia, numero) {
+  try {
+    const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/chat/findContacts/${instancia}`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({ where: { remoteJid: `${numero}@s.whatsapp.net` } }),
+    });
+    if (!resposta.ok) return false;
+    const dados = await lerJson(resposta);
+    return Array.isArray(dados) && dados.some((c) => c.isSaved);
+  } catch {
+    return false;
+  }
+}
+
 async function obterStatusConexao(instancia) {
   const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/instance/connectionState/${instancia}`, {
     headers: headers(),
@@ -213,4 +233,4 @@ async function removerInstancia(instancia) {
   }
 }
 
-module.exports = { EvolutionIndisponivelError, estaConfigurado, enviarMensagem, enviarImagem, criarInstancia, atualizarWebhook, obterQrCode, obterCodigoPareamento, obterStatusConexao, removerInstancia };
+module.exports = { EvolutionIndisponivelError, estaConfigurado, enviarMensagem, enviarImagem, criarInstancia, atualizarWebhook, obterQrCode, obterCodigoPareamento, contatoSalvo, obterStatusConexao, removerInstancia };
