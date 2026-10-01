@@ -30,11 +30,12 @@ const {
   buscarPagamentoAutorizado,
   taxaRealDoPagamento
 } = require('../services/mercadopago');
-const { buscarPagamentoCicloPlataforma } = require('../services/pagamento');
+const { buscarPagamentoCicloPlataforma, cancelarAssinaturaNoGateway } = require('../services/pagamento');
 const { registrarReceitaPlataforma, registrarTaxaMarketplace } = require('../services/receitaPlataforma');
 const { confirmarCicloPlataforma, registrarPrecoContratado } = require('../services/precificacaoPlataforma');
 const { sincronizarValorCartaoCampanha } = require('../services/sincronizarValorCartao');
 const { empresaForaDoAr } = require('../utils/tenantContext');
+const { limparCacheTrial } = require('../middleware/trialAuth');
 const {
   buscarCampanhaParaNovoCadastro,
   precoDoCiclo: precoDoCicloAssinatura
@@ -608,7 +609,7 @@ router.get('/mercadopago/oauth/callback', async (req, res) => {
 async function processarNotificacaoAssinatura(preapprovalId) {
   const { data: empresaPlataforma } = await supabase
     .from('empresas')
-    .select('id, nome, email, plano_plataforma_id, plano_plataforma_pendente_id, status_assinatura, ciclo_cobranca_atual, campanha_precificacao_id')
+    .select('id, nome, email, plano_plataforma_id, plano_plataforma_pendente_id, status_assinatura, ciclo_cobranca_atual, campanha_precificacao_id, plataforma_serie')
     .eq('gateway_subscription_id', preapprovalId)
     .maybeSingle();
 
@@ -640,6 +641,7 @@ async function processarNotificacaoAssinatura(preapprovalId) {
       atualizacao.proxima_cobranca_em = proxima.toISOString();
     }
     await supabase.from('empresas').update(atualizacao).eq('id', empresaPlataforma.id);
+    limparCacheTrial(empresaPlataforma.id);
     // Plano pago acabou de valer: trava o preço cheio dele pra esta empresa (aumento futuro do
     // plano não atinge quem já assina, ver sql/2026_preco_contratado_plataforma.sql).
     if (atualizacao.plano_plataforma_id) await registrarPrecoContratado(empresaPlataforma.id, atualizacao.plano_plataforma_id);
@@ -671,6 +673,7 @@ async function processarNotificacaoAssinatura(preapprovalId) {
           const cicloConfirmado = empresaPlataforma.ciclo_cobranca_atual || 1;
           const confirmado = await confirmarCicloPlataforma({
             empresaId: empresaPlataforma.id,
+            serie: empresaPlataforma.plataforma_serie || 0,
             cicloRef: cicloConfirmado,
             valor: Number(pagamento.transaction_amount || 0),
             formaPagamento: pagamento.payment_method_id === 'pix' ? 'pix' : 'cartao',
@@ -877,12 +880,15 @@ router.post('/webhooks/mercadopago', async (req, res) => {
     // processarNotificacaoAssinatura, só que pro lado do Pix, que não passa por preapproval.
     const { data: cobrancaPlataforma } = await supabase
       .from('plataforma_cobrancas')
-      .select('id, empresa_id, ciclo_ref, valor, status')
+      .select('id, empresa_id, ciclo_ref, valor, status, serie, plano_plataforma_id, campanha_precificacao_id, origem')
       .eq('mercadopago_payment_id', dataId)
       .maybeSingle();
 
     if (cobrancaPlataforma) {
-      if (cobrancaPlataforma.status === 'pendente' && process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN) {
+      // Qualquer cobrança ainda não paga: o cron marca o Pix como inadimplente depois de 24h e
+      // uma cobrança de contratação pode ter sido substituída ('cancelada'), mas se o dinheiro
+      // entrou, o pagamento vale (antes só 'pendente' era processado e esse Pix ficava ignorado).
+      if (cobrancaPlataforma.status !== 'pago' && process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN) {
         try {
           const pagamento = await buscarPagamento({
             accessTokenVendedor: process.env.MERCADOPAGO_PLATAFORMA_ACCESS_TOKEN,
@@ -894,7 +900,7 @@ router.post('/webhooks/mercadopago', async (req, res) => {
 
             const { data: empresaPix } = await supabase
               .from('empresas')
-              .select('id, nome, plano_plataforma_id, plano_plataforma_pendente_id, status_assinatura, excluida_em')
+              .select('id, nome, plano_plataforma_id, plano_plataforma_pendente_id, status_assinatura, excluida_em, gateway_subscription_id, plataforma_serie')
               .eq('id', cobrancaPlataforma.empresa_id)
               .maybeSingle();
 
@@ -914,12 +920,30 @@ router.post('/webhooks/mercadopago', async (req, res) => {
             proxima.setMonth(proxima.getMonth() + 1);
             atualizacaoPix.proxima_cobranca_em = proxima.toISOString();
             // Mesmo gatilho do cartão: o plano só passa a valer de verdade quando a cobrança
-            // confirma — só acontece no 1º ciclo, os seguintes já são desse mesmo plano.
-            if (empresaPix?.plano_plataforma_pendente_id) {
-              atualizacaoPix.plano_plataforma_id = empresaPix.plano_plataforma_pendente_id;
-              atualizacaoPix.plano_plataforma_pendente_id = null;
+            // confirma. Cobrança de contratação traz o plano gravado nela (ver
+            // services/cobrancaPlanoEmpresa.js); as antigas caem no plano pendente da empresa.
+            const planoNovo = cobrancaPlataforma.plano_plataforma_id || empresaPix?.plano_plataforma_pendente_id || null;
+            if (planoNovo) {
+              atualizacaoPix.plano_plataforma_id = planoNovo;
+              if (!empresaPix?.plano_plataforma_pendente_id || String(empresaPix.plano_plataforma_pendente_id) === String(planoNovo)) {
+                atualizacaoPix.plano_plataforma_pendente_id = null;
+              }
+              atualizacaoPix.plataforma_forma_pagamento = 'pix';
+              atualizacaoPix.plataforma_serie = Math.max(cobrancaPlataforma.serie || 0, empresaPix?.plataforma_serie || 0);
+              if (cobrancaPlataforma.origem === 'admin') atualizacaoPix.campanha_precificacao_id = cobrancaPlataforma.campanha_precificacao_id || null;
+              // Recorrência de cartão do plano anterior (cobrança enviada pelo admin não cancela
+              // na hora): sem isso ela seguiria cobrando junto com o plano novo.
+              if (empresaPix?.gateway_subscription_id && !empresaForaDoArPix) {
+                try {
+                  await cancelarAssinaturaNoGateway(empresaPix.gateway_subscription_id);
+                } catch (errCancel) {
+                  console.error('Erro ao cancelar a recorrência anterior após o Pix do plano novo:', errCancel);
+                }
+                atualizacaoPix.gateway_subscription_id = null;
+              }
             }
             if (!empresaForaDoArPix) await supabase.from('empresas').update(atualizacaoPix).eq('id', cobrancaPlataforma.empresa_id);
+            limparCacheTrial(cobrancaPlataforma.empresa_id);
             if (!empresaForaDoArPix && atualizacaoPix.plano_plataforma_id) await registrarPrecoContratado(cobrancaPlataforma.empresa_id, atualizacaoPix.plano_plataforma_id);
 
             registrarReceitaPlataforma({

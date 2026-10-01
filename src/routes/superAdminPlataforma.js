@@ -12,7 +12,7 @@ const {
   empresaTrocarVerticalSchema
 } = require('../schemas');
 const { limparCacheTrial } = require('../middleware/trialAuth');
-const { precoDoCiclo: precoDoCicloPlataforma } = require('../services/precificacaoPlataforma');
+const { cobrarPlanoDaEmpresa } = require('../services/cobrancaPlanoEmpresa');
 
 const router = express.Router();
 
@@ -273,19 +273,17 @@ router.put('/super-admin/empresas/:id/vencimento', validate(empresaVencimentoSch
 // cobrança" aqui lança uma conta a receber (mesmo mecanismo manual de superAdminFinanceiro.js,
 // com boleto/WhatsApp/baixa já prontos) em vez de tentar cobrar automaticamente. gerar_cobranca
 // (default true) deixa desligar isso pra cortesia de verdade, onde nenhuma cobrança deve existir.
-// Troca o plano da empresa na hora (decisão do admin absoluto): cancela a recorrência antiga,
-// encerra trial/teste e, se pedido, lança a cobrança em Contas a Receber. Usado pela troca manual
-// e pelo "aplicar agora" do plano exclusivo. campanha: a do plano exclusivo, se houver (a empresa
-// passa a seguir os preços por ciclo dela; a cobrança lançada já usa o preço do 1º ciclo).
-async function aplicarPlanoNaEmpresa({ empresaId, plano, gerarCobranca, campanha = null }) {
-  const { data: empresaAtual } = await supabase.from('empresas').select('nome, email, gateway_subscription_id').eq('id', empresaId).maybeSingle();
+// Põe a empresa no Grátis na hora (cancela a recorrência antiga, encerra trial/teste). Plano pago
+// nunca passa por aqui: vira cobrança e só vale depois de pago (ver services/cobrancaPlanoEmpresa.js).
+async function aplicarGratisNaEmpresa(empresaId, plano) {
+  const { data: empresaAtual } = await supabase.from('empresas').select('gateway_subscription_id').eq('id', empresaId).maybeSingle();
   if (!empresaAtual) return { status: 404, error: 'Empresa não encontrada.' };
 
   if (empresaAtual.gateway_subscription_id) {
     try {
       await cancelarAssinaturaNoGateway(empresaAtual.gateway_subscription_id);
     } catch (e) {
-      console.error('Erro ao cancelar assinatura anterior no Mercado Pago (troca manual de plano pelo admin absoluto):', e);
+      console.error('Erro ao cancelar assinatura anterior no Mercado Pago (troca manual pro Grátis):', e);
     }
   }
 
@@ -297,45 +295,35 @@ async function aplicarPlanoNaEmpresa({ empresaId, plano, gerarCobranca, campanha
       gateway_subscription_id: null,
       status_assinatura: 'ativa',
       cancelamento_agendado: false,
-      // A recorrência antiga (se havia) já foi cancelada acima — sem ela, essa data ficaria
-      // inerte (nenhum cron/webhook cobra sem gateway_subscription_id) e só confundiria o dono
-      // da empresa na tela de Conta. A cobrança do novo plano, se houver, vira conta a receber
-      // logo abaixo, que tem sua própria data prevista.
       proxima_cobranca_em: null,
-      campanha_precificacao_id: campanha?.id || null,
+      campanha_precificacao_id: null,
       ciclo_cobranca_atual: 1,
-      // Troca manual do admin absoluto é decisão explícita: encerra qualquer trial/teste em curso.
+      plataforma_forma_pagamento: null,
       trial_expira_em: null,
       plano_teste_expira_em: null,
       plano_teste_anterior_id: null
     })
     .eq('id', empresaId);
-
   if (error) return { status: 500, error: 'Erro ao trocar o plano da empresa.' };
   limparCacheTrial(Number(empresaId));
+  return { status: 200, message: 'Empresa passou pro plano Grátis.' };
+}
 
-  const valor = campanha ? precoDoCicloPlataforma(campanha, 1, plano.preco_mensal) : Number(plano.preco_mensal);
-  let avisoCobranca = '';
-  if (gerarCobranca && valor > 0) {
-    const hoje = new Date().toISOString().slice(0, 10);
-    const { error: errCobranca } = await supabase.from('contas_receber').insert({
-      empresa_id: empresaId,
-      pagador_nome: empresaAtual.nome,
-      pagador_email: empresaAtual.email || null,
-      descricao: `Assinatura de plataforma - troca de plano para ${plano.nome}`,
-      valor,
-      competencia: `${hoje.slice(0, 7)}-01`,
-      data_prevista: hoje
-    });
-    if (errCobranca) {
-      console.error('Erro ao lançar conta a receber na troca de plano:', errCobranca);
-      avisoCobranca = ' O plano foi trocado, mas não foi possível lançar a cobrança em Contas a Receber — lance manualmente.';
-    } else {
-      avisoCobranca = ' Cobrança lançada em Contas a Receber.';
-    }
+// Troca de plano pelo admin: Grátis aplica na hora; plano pago vira cobrança (e-mail, WhatsApp e
+// aviso no painel) e só vale depois de pago. Plano de R$ 0 que não é o Grátis só como cortesia em
+// "Testar planos"; plano sob consulta, só via plano exclusivo com o preço negociado.
+async function trocarOuCobrarPlano(empresaId, plano) {
+  if (plano.nome === 'Grátis') return aplicarGratisNaEmpresa(empresaId, plano);
+  if (plano.preco_mensal == null) return { status: 400, error: 'Plano sob consulta não tem preço: monte um plano exclusivo pra essa empresa com o valor negociado.' };
+  if (!(Number(plano.preco_mensal) > 0)) return { status: 400, error: 'Plano de R$ 0 só como cortesia, na área Testar planos.' };
+  try {
+    const { valor, envios } = await cobrarPlanoDaEmpresa({ empresaId, planoId: plano.id });
+    const canais = ['aviso no painel', envios.email && 'e-mail', envios.whatsapp && 'WhatsApp'].filter(Boolean).join(', ');
+    return { status: 200, message: `Cobrança de R$ ${Number(valor).toFixed(2).replace('.', ',')} enviada (${canais}). O plano ${plano.nome} passa a valer assim que a empresa pagar.` };
+  } catch (e) {
+    console.error('Erro ao cobrar plano da empresa:', e);
+    return { status: e.status || 500, error: e.status ? e.message : 'Não foi possível gerar a cobrança agora.' };
   }
-
-  return { status: 200, message: `Plano da empresa atualizado.${avisoCobranca}` };
 }
 
 router.put('/super-admin/empresas/:id/plano', validate(empresaTrocarPlanoSchema), async (req, res) => {
@@ -345,9 +333,7 @@ router.put('/super-admin/empresas/:id/plano', validate(empresaTrocarPlanoSchema)
     return res.status(400).json({ error: 'Esse plano é exclusivo de outra empresa.' });
   }
 
-  // Plano exclusivo carrega a campanha dele junto.
-  const campanha = plano.empresa_exclusiva_id ? await campanhaDoPlanoExclusivo(plano.id) : null;
-  const r = await aplicarPlanoNaEmpresa({ empresaId: req.params.id, plano, gerarCobranca: req.body.gerar_cobranca, campanha });
+  const r = await trocarOuCobrarPlano(req.params.id, plano);
   if (r.error) return res.status(r.status).json({ error: r.error });
   res.json({ success: true, message: r.message });
 });
@@ -391,7 +377,9 @@ router.get('/super-admin/empresas/:id/plano-exclusivo', async (req, res) => {
 });
 
 router.put('/super-admin/empresas/:id/plano-exclusivo', validate(planoExclusivoSchema), async (req, res) => {
-  const { precos_por_ciclo, aplicar_agora, gerar_cobranca } = req.body;
+  const { precos_por_ciclo } = req.body;
+  // Plano exclusivo é sempre pago (cortesia só em Testar planos e chave de ativação).
+  if (!(Number(req.body.preco_mensal) > 0)) return res.status(400).json({ error: 'Defina o preço mensal do plano exclusivo.' });
   const { data: empresa } = await supabase.from('empresas').select('id, nome, plano_plataforma_id').eq('id', req.params.id).maybeSingle();
   if (!empresa) return res.status(404).json({ error: 'Empresa não encontrada.' });
 
@@ -434,12 +422,6 @@ router.put('/super-admin/empresas/:id/plano-exclusivo', validate(planoExclusivoS
     campanha = null;
   }
 
-  if (aplicar_agora && String(empresa.plano_plataforma_id) !== String(plano.id)) {
-    const r = await aplicarPlanoNaEmpresa({ empresaId: empresa.id, plano, gerarCobranca: gerar_cobranca, campanha });
-    if (r.error) return res.status(r.status).json({ error: `Plano exclusivo salvo, mas: ${r.error}` });
-    return res.json({ success: true, message: `Plano exclusivo salvo e aplicado. ${r.message}` });
-  }
-
   // Empresa já está nele: recursos e limites mudam na hora; a campanha passa a valer a partir
   // do próximo ciclo (o preço cheio já contratado continua travado, ver precoCheioDaEmpresa).
   if (String(empresa.plano_plataforma_id) === String(plano.id)) {
@@ -448,7 +430,10 @@ router.put('/super-admin/empresas/:id/plano-exclusivo', validate(planoExclusivoS
     return res.json({ success: true, message: 'Plano exclusivo atualizado. Recursos e limites já valem; a campanha vale a partir do próximo ciclo.' });
   }
 
-  res.json({ success: true, message: 'Plano exclusivo salvo. A empresa já pode contratar pela tela Conta dela.' });
+  // Ainda não está nele: a empresa é cobrada agora (o plano vale depois de pago).
+  const r = await trocarOuCobrarPlano(empresa.id, { ...plano, empresa_exclusiva_id: empresa.id });
+  if (r.error) return res.status(r.status).json({ error: `Plano exclusivo salvo, mas a cobrança falhou: ${r.error}` });
+  res.json({ success: true, message: `Plano exclusivo salvo. ${r.message}` });
 });
 
 // Remove a oferta (desliga o plano). Empresa que já está nele não perde: troque o plano antes.

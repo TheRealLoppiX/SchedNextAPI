@@ -1,5 +1,6 @@
 const cron = require('node-cron');
 const supabase = require('../config/supabase');
+const { enviarWhatsappPlataforma } = require('../services/whatsappPlataforma');
 const { criarPixAssinaturaPlataforma } = require('../services/pagamento');
 const { buscarCampanhaDaEmpresa, precoDoCiclo, precoCheioDaEmpresa } = require('../services/precificacaoPlataforma');
 const transporter = require('../config/mailer');
@@ -20,7 +21,7 @@ function iniciarCobrancaPlataforma() {
 
     const { data: empresas, error } = await supabase
       .from('empresas')
-      .select('id, nome, email, ciclo_cobranca_atual, campanha_precificacao_id, proxima_cobranca_em, plano_plataforma:plano_plataforma_id(nome, preco_mensal)')
+      .select('id, nome, email, telefone, plataforma_serie, ciclo_cobranca_atual, campanha_precificacao_id, proxima_cobranca_em, plano_plataforma:plano_plataforma_id(nome, preco_mensal)')
       .eq('status_assinatura', 'ativa')
       .eq('plataforma_forma_pagamento', 'pix');
 
@@ -41,6 +42,7 @@ function iniciarCobrancaPlataforma() {
           .from('plataforma_cobrancas')
           .select('id')
           .eq('empresa_id', empresa.id)
+          .eq('serie', empresa.plataforma_serie || 0)
           .eq('ciclo_ref', proximoCiclo)
           .maybeSingle();
         if (existente) continue;
@@ -62,6 +64,7 @@ function iniciarCobrancaPlataforma() {
 
         await supabase.from('plataforma_cobrancas').insert({
           empresa_id: empresa.id,
+          serie: empresa.plataforma_serie || 0,
           ciclo_ref: proximoCiclo,
           valor,
           forma_pagamento: 'pix',
@@ -82,6 +85,15 @@ function iniciarCobrancaPlataforma() {
             })
           }).catch((err) => console.error('Erro ao enviar e-mail de cobrança Pix da plataforma:', err));
         }
+        enviarWhatsappPlataforma(
+          empresa.telefone,
+          `Olá, ${empresa.nome}! A mensalidade da SchedNext (${empresa.plano_plataforma?.nome || 'seu plano'}) está disponível: R$ ${Number(valor).toFixed(2).replace('.', ',')}.
+
+Pix copia e cola:
+${cobranca.qr_code || ''}
+
+Também dá pra pagar pela tela Conta do painel.`
+        ).catch(() => {});
 
         console.log(`Cobrança Pix da assinatura da plataforma gerada pra empresa ${empresa.nome} (ciclo ${proximoCiclo}).`);
       } catch (err) {
@@ -93,7 +105,7 @@ function iniciarCobrancaPlataforma() {
     // inadimplente, mesmo princípio do lado do cliente final em cron/cobrancaAssinaturas.js.
     const { data: pendentesVencidas, error: errVencidas } = await supabase
       .from('plataforma_cobrancas')
-      .select('id, empresa_id')
+      .select('id, empresa_id, ciclo_ref')
       .eq('status', 'pendente')
       .eq('forma_pagamento', 'pix')
       .lt('criado_em', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
@@ -103,6 +115,9 @@ function iniciarCobrancaPlataforma() {
     for (const cobranca of pendentesVencidas || []) {
       try {
         await supabase.from('plataforma_cobrancas').update({ status: 'inadimplente' }).eq('id', cobranca.id);
+        // Pix de contratação (ciclo 1) não pago não deixa a empresa inadimplente: ela continua no
+        // plano atual, que está em dia, e o plano novo só não ativa. Só renovação do plano em uso.
+        if (cobranca.ciclo_ref <= 1) continue;
         // Não sobrescreve suspensa/cancelada (Pix gerado antes da suspensão ou exclusão).
         await supabase.from('empresas').update({ status_assinatura: 'inadimplente' }).eq('id', cobranca.empresa_id).not('status_assinatura', 'in', '(suspensa,cancelada)');
       } catch (err) {

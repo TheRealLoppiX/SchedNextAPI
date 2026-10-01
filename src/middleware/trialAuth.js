@@ -46,7 +46,16 @@ async function carregarSituacao(empresaId) {
   // trial, e derruba também quem já estava logado (o token de 8h continua válido, este não).
   const bloqueada = data?.status_assinatura === 'suspensa' || !!data?.excluida_em;
 
-  const situacao = { expirado, bloqueada };
+  // Plano pago (ou sob consulta) com a mensalidade em atraso: trava igual ao fim do teste, só a
+  // tela Conta abre pra regularizar. Antes só travava quem tinha passado por teste grátis; conta
+  // sem teste seguia com tudo sem pagar. Cortesias (chave, teste de plano) não travam.
+  const planoPago = !!data?.plano_plataforma && (data.plano_plataforma.preco_mensal == null || Number(data.plano_plataforma.preco_mensal) > 0);
+  const inadimplente = planoPago
+    && data.status_assinatura === 'inadimplente'
+    && !emVigor(data.chave_ativacao_expira_em)
+    && !emVigor(data.plano_teste_expira_em);
+
+  const situacao = { expirado, bloqueada, inadimplente };
   cache.set(empresaId, { situacao, ate: agora + CACHE_MS });
   return situacao;
 }
@@ -55,11 +64,17 @@ async function bloquearTrialExpirado(req, res, next) {
   if (!req.empresaId) return next();
 
   try {
-    const { expirado, bloqueada } = await carregarSituacao(req.empresaId);
+    const { expirado, bloqueada, inadimplente } = await carregarSituacao(req.empresaId);
     if (bloqueada) {
       return res.status(403).json({
         code: 'CONTA_SUSPENSA',
         error: 'Esta conta foi suspensa. Entre em contato com o suporte da SchedNext.'
+      });
+    }
+    if (inadimplente && !rotaLiberada(req)) {
+      return res.status(403).json({
+        code: 'PAGAMENTO_PENDENTE',
+        error: 'A mensalidade da SchedNext está em aberto. Regularize na tela Conta para voltar a usar o painel.'
       });
     }
     if (expirado && !rotaLiberada(req)) {

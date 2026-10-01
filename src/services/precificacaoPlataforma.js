@@ -40,15 +40,17 @@ function precoDoCiclo(campanha, numeroCiclo, precoPadrao) {
   return resolverPrecoDoCiclo(campanha?.campanha_precos_ciclo, numeroCiclo, precoPadrao);
 }
 
-// Marca o ciclo `cicloRef` de uma empresa como pago. Idempotente via UNIQUE(empresa_id,
-// ciclo_ref) em plataforma_cobrancas: se já existia (retry de webhook, cron rodando duas vezes),
+// Marca o ciclo `cicloRef` de uma empresa como pago. Idempotente via UNIQUE(empresa_id, serie,
+// ciclo_ref) em plataforma_cobrancas (serie = contratação atual, ver
+// sql/2026_cobranca_obrigatoria_plataforma.sql): se já existia (retry de webhook, cron rodando duas vezes),
 // devolve null — quem chama só avança ciclo_cobranca_atual/registra receita quando isto devolve
 // um resultado de verdade, nunca em cima de uma repetição.
-async function confirmarCicloPlataforma({ empresaId, cicloRef, valor, formaPagamento, mercadopagoPaymentId }) {
+async function confirmarCicloPlataforma({ empresaId, serie = 0, cicloRef, valor, formaPagamento, mercadopagoPaymentId }) {
   const { data, error } = await supabase
     .from('plataforma_cobrancas')
     .insert({
       empresa_id: empresaId,
+      serie,
       ciclo_ref: cicloRef,
       valor,
       forma_pagamento: formaPagamento,
