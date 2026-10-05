@@ -185,19 +185,32 @@ router.post('/super-admin/prospeccao/teste', validate(prospeccaoTesteSchema), as
 // --- Conexão do WhatsApp de prospecção: QR Code ou código de pareamento, igual ao admin da
 // empresa (routes/whatsappInstancia.js), numa instância própria (NOME_INSTANCIA).
 
+// Cria a instância de prospecção na Evolution. Se ela já existir lá (ex: um "Desconectar" anterior
+// em que a Evolution não conseguiu apagá-la), reaproveita em vez de falhar com "already in use".
+async function criarOuReaproveitarInstancia(opcoes) {
+  const instancia = prospeccao.NOME_INSTANCIA;
+  let criada = null;
+  try {
+    criada = await criarInstancia(instancia, { ...opcoes, configuracoes: CONFIG_INSTANCIA });
+  } catch (err) {
+    if (!/already in use/i.test(err.message || '')) throw err;
+    await aplicarConfiguracoes(instancia, CONFIG_INSTANCIA).catch(() => {});
+  }
+  await prospeccao.definirInstanciaProspeccao(instancia);
+  return { instancia, criada };
+}
+
 router.post('/super-admin/prospeccao/whatsapp/qrcode', async (req, res) => {
   if (!estaConfigurado()) return res.status(503).json({ error: 'Integração de WhatsApp não está disponível no momento.' });
   try {
     let instancia = await prospeccao.obterInstanciaProspeccao({ semCache: true });
     let qrcode;
     if (!instancia) {
-      instancia = prospeccao.NOME_INSTANCIA;
-      const criada = await criarInstancia(instancia, { configuracoes: CONFIG_INSTANCIA });
-      await prospeccao.definirInstanciaProspeccao(instancia);
-      qrcode = criada.qrcode;
-    } else {
-      qrcode = await obterQrCode(instancia);
+      const resultado = await criarOuReaproveitarInstancia({});
+      instancia = resultado.instancia;
+      qrcode = resultado.criada?.qrcode;
     }
+    if (!qrcode?.base64) qrcode = await obterQrCode(instancia);
     if (!qrcode?.base64) return res.status(409).json({ error: 'Não foi possível gerar o QR Code agora. Se o WhatsApp já estiver conectado, não é preciso escanear de novo.' });
     res.json({ qrcode: qrcode.base64 });
   } catch (err) {
@@ -216,9 +229,7 @@ router.post('/super-admin/prospeccao/whatsapp/codigo', validate(whatsappTesteSch
     let instancia = await prospeccao.obterInstanciaProspeccao({ semCache: true });
     if (!instancia) {
       // qrcode: false de propósito, senão o pedido de código volta vazio (ver criarInstancia).
-      instancia = prospeccao.NOME_INSTANCIA;
-      await criarInstancia(instancia, { qrcode: false, configuracoes: CONFIG_INSTANCIA });
-      await prospeccao.definirInstanciaProspeccao(instancia);
+      ({ instancia } = await criarOuReaproveitarInstancia({ qrcode: false }));
     }
     const dados = await obterCodigoPareamento(instancia, numero);
     if (!dados?.pairingCode) return res.status(409).json({ error: 'Não foi possível gerar o código agora. Se o WhatsApp já estiver conectado, não é preciso conectar de novo; senão, tente pelo QR Code.' });
