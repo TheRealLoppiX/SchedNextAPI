@@ -266,7 +266,12 @@ router.post('/super-admin/prospeccao/whatsapp/desconectar', async (req, res) => 
     try {
       await removerInstancia(instancia);
     } catch (err) {
+      // Não apaga o registro nosso se a Evolution não desligou: senão a tela mostrava "desconectado"
+      // com o celular ainda conectado, e reconectar dava "already in use".
       console.error('Erro ao remover a instância de prospecção:', err);
+      if (await conectada(instancia)) {
+        return res.status(502).json({ error: 'O servidor do WhatsApp não conseguiu desconectar agora. Tente de novo em instantes, ou desconecte pelo celular (Aparelhos conectados).' });
+      }
     }
   }
   await prospeccao.definirInstanciaProspeccao(null);
