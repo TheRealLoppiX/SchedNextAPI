@@ -15,6 +15,7 @@ const {
   obterQrCode,
   obterCodigoPareamento,
   obterStatusConexao,
+  aplicarConfiguracoes,
   removerInstancia
 } = require('../services/whatsapp/provider');
 const prospeccao = require('../services/prospeccao');
@@ -22,6 +23,23 @@ const prospeccao = require('../services/prospeccao');
 // Prospecção de clientes por WhatsApp (ver services/prospeccao.js). Tudo sob /super-admin, então
 // verificarTokenSuperAdmin (server.js) já garantiu que é o dono da plataforma.
 const router = express.Router();
+
+// O chip de prospecção costuma ser um celular com conversas antigas: baixar todo o histórico e
+// receber mensagens de grupo só pesa na VPS da Evolution (1 GB de RAM, compartilhada com o
+// WhatsApp de todas as empresas) e não serve pra nada aqui.
+const CONFIG_INSTANCIA = { syncFullHistory: false, groupsIgnore: true, readMessages: false, alwaysOnline: false };
+
+// Instâncias conectadas antes desse ajuste existir recebem a config uma vez por processo.
+let configAplicada = null;
+async function garantirConfigInstancia(instancia) {
+  if (configAplicada === instancia) return;
+  try {
+    await aplicarConfiguracoes(instancia, CONFIG_INSTANCIA);
+    configAplicada = instancia;
+  } catch (err) {
+    console.error('Prospecção: erro ao aplicar config da instância:', err.message || err);
+  }
+}
 
 const STATUS = ['na_fila', 'abertura_enviada', 'followup_enviado', 'respondeu', 'sem_resposta', 'optout', 'pausado', 'erro'];
 
@@ -35,6 +53,7 @@ router.get('/super-admin/prospeccao/resumo', async (req, res) => {
     if (instancia && estaConfigurado()) {
       const status = await obterStatusConexao(instancia).catch(() => ({ state: 'close' }));
       conectado = status.state === 'open';
+      if (conectado) garantirConfigInstancia(instancia);
     }
 
     const contagens = {};
@@ -173,7 +192,7 @@ router.post('/super-admin/prospeccao/whatsapp/qrcode', async (req, res) => {
     let qrcode;
     if (!instancia) {
       instancia = prospeccao.NOME_INSTANCIA;
-      const criada = await criarInstancia(instancia);
+      const criada = await criarInstancia(instancia, { configuracoes: CONFIG_INSTANCIA });
       await prospeccao.definirInstanciaProspeccao(instancia);
       qrcode = criada.qrcode;
     } else {
@@ -198,7 +217,7 @@ router.post('/super-admin/prospeccao/whatsapp/codigo', validate(whatsappTesteSch
     if (!instancia) {
       // qrcode: false de propósito, senão o pedido de código volta vazio (ver criarInstancia).
       instancia = prospeccao.NOME_INSTANCIA;
-      await criarInstancia(instancia, { qrcode: false });
+      await criarInstancia(instancia, { qrcode: false, configuracoes: CONFIG_INSTANCIA });
       await prospeccao.definirInstanciaProspeccao(instancia);
     }
     const dados = await obterCodigoPareamento(instancia, numero);

@@ -117,7 +117,10 @@ function urlWebhookComSegredo() {
 // instância sempre volta `pairingCode: null` (testado contra a Evolution em produção). Por isso
 // o fluxo de código de pareamento (obterCodigoPareamento) cria a instância com `qrcode: false`
 // aqui — quem decide QR ou pareamento é a primeira chamada de connect, não a criação.
-async function criarInstancia(instancia, { qrcode = true } = {}) {
+//
+// `configuracoes` repassa os ajustes de comportamento da Evolution (groupsIgnore, syncFullHistory,
+// readMessages...) — usado pelo WhatsApp de prospecção, que não deve baixar o histórico do chip.
+async function criarInstancia(instancia, { qrcode = true, configuracoes = {} } = {}) {
   const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/instance/create`, {
     method: 'POST',
     headers: headers(),
@@ -125,6 +128,7 @@ async function criarInstancia(instancia, { qrcode = true } = {}) {
       instanceName: instancia,
       integration: 'WHATSAPP-BAILEYS',
       qrcode,
+      ...configuracoes,
       // Evolution normaliza o nome do evento pra maiúsculo+underscore ("messages.upsert"
       // -> "MESSAGES_UPSERT") antes de checar se está na lista de eventos inscritos do
       // webhook — registrar em minúsculo/com ponto faz essa checagem nunca bater, e o
@@ -200,13 +204,39 @@ async function contatoSalvo(instancia, numero) {
   }
 }
 
+// Com tempo limite: quando a VPS da Evolution está sobrecarregada (ex: sincronizando o histórico
+// de um chip recém-conectado), a consulta ficava pendurada e travava as telas que esperam por ela.
+// Os chamadores já tratam erro como "não deu pra checar agora".
 async function obterStatusConexao(instancia) {
   const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/instance/connectionState/${instancia}`, {
     headers: headers(),
+    signal: AbortSignal.timeout(8000),
   });
   const dados = await lerJson(resposta);
   if (!resposta.ok) return { state: 'close' };
   return dados?.instance || { state: 'close' };
+}
+
+// Ajustes de comportamento de uma instância já criada (POST /settings/set/:instance). A Evolution
+// exige o objeto completo, então os campos não informados vão com o padrão dela.
+async function aplicarConfiguracoes(instancia, configuracoes) {
+  const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/settings/set/${instancia}`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({
+      rejectCall: false,
+      groupsIgnore: false,
+      alwaysOnline: false,
+      readMessages: false,
+      readStatus: false,
+      syncFullHistory: false,
+      ...configuracoes,
+    }),
+    signal: AbortSignal.timeout(15000),
+  });
+  const dados = await lerJson(resposta);
+  if (!resposta.ok) throw new Error(dados?.response?.message?.[0] || dados?.message || 'Erro ao aplicar configurações da instância.');
+  return dados;
 }
 
 // Apaga de vez a instância na Evolution (não só desconecta) — desvincular e reconectar depois
@@ -233,4 +263,4 @@ async function removerInstancia(instancia) {
   }
 }
 
-module.exports = { EvolutionIndisponivelError, estaConfigurado, enviarMensagem, enviarImagem, criarInstancia, atualizarWebhook, obterQrCode, obterCodigoPareamento, contatoSalvo, obterStatusConexao, removerInstancia };
+module.exports = { EvolutionIndisponivelError, estaConfigurado, enviarMensagem, enviarImagem, criarInstancia, atualizarWebhook, obterQrCode, obterCodigoPareamento, contatoSalvo, obterStatusConexao, aplicarConfiguracoes, removerInstancia };
