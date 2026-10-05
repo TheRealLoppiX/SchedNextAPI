@@ -16,6 +16,7 @@ const iniciarCobrancaPlataforma = require('./src/cron/cobrancaPlataforma');
 const iniciarTrialPlanos = require('./src/cron/trialPlanos');
 const iniciarResumoProfissionais = require('./src/cron/resumoProfissionais');
 const iniciarSincronizacaoValorCartao = require('./src/cron/sincronizarValorCartao');
+const iniciarProspeccao = require('./src/cron/prospeccao');
 const { bloquearTrialExpirado } = require('./src/middleware/trialAuth');
 
 const app = express();
@@ -106,6 +107,7 @@ app.use(require('./src/routes/superAdmin'));
 app.use(require('./src/routes/superAdminPlataforma'));
 app.use(require('./src/routes/superAdminPrecificacao'));
 app.use(require('./src/routes/superAdminFinanceiro'));
+app.use(require('./src/routes/superAdminProspeccao'));
 app.use(require('./src/routes/chavesAtivacao'));
 app.use(require('./src/routes/perfil'));
 app.use(require('./src/routes/barbeiros'));
@@ -143,6 +145,7 @@ iniciarCobrancaPlataforma();
 iniciarTrialPlanos();
 iniciarResumoProfissionais();
 iniciarSincronizacaoValorCartao();
+iniciarProspeccao();
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Servidor rodando em http://localhost:${PORT}`));

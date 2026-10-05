@@ -6,6 +6,7 @@ const { enviarMensagem, contatoSalvo } = require('../services/whatsapp/provider'
 const { liberarOuAvisarForaDoHorario } = require('../services/whatsapp/horarioBot');
 const { whatsappWebhookLimiter } = require('../middleware/rateLimiters');
 const { empresaForaDoAr } = require('../utils/tenantContext');
+const { registrarResposta } = require('../services/prospeccao');
 
 const router = express.Router();
 
@@ -62,6 +63,12 @@ router.post('/whatsapp/webhook', whatsappWebhookLimiter, async (req, res) => {
     const instancia = req.body?.instance;
 
     if (!telefone || !texto || !instancia) return;
+
+    // WhatsApp de prospecção da SchedNext (admin absoluto): resposta de prospect não vai pro bot
+    // de nenhuma empresa. Em contas novas o WhatsApp manda o remetente como LID (@lid) e o
+    // número real vem em senderPn/remoteJidAlt.
+    const telefoneReal = String(key.senderPn || key.remoteJidAlt || key.remoteJid || '').split('@')[0].replace(/\D/g, '');
+    if (await registrarResposta(instancia, telefoneReal, texto)) return;
 
     const { data: empresa } = await supabase
       .from('empresas')

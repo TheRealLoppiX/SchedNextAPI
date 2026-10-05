@@ -770,7 +770,63 @@ const planoTesteSchema = z.object({
   dias: z.coerce.number().int().min(1, 'Mínimo 1 dia').max(90, 'Máximo 90 dias')
 });
 
+// --- superAdminProspeccao.js (prospecção por WhatsApp, ver services/prospeccao.js) ---
+const horaFaixa = /^\s*\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}\s*$/;
+const prospeccaoConfigSchema = z.object({
+  ativo: z.boolean().optional(),
+  limite_diario: z.coerce.number().int().min(1, 'Mínimo de 1 por dia').max(200, 'Máximo de 200 por dia').optional(),
+  intervalo_min_minutos: z.coerce.number().min(1, 'Intervalo mínimo de 1 minuto').max(240).optional(),
+  intervalo_max_minutos: z.coerce.number().min(1).max(240).optional(),
+  dias_semana: z.array(z.number().int().min(0).max(6)).optional(),
+  janelas: z.string().trim().max(200).refine((t) => t.split(',').every((f) => horaFaixa.test(f)), 'Use faixas no formato 09:00-11:00, separadas por vírgula.').optional(),
+  enviar_followup: z.boolean().optional(),
+  dias_followup: z.coerce.number().int().min(1).max(30).optional(),
+  usar_mensagens_planilha: z.boolean().optional(),
+  ajustar_saudacao: z.boolean().optional(),
+  mensagens_abertura: z.array(z.string().max(1500)).max(5).optional(),
+  mensagem_followup: z.string().max(1500).optional(),
+  palavras_optout: z.string().max(300).optional(),
+  resposta_optout: z.string().max(500).optional(),
+  numero_aviso: z.string().trim().max(20).optional()
+}).refine((c) => c.intervalo_min_minutos === undefined || c.intervalo_max_minutos === undefined || c.intervalo_max_minutos >= c.intervalo_min_minutos, {
+  path: ['intervalo_max_minutos'], message: 'O intervalo máximo não pode ser menor que o mínimo.'
+});
+
+const textoPlanilha = z.preprocess((v) => (v === null || v === undefined ? '' : String(v)), z.string().max(3000));
+const prospeccaoImportarSchema = z.object({
+  origem: z.string().trim().max(200).optional(),
+  linhas: z.array(z.object({
+    empresa: textoPlanilha,
+    telefone: textoPlanilha,
+    categoria: textoPlanilha.optional(),
+    cidade: textoPlanilha.optional(),
+    bairro: textoPlanilha.optional(),
+    instagram: textoPlanilha.optional(),
+    prioridade: textoPlanilha.optional(),
+    ponto_abordagem: textoPlanilha.optional(),
+    variante: textoPlanilha.optional(),
+    mensagem_abertura: textoPlanilha.optional(),
+    mensagem_followup: textoPlanilha.optional(),
+    status_planilha: textoPlanilha.optional()
+  })).min(1, 'A planilha não tem linhas.').max(500, 'Envie no máximo 500 linhas por vez.')
+});
+
+const prospectAtualizarSchema = z.object({
+  status: z.enum(['na_fila', 'respondeu', 'sem_resposta', 'optout', 'pausado']).optional(),
+  observacoes: z.string().max(2000).optional()
+});
+
+const prospeccaoTesteSchema = z.object({
+  telefone: z.string().trim().min(8, 'Telefone inválido').max(20),
+  variante: z.coerce.number().int().min(0).max(4).optional(),
+  followup: z.boolean().optional()
+});
+
 module.exports = {
+  prospeccaoConfigSchema,
+  prospeccaoImportarSchema,
+  prospectAtualizarSchema,
+  prospeccaoTesteSchema,
   registrarSchema,
   loginSchema,
   loginClienteSchema,
