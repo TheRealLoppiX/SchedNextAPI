@@ -185,8 +185,22 @@ router.post('/super-admin/prospeccao/teste', validate(prospeccaoTesteSchema), as
 // --- Conexão do WhatsApp de prospecção: QR Code ou código de pareamento, igual ao admin da
 // empresa (routes/whatsappInstancia.js), numa instância própria (NOME_INSTANCIA).
 
+const conectada = async (instancia) => (await obterStatusConexao(instancia).catch(() => ({ state: 'close' }))).state === 'open';
+
+// Apaga a instância na Evolution e cria de novo do zero: usado quando ela ficou presa (não está
+// conectada e também não gera QR Code/código novo).
+async function recriarInstancia(opcoes) {
+  const instancia = prospeccao.NOME_INSTANCIA;
+  await removerInstancia(instancia).catch((err) => console.error('Prospecção: erro ao remover instância presa:', err.message || err));
+  // A Evolution leva um instante pra liberar o nome depois do delete.
+  await new Promise((r) => setTimeout(r, 1500));
+  const criada = await criarInstancia(instancia, { ...opcoes, configuracoes: CONFIG_INSTANCIA });
+  await prospeccao.definirInstanciaProspeccao(instancia);
+  return criada;
+}
+
 // Cria a instância de prospecção na Evolution. Se ela já existir lá (ex: um "Desconectar" anterior
-// em que a Evolution não conseguiu apagá-la), reaproveita em vez de falhar com "already in use".
+// em que a Evolution não conseguiu apagá-la): conectada, só reaproveita; senão, recria do zero.
 async function criarOuReaproveitarInstancia(opcoes) {
   const instancia = prospeccao.NOME_INSTANCIA;
   let criada = null;
@@ -194,7 +208,8 @@ async function criarOuReaproveitarInstancia(opcoes) {
     criada = await criarInstancia(instancia, { ...opcoes, configuracoes: CONFIG_INSTANCIA });
   } catch (err) {
     if (!/already in use/i.test(err.message || '')) throw err;
-    await aplicarConfiguracoes(instancia, CONFIG_INSTANCIA).catch(() => {});
+    if (await conectada(instancia)) await aplicarConfiguracoes(instancia, CONFIG_INSTANCIA).catch(() => {});
+    else criada = await recriarInstancia(opcoes);
   }
   await prospeccao.definirInstanciaProspeccao(instancia);
   return { instancia, criada };
@@ -211,6 +226,7 @@ router.post('/super-admin/prospeccao/whatsapp/qrcode', async (req, res) => {
       qrcode = resultado.criada?.qrcode;
     }
     if (!qrcode?.base64) qrcode = await obterQrCode(instancia);
+    if (!qrcode?.base64 && !(await conectada(instancia))) qrcode = (await recriarInstancia({}))?.qrcode;
     if (!qrcode?.base64) return res.status(409).json({ error: 'Não foi possível gerar o QR Code agora. Se o WhatsApp já estiver conectado, não é preciso escanear de novo.' });
     res.json({ qrcode: qrcode.base64 });
   } catch (err) {
@@ -231,7 +247,11 @@ router.post('/super-admin/prospeccao/whatsapp/codigo', validate(whatsappTesteSch
       // qrcode: false de propósito, senão o pedido de código volta vazio (ver criarInstancia).
       ({ instancia } = await criarOuReaproveitarInstancia({ qrcode: false }));
     }
-    const dados = await obterCodigoPareamento(instancia, numero);
+    let dados = await obterCodigoPareamento(instancia, numero);
+    if (!dados?.pairingCode && !(await conectada(instancia))) {
+      await recriarInstancia({ qrcode: false });
+      dados = await obterCodigoPareamento(instancia, numero);
+    }
     if (!dados?.pairingCode) return res.status(409).json({ error: 'Não foi possível gerar o código agora. Se o WhatsApp já estiver conectado, não é preciso conectar de novo; senão, tente pelo QR Code.' });
     res.json({ codigo: dados.pairingCode });
   } catch (err) {
