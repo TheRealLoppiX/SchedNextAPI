@@ -250,7 +250,7 @@ async function marcarInadimplente(usuario, empresa) {
       html: emailHtml({
         titulo: `Olá, ${usuario.nome_completo}!`,
         mensagemHtml: `
-          <p style="margin: 0 0 4px;">Não identificamos o pagamento da sua mensalidade na <strong>${empresa?.nome || 'barbearia'}</strong>.</p>
+          <p style="margin: 0 0 4px;">Não identificamos o pagamento da sua mensalidade na <strong>${empresa?.nome || 'empresa'}</strong>.</p>
           <p style="margin: 12px 0;">Enquanto isso, os benefícios do seu plano ficam suspensos (preço e cota de assinante). Regularize o pagamento para voltar a ter acesso a eles.</p>
         `
       })
@@ -261,7 +261,7 @@ async function marcarInadimplente(usuario, empresa) {
     enviarMensagem(
       empresa.whatsapp_phone_number_id,
       `55${usuario.telefone.replace(/\D/g, '')}`,
-      `Não identificamos o pagamento da sua mensalidade na ${empresa?.nome || 'barbearia'}. Os benefícios do seu plano ficam suspensos até regularizar.`
+      `Não identificamos o pagamento da sua mensalidade na ${empresa?.nome || 'empresa'}. Os benefícios do seu plano ficam suspensos até regularizar.`
     ).catch((err) => console.error('Erro ao enviar WhatsApp de inadimplência:', err));
   }
 }

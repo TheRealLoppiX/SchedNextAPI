@@ -60,7 +60,7 @@ router.get('/barbeiros', async (req, res) => {
 // de qualquer empresa só sabendo o ID.
 router.get('/admin/barbeiro-servicos/:barbeiro_id', async (req, res) => {
   const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', req.params.barbeiro_id).maybeSingle();
-  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
+  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Profissional não encontrado.' });
 
   const { data, error } = await supabase
     .from('barbeiro_servicos')
@@ -76,7 +76,7 @@ router.post('/admin/barbeiro-servicos', validate(barbeiroServicosSchema), async 
   const { barbeiro_id, servicosIds } = req.body;
 
   const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', barbeiro_id).maybeSingle();
-  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
+  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Profissional não encontrado.' });
 
   if (servicosIds.length > 0) {
     // Sem isso, um admin podia vincular o próprio barbeiro a um servico_id de OUTRA empresa
@@ -126,7 +126,7 @@ router.put('/admin/barbeiro/status', validate(barbeiroStatusSchema), async (req,
     console.error('Erro ao mudar status:', error);
     return res.status(500).json({ error: 'Erro interno' });
   }
-  if (!data || data.length === 0) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
+  if (!data || data.length === 0) return res.status(404).json({ error: 'Profissional não encontrado.' });
   res.json({ message: 'Status alterado!' });
 });
 
@@ -182,7 +182,7 @@ router.put('/admin/barbeiro/editar', validate(barbeiroEditarSchema), async (req,
     .select('id');
 
   if (error) return res.status(500).json(error);
-  if (!data || data.length === 0) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
+  if (!data || data.length === 0) return res.status(404).json({ error: 'Profissional não encontrado.' });
   res.json({ success: true });
 });
 
@@ -190,7 +190,7 @@ router.delete('/admin/barbeiro/:id', async (req, res) => {
   const { id } = req.params;
 
   const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', id).maybeSingle();
-  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
+  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Profissional não encontrado.' });
 
   // Limpamos os vínculos e bloqueios primeiro para evitar erro no banco
   await supabase.from('barbeiro_servicos').delete().eq('barbeiro_id', id);
@@ -200,11 +200,11 @@ router.delete('/admin/barbeiro/:id', async (req, res) => {
   if (error) {
     // Proteção: se ele já cortou cabelo de alguém, o banco não deixa apagar para não quebrar o histórico financeiro
     if (error.code === '23503') {
-      return res.status(400).json({ error: 'Este barbeiro possui agendamentos no histórico. É recomendado desativá-lo em vez de excluí-lo.' });
+      return res.status(400).json({ error: 'Este profissional possui agendamentos no histórico. É recomendado desativá-lo em vez de excluí-lo.' });
     }
-    return res.status(500).json({ error: 'Erro ao excluir barbeiro.' });
+    return res.status(500).json({ error: 'Erro ao excluir profissional.' });
   }
-  res.json({ message: 'Barbeiro removido com sucesso!' });
+  res.json({ message: 'Profissional removido com sucesso!' });
 });
 
 // --- BLOQUEIOS ---
@@ -214,7 +214,7 @@ router.post('/admin/bloqueio', validate(bloqueioSchema), async (req, res) => {
   const { barbeiro_id, data_bloqueio, data_fim, hora_inicio, hora_fim, motivo } = req.body;
 
   const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', barbeiro_id).maybeSingle();
-  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
+  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Profissional não encontrado.' });
 
   // Fallback: se não houver data_fim, o bloqueio é de apenas um dia
   const finalDate = data_fim || data_bloqueio;
@@ -233,7 +233,7 @@ router.post('/admin/bloqueio', validate(bloqueioSchema), async (req, res) => {
 // 2. LISTAR BLOQUEIOS (Usado pelo AdminBarbeiros para exibir os cards)
 router.get('/admin/bloqueios/:barbeiro_id', async (req, res) => {
   const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', req.params.barbeiro_id).maybeSingle();
-  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
+  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Profissional não encontrado.' });
 
   const hoje = new Date().toISOString().slice(0, 10);
 
@@ -273,7 +273,7 @@ router.get('/admin/agenda-barbeiro/:barbeiro_id', async (req, res) => {
   const { data: dataQuery } = req.query; // Pega a data enviada (?data=2026-02-17)
 
   const { data: barbeiro } = await supabase.from('barbeiros').select('empresa_id').eq('id', barbeiro_id).maybeSingle();
-  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Barbeiro não encontrado.' });
+  if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Profissional não encontrado.' });
 
   const { data: agendamentos, error } = await supabase
     .from('agendamentos')

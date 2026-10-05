@@ -57,13 +57,13 @@ router.post('/admin/ia/resumo-relatorio', async (req, res) => {
 // 2. Gerador de descrição de serviço: admin digita só o nome, IA sugere uma descrição
 // de vitrine pra usar no cadastro do serviço.
 router.post('/admin/ia/descricao-servico', async (req, res) => {
-  const { nome, vertical } = req.body;
+  const { nome } = req.body;
   if (!nome || !nome.trim()) return res.status(400).json({ error: 'Informe o nome do serviço.' });
 
   try {
     const texto = await gerarTexto({
       sistema: 'Você escreve descrições curtas (1-2 frases) e atrativas de serviços para o cardápio de um negócio de hora marcada, em português do Brasil. Sem markdown, sem aspas, só o texto da descrição.',
-      prompt: `Tipo de negócio: ${vertical || 'estabelecimento de hora marcada'}\nServiço: ${nome}`,
+      prompt: `Serviço: ${nome}`,
       maxTokens: 100
     });
     res.json({ descricao: texto });

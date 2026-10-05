@@ -58,9 +58,9 @@ const clienteRapidoSchema = z.object({
   empresa_id: idLike
 });
 
-// Reaproveitado pelo cadastro self-service e pela troca manual de vertical do admin absoluto
-// (empresaTrocarVerticalSchema, ver superAdminPlataforma.js) — pra corrigir uma empresa
-// cadastrada com o tipo de negócio errado sem precisar recriar a conta do zero.
+// empresas.vertical não muda mais nada na interface (termos são neutros, ver
+// frontend/src/utils/terminologia.js). Continua aceito e com default 'generico' só pra
+// não quebrar o cadastro enquanto o frontend antigo ainda estiver no ar.
 const verticalEnum = z.enum(['barbearia', 'salao', 'estudio_unhas', 'generico']);
 
 const registrarEmpresaSchema = z.object({
@@ -68,7 +68,7 @@ const registrarEmpresaSchema = z.object({
   slug: z.string().trim().toLowerCase().regex(/^[a-z0-9-]+$/, 'Use apenas letras minúsculas, números e hífen').min(3).max(60),
   email: z.string().trim().toLowerCase().email('E-mail inválido'),
   senha: z.string().min(6, 'Senha deve ter ao menos 6 caracteres').max(100),
-  vertical: verticalEnum,
+  vertical: verticalEnum.default('generico'),
   plano_plataforma_id: idLike.optional(),
   // Antifraude (ver services/antifraude.js): telefone e CPF/CNPJ são obrigatórios no cadastro
   // pra impedir várias contas grátis da mesma pessoa/negócio.
@@ -592,13 +592,6 @@ const empresaTrocarPlanoSchema = z.object({
   gerar_cobranca: z.boolean().optional().default(true)
 });
 
-// Corrige o tipo de negócio de uma empresa cadastrada errada (ver POST /empresas/registrar em
-// routes/empresasPublico.js, onde o dono escolhe isso uma vez, no cadastro) — admin absoluto
-// pode ajustar depois sem precisar excluir e recriar a conta.
-const empresaTrocarVerticalSchema = z.object({
-  vertical: verticalEnum
-});
-
 // --- superAdminFinanceiro.js (contas a pagar/receber, ver sql/2026_contas_pagar_receber.sql) ---
 
 const dataSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida');
@@ -844,7 +837,6 @@ module.exports = {
   leadStatusSchema,
   empresaVencimentoSchema,
   empresaTrocarPlanoSchema,
-  empresaTrocarVerticalSchema,
   campanhaPrecificacaoSchema,
   campanhaAtivaSchema,
   campanhaAssinaturaSchema,

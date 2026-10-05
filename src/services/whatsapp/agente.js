@@ -161,7 +161,7 @@ function montarSistema(config, primeiraMensagem, link) {
   const agoraFmt = `${DIAS_SEMANA[agora.getUTCDay()]}, ${String(agora.getUTCDate()).padStart(2, '0')}/${String(agora.getUTCMonth() + 1).padStart(2, '0')}/${agora.getUTCFullYear()} às ${String(agora.getUTCHours()).padStart(2, '0')}:${String(agora.getUTCMinutes()).padStart(2, '0')}`;
 
   const partes = [
-    `Você é${config.nome ? ` ${config.nome},` : ''} assistente de agendamento (barbearia/salão) via WhatsApp, sistema SchedNext.`,
+    `Você é${config.nome ? ` ${config.nome},` : ''} assistente de agendamento via WhatsApp, sistema SchedNext.`,
     // Sem isso o modelo não tinha noção nenhuma de "agora" — não ajudava a raciocinar sobre "hoje"/
     // "amanhã"/"esta semana" numa frase do cliente antes mesmo de chamar uma ferramenta. A
     // disponibilidade em si (inclusive não oferecer horário que já passou hoje) é sempre validada

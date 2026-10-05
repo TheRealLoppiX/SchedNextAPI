@@ -8,8 +8,7 @@ const {
   planoAtivoSchema,
   planoTesteSchema,
   empresaVencimentoSchema,
-  empresaTrocarPlanoSchema,
-  empresaTrocarVerticalSchema
+  empresaTrocarPlanoSchema
 } = require('../schemas');
 const { limparCacheTrial } = require('../middleware/trialAuth');
 const { cobrarPlanoDaEmpresa } = require('../services/cobrancaPlanoEmpresa');
@@ -523,15 +522,6 @@ router.post('/super-admin/empresas/:id/reativar', async (req, res) => {
   if (error) return res.status(500).json({ error: 'Erro ao reativar empresa.' });
   limparCacheTrial(Number(req.params.id));
   res.json({ success: true, message: 'Empresa reativada no plano Grátis. O plano pago só volta quando ela assinar e o pagamento for confirmado.' });
-});
-
-// Corrige o tipo de negócio de uma empresa cadastrada errada no self-service (ver comentário do
-// schema em schemas/index.js). Não mexe em mais nada — layout, terminologia etc. da própria
-// empresa já reagem ao campo `vertical` sozinhos, igual reagiriam se tivesse nascido certo.
-router.put('/super-admin/empresas/:id/vertical', validate(empresaTrocarVerticalSchema), async (req, res) => {
-  const { error } = await supabase.from('empresas').update({ vertical: req.body.vertical }).eq('id', req.params.id);
-  if (error) return res.status(500).json({ error: 'Erro ao trocar o tipo de negócio da empresa.' });
-  res.json({ success: true, message: 'Tipo de negócio atualizado.' });
 });
 
 // Exclusão (soft delete, ver sql/2026_empresas_exclusao.sql): não apaga nada, só marca

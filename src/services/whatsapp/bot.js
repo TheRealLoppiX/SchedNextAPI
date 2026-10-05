@@ -41,7 +41,7 @@ async function interpretarIntencaoMenu(texto) {
     // esse modelo "pensa" antes de responder e o raciocínio consome do mesmo teto de tokens —
     // com maxTokens baixo demais ele corta o pensamento na metade e devolve resposta vazia.
     const resposta = await gerarTexto({
-      sistema: 'Você classifica a intenção de uma mensagem de WhatsApp enviada a um bot de agendamento de barbearia/salão. Responda APENAS uma destas palavras, sem mais nada: AGENDAR (a pessoa quer marcar/remarcar um horário), AGENDAMENTOS (a pessoa quer ver ou cancelar um agendamento que já tem), ou NENHUM (não deu pra saber).',
+      sistema: 'Você classifica a intenção de uma mensagem de WhatsApp enviada a um bot de agendamento de um negócio de hora marcada. Responda APENAS uma destas palavras, sem mais nada: AGENDAR (a pessoa quer marcar/remarcar um horário), AGENDAMENTOS (a pessoa quer ver ou cancelar um agendamento que já tem), ou NENHUM (não deu pra saber).',
       prompt: texto,
       modelos: MODELOS_CLASSIFICACAO,
       reasoningEffort: 'low',

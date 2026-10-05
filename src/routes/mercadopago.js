@@ -399,7 +399,7 @@ router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, v
     .maybeSingle();
   if (error) return res.status(500).json({ error: 'Erro ao buscar cliente.' });
   if (!usuario?.plano_id) {
-    return res.status(400).json({ error: 'Você ainda não tem um plano atribuído. Fale com a barbearia.' });
+    return res.status(400).json({ error: 'Você ainda não tem um plano atribuído. Fale com a empresa.' });
   }
 
   const { data: plano } = await supabase.from('planos_assinatura').select('id, nome, preco').eq('id', usuario.plano_id).maybeSingle();
@@ -407,7 +407,7 @@ router.post('/usuario/:id/assinatura-cobranca/assinar', verificarTokenCliente, v
 
   const { data: empresa } = await supabase.from('empresas').select('id, nome, slug, dominio_customizado, dominio_verificado, mercadopago_access_token, whatsapp_phone_number_id, assinatura_modo_vencimento, assinatura_dias_vencimento, assinatura_primeira_cobranca').eq('id', usuario.empresa_id).maybeSingle();
   if (!empresa?.mercadopago_access_token) {
-    return res.status(400).json({ error: 'Esta barbearia ainda não conectou o Mercado Pago para cobrança automática.' });
+    return res.status(400).json({ error: 'Esta empresa ainda não conectou o Mercado Pago para cobrança automática.' });
   }
 
   // Dias fixos de vencimento: o cliente escolhe um dos dias liberados pela empresa.

@@ -267,7 +267,7 @@ router.post('/admin/clientes/:id/assinatura/cobrar-agora', async (req, res) => {
         html: emailHtml({
           titulo: `Olá, ${cliente.nome_completo}!`,
           mensagemHtml: `
-            <p style="margin: 0 0 4px;">Sua mensalidade do plano <strong>${plano.nome}</strong> na <strong>${empresa?.nome || 'barbearia'}</strong> está pendente.</p>
+            <p style="margin: 0 0 4px;">Sua mensalidade do plano <strong>${plano.nome}</strong> na <strong>${empresa?.nome || 'empresa'}</strong> está pendente.</p>
             <p style="margin: 12px 0;">Acesse sua área de cliente para conferir os dados de cobrança do cartão.</p>
           `
         })
