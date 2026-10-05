@@ -183,34 +183,32 @@ router.post('/super-admin/prospeccao/teste', validate(prospeccaoTesteSchema), as
 });
 
 // --- Conexão do WhatsApp de prospecção: QR Code ou código de pareamento, igual ao admin da
-// empresa (routes/whatsappInstancia.js), numa instância própria (NOME_INSTANCIA).
+// empresa (routes/whatsappInstancia.js), numa instância própria.
+//
+// Cada conexão nova ganha um nome de instância novo (NOME_INSTANCIA + sufixo). Já aconteceu de a
+// Evolution ficar com uma instância presa — dizendo "open" com o celular já desconectado e
+// recusando ser apagada —, e com nome fixo isso bloqueava qualquer reconexão ("already in use").
 
 const conectada = async (instancia) => (await obterStatusConexao(instancia).catch(() => ({ state: 'close' }))).state === 'open';
 
-// Apaga a instância na Evolution e cria de novo do zero: usado quando ela ficou presa (não está
-// conectada e também não gera QR Code/código novo).
-async function recriarInstancia(opcoes) {
-  const instancia = prospeccao.NOME_INSTANCIA;
-  await removerInstancia(instancia).catch((err) => console.error('Prospecção: erro ao remover instância presa:', err.message || err));
-  // A Evolution leva um instante pra liberar o nome depois do delete.
-  await new Promise((r) => setTimeout(r, 1500));
-  const criada = await criarInstancia(instancia, { ...opcoes, configuracoes: CONFIG_INSTANCIA });
-  await prospeccao.definirInstanciaProspeccao(instancia);
-  return criada;
+const novoNomeInstancia = () => `${prospeccao.NOME_INSTANCIA}-${Date.now().toString(36)}`;
+
+// Remoção best-effort: instância antiga que a Evolution não deixa apagar só fica órfã lá.
+async function removerSemFalhar(instancia) {
+  try {
+    await removerInstancia(instancia);
+    return null;
+  } catch (err) {
+    console.error(`Prospecção: não foi possível remover a instância ${instancia}:`, err.message || err);
+    return err.message || 'erro desconhecido';
+  }
 }
 
-// Cria a instância de prospecção na Evolution. Se ela já existir lá (ex: um "Desconectar" anterior
-// em que a Evolution não conseguiu apagá-la): conectada, só reaproveita; senão, recria do zero.
-async function criarOuReaproveitarInstancia(opcoes) {
-  const instancia = prospeccao.NOME_INSTANCIA;
-  let criada = null;
-  try {
-    criada = await criarInstancia(instancia, { ...opcoes, configuracoes: CONFIG_INSTANCIA });
-  } catch (err) {
-    if (!/already in use/i.test(err.message || '')) throw err;
-    if (await conectada(instancia)) await aplicarConfiguracoes(instancia, CONFIG_INSTANCIA).catch(() => {});
-    else criada = await recriarInstancia(opcoes);
-  }
+// Cria uma instância nova (descartando a anterior, se houver) e registra como a de prospecção.
+async function novaInstancia(opcoes, anterior) {
+  if (anterior) await removerSemFalhar(anterior);
+  const instancia = novoNomeInstancia();
+  const criada = await criarInstancia(instancia, { ...opcoes, configuracoes: CONFIG_INSTANCIA });
   await prospeccao.definirInstanciaProspeccao(instancia);
   return { instancia, criada };
 }
@@ -219,15 +217,18 @@ router.post('/super-admin/prospeccao/whatsapp/qrcode', async (req, res) => {
   if (!estaConfigurado()) return res.status(503).json({ error: 'Integração de WhatsApp não está disponível no momento.' });
   try {
     let instancia = await prospeccao.obterInstanciaProspeccao({ semCache: true });
-    let qrcode;
-    if (!instancia) {
-      const resultado = await criarOuReaproveitarInstancia({});
-      instancia = resultado.instancia;
-      qrcode = resultado.criada?.qrcode;
+    let qrcode = null;
+    if (instancia) {
+      if (await conectada(instancia)) return res.status(409).json({ error: 'O WhatsApp de prospecção já está conectado. Pra trocar de número, desconecte primeiro.' });
+      qrcode = await obterQrCode(instancia).catch(() => null);
     }
-    if (!qrcode?.base64) qrcode = await obterQrCode(instancia);
-    if (!qrcode?.base64 && !(await conectada(instancia))) qrcode = (await recriarInstancia({}))?.qrcode;
-    if (!qrcode?.base64) return res.status(409).json({ error: 'Não foi possível gerar o QR Code agora. Se o WhatsApp já estiver conectado, não é preciso escanear de novo.' });
+    // Sem instância, ou a atual não gera QR (presa): começa uma nova.
+    if (!qrcode?.base64) {
+      const nova = await novaInstancia({}, instancia);
+      instancia = nova.instancia;
+      qrcode = nova.criada?.qrcode?.base64 ? nova.criada.qrcode : await obterQrCode(instancia);
+    }
+    if (!qrcode?.base64) return res.status(409).json({ error: 'Não foi possível gerar o QR Code agora. Tente de novo em alguns segundos.' });
     res.json({ qrcode: qrcode.base64 });
   } catch (err) {
     console.error('Erro ao gerar QR Code da prospecção:', err);
@@ -242,17 +243,13 @@ router.post('/super-admin/prospeccao/whatsapp/codigo', validate(whatsappTesteSch
   if (numero.length < 12 || numero.length > 13) return res.status(400).json({ error: 'Informe o número do WhatsApp com DDD. Ex: (11) 91234-5678.' });
 
   try {
-    let instancia = await prospeccao.obterInstanciaProspeccao({ semCache: true });
-    if (!instancia) {
-      // qrcode: false de propósito, senão o pedido de código volta vazio (ver criarInstancia).
-      ({ instancia } = await criarOuReaproveitarInstancia({ qrcode: false }));
-    }
-    let dados = await obterCodigoPareamento(instancia, numero);
-    if (!dados?.pairingCode && !(await conectada(instancia))) {
-      await recriarInstancia({ qrcode: false });
-      dados = await obterCodigoPareamento(instancia, numero);
-    }
-    if (!dados?.pairingCode) return res.status(409).json({ error: 'Não foi possível gerar o código agora. Se o WhatsApp já estiver conectado, não é preciso conectar de novo; senão, tente pelo QR Code.' });
+    const atual = await prospeccao.obterInstanciaProspeccao({ semCache: true });
+    if (atual && (await conectada(atual))) return res.status(409).json({ error: 'O WhatsApp de prospecção já está conectado. Pra trocar de número, desconecte primeiro.' });
+    // Código de pareamento só funciona numa instância criada sem QR (ver criarInstancia), então
+    // sempre começa uma nova aqui.
+    const { instancia } = await novaInstancia({ qrcode: false }, atual);
+    const dados = await obterCodigoPareamento(instancia, numero);
+    if (!dados?.pairingCode) return res.status(409).json({ error: 'Não foi possível gerar o código agora. Tente pelo QR Code.' });
     res.json({ codigo: dados.pairingCode });
   } catch (err) {
     console.error('Erro ao gerar código de pareamento da prospecção:', err);
@@ -260,22 +257,19 @@ router.post('/super-admin/prospeccao/whatsapp/codigo', validate(whatsappTesteSch
   }
 });
 
+// Sempre libera o registro: se a Evolution não conseguir apagar a instância, ela fica órfã lá e a
+// próxima conexão usa um nome novo. O aviso pede pra conferir o celular, porque nesse caso a
+// conexão pode continuar aparecendo em "Aparelhos conectados".
 router.post('/super-admin/prospeccao/whatsapp/desconectar', async (req, res) => {
   const instancia = await prospeccao.obterInstanciaProspeccao({ semCache: true });
-  if (instancia) {
-    try {
-      await removerInstancia(instancia);
-    } catch (err) {
-      // Não apaga o registro nosso se a Evolution não desligou: senão a tela mostrava "desconectado"
-      // com o celular ainda conectado, e reconectar dava "already in use".
-      console.error('Erro ao remover a instância de prospecção:', err);
-      if (await conectada(instancia)) {
-        return res.status(502).json({ error: 'O servidor do WhatsApp não conseguiu desconectar agora. Tente de novo em instantes, ou desconecte pelo celular (Aparelhos conectados).' });
-      }
-    }
-  }
+  const erro = instancia ? await removerSemFalhar(instancia) : null;
   await prospeccao.definirInstanciaProspeccao(null);
-  res.json({ success: true, message: 'WhatsApp de prospecção desconectado.' });
+  res.json({
+    success: true,
+    message: erro
+      ? 'Desconectado do sistema. Se a conexão ainda aparecer no celular, remova em WhatsApp > Aparelhos conectados.'
+      : 'WhatsApp de prospecção desconectado.'
+  });
 });
 
 module.exports = router;
