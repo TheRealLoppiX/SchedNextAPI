@@ -33,7 +33,48 @@ function gerarCodigoInterno(produtoId) {
 }
 
 const ERRO_CODIGO_DUPLICADO = 'Já existe um produto com esse código de barras.';
+const ERRO_NOME_DUPLICADO = 'Já existe um produto com esse nome.';
 const ehCodigoDuplicado = (error) => error?.code === '23505';
+
+// Mesma normalização do frontend (AdminEstoque.js): "Pomada  Modeladora" e "pomada modeladora"
+// contam como o mesmo produto. Acento também não diferencia, senão "Gel" e "Gél" viravam dois.
+const normalizarNome = (nome) => String(nome || '')
+  .normalize('NFD').replace(/\p{Diacritic}/gu, '')
+  .trim().replace(/\s+/g, ' ').toLowerCase();
+
+// Trava de duplicidade antes de gravar: devolve o produto já cadastrado com o mesmo código de
+// barras ou nome (fora o próprio, na edição), pra tela abrir ele em vez de criar outro. O índice
+// único de codigo_barras continua no banco como última barreira; nome não tem índice porque
+// empresas antigas podem já ter duplicados, que travariam a migração.
+async function buscarDuplicado(empresaId, { nome, codigo_barras }, ignorarId = null) {
+  const { data, error } = await supabase
+    .from('produtos')
+    .select('id, nome, codigo_barras')
+    .eq('empresa_id', empresaId)
+    .is('excluido_em', null);
+  if (error) throw error;
+  const outros = (data || []).filter((p) => String(p.id) !== String(ignorarId));
+  if (codigo_barras) {
+    const porCodigo = outros.find((p) => p.codigo_barras === codigo_barras);
+    if (porCodigo) return { produto: porCodigo, erro: ERRO_CODIGO_DUPLICADO };
+  }
+  const alvo = normalizarNome(nome);
+  const porNome = outros.find((p) => normalizarNome(p.nome) === alvo);
+  if (porNome) return { produto: porNome, erro: ERRO_NOME_DUPLICADO };
+  return null;
+}
+
+async function recusarSeDuplicado(res, empresaId, dados, ignorarId) {
+  try {
+    const duplicado = await buscarDuplicado(empresaId, dados, ignorarId);
+    if (!duplicado) return false;
+    res.status(409).json({ error: duplicado.erro, produto_existente_id: duplicado.produto.id });
+  } catch (e) {
+    console.error('Erro ao checar produto duplicado:', e);
+    res.status(500).json({ error: 'Erro ao validar o produto.' });
+  }
+  return true;
+}
 
 // ?tipo=venda|uso filtra; sem filtro vem tudo (a tela de estoque separa em abas).
 router.get('/admin/estoque/:empresaId', async (req, res) => {
@@ -71,6 +112,7 @@ router.get('/admin/estoque/codigo/:codigo', async (req, res) => {
 
 router.post('/admin/estoque', validate(estoqueProdutoSchema), async (req, res) => {
   const { nome, tipo, codigo_barras, valor, custo, data_compra, quantidade, usuario_nome } = req.body;
+  if (await recusarSeDuplicado(res, req.empresaId, { nome, codigo_barras })) return;
 
   const { data: produto, error } = await supabase
     .from('produtos')
@@ -120,6 +162,7 @@ router.post('/admin/estoque', validate(estoqueProdutoSchema), async (req, res) =
 // Quantidade não muda aqui, só por movimentação (entrada/saída com histórico).
 router.put('/admin/estoque/:id', validate(estoqueProdutoSchema), async (req, res) => {
   const { nome, tipo, codigo_barras, valor, custo } = req.body;
+  if (await recusarSeDuplicado(res, req.empresaId, { nome, codigo_barras }, req.params.id)) return;
   const { data, error } = await supabase
     .from('produtos')
     .update({
