@@ -23,6 +23,9 @@ const {
   inserirAgendamento
 } = require('./helpers');
 const { processar: processarComAgente } = require('./agente');
+const { carregarMensagensBot } = require('./mensagensBot');
+
+const OPCOES_MENU = '1. Agendar um horário\n2. Ver ou cancelar meus agendamentos';
 
 // Interpreta texto livre (ex: "quero cortar amanhã de tarde") e mapeia pra uma das opções do
 // menu. Usado tanto na primeira mensagem de uma conversa nova quanto como uma última tentativa
@@ -84,6 +87,9 @@ async function obterConfigBot(empresaId) {
   const permiteIa = !!data?.plano_plataforma?.permite_ia;
   const personalidadeLiberada = permiteIa && PERSONALIDADE_BOT_DISPONIVEL;
   return {
+    // Textos de cada estado da conversa: empresa > padrão do admin absoluto > fábrica (ver
+    // mensagensBot.js). msg(chave, vars) devolve o texto já com as variáveis trocadas.
+    msg: await carregarMensagensBot(empresaId),
     permiteIa,
     modo: permiteIa ? (data?.whatsapp_bot_modo || 'guiado') : 'guiado',
     nome: personalidadeLiberada ? (data?.whatsapp_bot_nome || null) : null,
@@ -132,22 +138,22 @@ async function comPersonalidade(texto, config) {
 // As duas construções abaixo (agendar / ver-agendamentos) ficam à parte de processarMensagem
 // porque são chamadas de dois lugares: a partir do menu normal, e a partir de
 // tentarInterceptarGlobal (quando o cliente pede isso em texto livre no meio de outro estado).
-async function construirRespostaAgendar(empresaId) {
+async function construirRespostaAgendar(empresaId, t) {
   if (await limiteAgendamentosMesAtingido(empresaId)) {
-    return { texto: 'Desculpe, este estabelecimento atingiu o limite de agendamentos do mês. Tente novamente em breve.', estado: 'inicio', dados: {} };
+    return { texto: t('limite_mes'), estado: 'inicio', dados: {} };
   }
   const barbeiros = await listarBarbeirosAtivos(empresaId);
   if (barbeiros.length === 0) {
-    return { texto: 'No momento não há profissionais disponíveis para agendamento.', estado: 'inicio', dados: {} };
+    return { texto: t('sem_profissionais'), estado: 'inicio', dados: {} };
   }
   const lista = barbeiros.map((b, i) => `${i + 1}. ${b.nome}`).join('\n');
-  return { texto: `Com quem você quer agendar?\n${lista}`, estado: 'aguardando_barbeiro', dados: { barbeiros } };
+  return { texto: t('escolher_profissional', { lista }), estado: 'aguardando_barbeiro', dados: { barbeiros } };
 }
 
-async function construirRespostaVerAgendamentos(empresaId, telefone) {
+async function construirRespostaVerAgendamentos(empresaId, telefone, t) {
   const cliente = await encontrarClientePorTelefone(empresaId, telefone);
   if (!cliente) {
-    return { texto: 'Não encontrei nenhum cadastro com este número de telefone. Digite *MENU* para ver as opções.', estado: 'inicio', dados: {} };
+    return { texto: t('sem_cadastro'), estado: 'inicio', dados: {} };
   }
 
   const { data: futuros } = await supabase
@@ -161,7 +167,7 @@ async function construirRespostaVerAgendamentos(empresaId, telefone) {
     .limit(10);
 
   if (!futuros || futuros.length === 0) {
-    return { texto: 'Você não tem nenhum agendamento futuro. Digite *MENU* para ver as opções.', estado: 'inicio', dados: {} };
+    return { texto: t('sem_agendamentos'), estado: 'inicio', dados: {} };
   }
 
   const futurosFmt = futuros.map((a) => {
@@ -173,7 +179,7 @@ async function construirRespostaVerAgendamentos(empresaId, telefone) {
   const lista = futurosFmt.map((f, i) => `${i + 1}. ${f.dataFmt} às ${f.horaFmt}, ${f.nome}`).join('\n');
 
   return {
-    texto: `Seus próximos agendamentos:\n${lista}\n\nDigite o número de um deles para cancelar, ou *MENU* para voltar.`,
+    texto: t('lista_agendamentos', { lista }),
     estado: 'aguardando_escolha_agendamento',
     dados: { agendamentos: futuros }
   };
@@ -184,10 +190,10 @@ async function construirRespostaVerAgendamentos(empresaId, telefone) {
 // ou pedir outra coisa a qualquer momento em texto livre, sem precisar digitar SAIR/MENU antes
 // pra depois recomeçar. Retorna null se não identificou nada, e quem chamou segue com a mensagem
 // de erro específica daquele estado.
-async function tentarInterceptarGlobal(msg, msgLower, empresaId, telefone) {
+async function tentarInterceptarGlobal(msg, msgLower, empresaId, telefone, t) {
   const intencao = await resolverIntencaoGlobal(msg, msgLower, { atalhosNumericos: false });
-  if (intencao === 'agendar') return construirRespostaAgendar(empresaId);
-  if (intencao === 'agendamentos') return construirRespostaVerAgendamentos(empresaId, telefone);
+  if (intencao === 'agendar') return construirRespostaAgendar(empresaId, t);
+  if (intencao === 'agendamentos') return construirRespostaVerAgendamentos(empresaId, telefone, t);
   return null;
 }
 
@@ -207,6 +213,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   const dados = sessao.dados_temporarios || {};
   const msg = (texto || '').trim();
   const msgLower = msg.toLowerCase();
+  const t = config.msg;
 
   const responder = async (resposta, novoEstado, novosDados) => {
     await enviarMensagem(instancia, telefone, await comPersonalidade(resposta, config));
@@ -218,17 +225,15 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   // "Digite MENU"), e não havia nenhuma forma de abortar um fluxo de agendamento no meio (ex: o
   // cliente errou o profissional e queria recomeçar sem esperar toda a conversa expirar sozinha).
   if (sessao.estado_atual !== 'inicio' && msgLower === 'sair') {
-    return responder('Até logo! Quando quiser, é só chamar de novo.', 'inicio', {});
+    return responder(t('sair'), 'inicio', {});
   }
   if (sessao.estado_atual !== 'inicio' && sessao.estado_atual !== 'menu' && msgLower === 'cancelar') {
-    return responder(
-      'Ok, cancelei o que você estava fazendo.\n\nO que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.',
-      'menu'
-    );
+    return responder(t('cancelar_fluxo', { opcoes: OPCOES_MENU }), 'menu');
   }
 
-  // A saudação ("Olá! 👋") é customizável por empresa (whatsapp_bot_boas_vindas); o resto do menu
-  // continua fixo, já que é uma lista numerada (ver comPersonalidade acima). O link da loja entra
+  // A saudação ("Olá! 👋") é customizável por empresa (whatsapp_bot_boas_vindas) e o texto em
+  // volta também (mensagem 'menu', ver mensagensBot.js); só a lista numerada {opcoes} é fixa, já
+  // que o número precisa bater com o que a máquina de estados espera. O link da loja entra
   // aqui (não numa linha numerada) porque quem prefere terminar pelo site precisa saber que a
   // opção existe logo de cara, sem precisar perguntar. Função (não string pronta) de propósito:
   // só faz a consulta pra saber se o telefone já tem cadastro (e assim gerar um link com login
@@ -246,8 +251,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
     // caso mais comum de mensagem de menu. `link &&` primeiro: sem cliente E sem config.linkLoja,
     // link pode ser null, e null.includes() quebra.
     const jaLogado = !!link && link.includes('/entrar-magico');
-    const linkLojaTexto = link ? ` Ou pelo site${jaLogado ? ' (já logado)' : ''}: ${link}` : '';
-    return `${saudacao} O que deseja fazer?\n1. Agendar um horário\n2. Ver ou cancelar meus agendamentos\n\nDigite o número, ou *SAIR* para encerrar.${linkLojaTexto}`;
+    return t('menu', { saudacao, opcoes: OPCOES_MENU, link: link || '', ja_logado: jaLogado ? ' (já logado)' : '' });
   };
 
   // "menu" digitado explicitamente sempre mostra o menu, em qualquer estado — é um pedido
@@ -263,12 +267,12 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
     // não identificar nada.
     const intencao = await resolverIntencaoGlobal(msg, msgLower, { atalhosNumericos: true });
     if (intencao === 'agendar') {
-      const { texto: t, estado, dados: d } = await construirRespostaAgendar(empresaId);
-      return responder(t, estado, d);
+      const { texto: r, estado, dados: d } = await construirRespostaAgendar(empresaId, t);
+      return responder(r, estado, d);
     }
     if (intencao === 'agendamentos') {
-      const { texto: t, estado, dados: d } = await construirRespostaVerAgendamentos(empresaId, telefone);
-      return responder(t, estado, d);
+      const { texto: r, estado, dados: d } = await construirRespostaVerAgendamentos(empresaId, telefone, t);
+      return responder(r, estado, d);
     }
     return responder(await montarMensagemMenu(), 'menu');
   }
@@ -277,31 +281,31 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
     const opcaoEscolhida = await resolverIntencaoGlobal(msg, msgLower, { atalhosNumericos: true });
 
     if (opcaoEscolhida === 'agendar') {
-      const { texto: t, estado, dados: d } = await construirRespostaAgendar(empresaId);
-      return responder(t, estado, d);
+      const { texto: r, estado, dados: d } = await construirRespostaAgendar(empresaId, t);
+      return responder(r, estado, d);
     }
 
     if (opcaoEscolhida === 'agendamentos') {
-      const { texto: t, estado, dados: d } = await construirRespostaVerAgendamentos(empresaId, telefone);
-      return responder(t, estado, d);
+      const { texto: r, estado, dados: d } = await construirRespostaVerAgendamentos(empresaId, telefone, t);
+      return responder(r, estado, d);
     }
 
-    return responder('Não entendi. Digite *1* para agendar ou *2* para ver seus agendamentos.', 'menu');
+    return responder(t('menu_nao_entendi'), 'menu');
   }
 
   if (sessao.estado_atual === 'aguardando_escolha_agendamento') {
     const idx = parseInt(msg, 10) - 1;
     const escolhido = (dados.agendamentos || [])[idx];
     if (!escolhido) {
-      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone);
+      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone, t);
       if (global) return responder(global.texto, global.estado, global.dados);
-      return responder('Escolha um número válido da lista, ou digite *MENU* para voltar.', 'aguardando_escolha_agendamento');
+      return responder(t('agendamento_invalido'), 'aguardando_escolha_agendamento');
     }
 
     const dh = new Date(escolhido.data_hora);
     const dataFmt = `${String(dh.getUTCDate()).padStart(2, '0')}/${String(dh.getUTCMonth() + 1).padStart(2, '0')} às ${String(dh.getUTCHours()).padStart(2, '0')}:${String(dh.getUTCMinutes()).padStart(2, '0')}`;
     return responder(
-      `Confirma cancelar o agendamento de ${dataFmt} com ${escolhido.barbeiros?.nome || 'profissional'}?\nResponda *SIM* ou *NAO*.`,
+      t('confirmar_cancelamento', { data: dataFmt, profissional: escolhido.barbeiros?.nome || 'profissional' }),
       'confirmando_cancelamento',
       { ...dados, agendamento_cancelar_id: escolhido.id, agendamento_cancelar_texto: dataFmt }
     );
@@ -309,7 +313,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
 
   if (sessao.estado_atual === 'confirmando_cancelamento') {
     if (msgLower !== 'sim') {
-      return responder('Ok, mantive seu agendamento. Digite *MENU* para ver as opções.', 'inicio', {});
+      return responder(t('cancelamento_mantido'), 'inicio', {});
     }
     const { error: erroCancelar } = await supabase
       .from('agendamentos')
@@ -319,21 +323,21 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
 
     if (erroCancelar) {
       console.error('Erro ao cancelar agendamento via WhatsApp:', erroCancelar);
-      return responder('Não consegui cancelar agora. Tente novamente em instantes.', 'inicio', {});
+      return responder(t('erro_cancelar'), 'inicio', {});
     }
-    return responder(`Agendamento de ${dados.agendamento_cancelar_texto} cancelado. Digite *MENU* para ver as opções.`, 'inicio', {});
+    return responder(t('cancelado', { data: dados.agendamento_cancelar_texto }), 'inicio', {});
   }
 
   if (sessao.estado_atual === 'aguardando_barbeiro') {
     const idx = parseInt(msg, 10) - 1;
     const escolhido = (dados.barbeiros || [])[idx];
     if (!escolhido) {
-      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone);
+      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone, t);
       if (global) return responder(global.texto, global.estado, global.dados);
-      return responder('Escolha um número válido da lista.', 'aguardando_barbeiro');
+      return responder(t('profissional_invalido'), 'aguardando_barbeiro');
     }
     return responder(
-      `Para qual dia? Responda *hoje*, *amanha* ou uma data (dd/mm).`,
+      t('pedir_data', { profissional: escolhido.nome }),
       'aguardando_data',
       { ...dados, barbeiro_id: escolhido.id, barbeiro_nome: escolhido.nome }
     );
@@ -342,37 +346,37 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   if (sessao.estado_atual === 'aguardando_data') {
     const dataEscolhida = parseDataFalada(msg);
     if (!dataEscolhida) {
-      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone);
+      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone, t);
       if (global) return responder(global.texto, global.estado, global.dados);
-      return responder('Não entendi a data. Responda *hoje*, *amanha* ou dd/mm.', 'aguardando_data');
+      return responder(t('data_invalida'), 'aguardando_data');
     }
     const slots = await horariosDisponiveis(empresaId, dados.barbeiro_id, dataEscolhida);
-    if (slots.length === 0) return responder('Não há horários livres nesse dia. Tente outra data.', 'aguardando_data', dados);
+    if (slots.length === 0) return responder(t('sem_horarios'), 'aguardando_data', dados);
     const lista = slots.map((h, i) => `${i + 1}. ${h}`).join('\n');
-    return responder(`Horários livres:\n${lista}`, 'aguardando_horario', { ...dados, data: dataEscolhida, slots });
+    return responder(t('escolher_horario', { lista }), 'aguardando_horario', { ...dados, data: dataEscolhida, slots });
   }
 
   if (sessao.estado_atual === 'aguardando_horario') {
     const idx = parseInt(msg, 10) - 1;
     const horaEscolhida = (dados.slots || [])[idx];
     if (!horaEscolhida) {
-      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone);
+      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone, t);
       if (global) return responder(global.texto, global.estado, global.dados);
-      return responder('Escolha um número válido da lista de horários.', 'aguardando_horario');
+      return responder(t('horario_invalido'), 'aguardando_horario');
     }
     const servicos = await listarServicosAtivos(empresaId);
-    if (servicos.length === 0) return responder('Nenhum serviço cadastrado para agendamento no momento.', 'inicio', {});
+    if (servicos.length === 0) return responder(t('sem_servicos'), 'inicio', {});
     const lista = servicos.map((s, i) => `${i + 1}. ${s.nome} (R$ ${Number(s.valor).toFixed(2)})`).join('\n');
-    return responder(`Qual serviço?\n${lista}`, 'aguardando_servico', { ...dados, hora: horaEscolhida, servicos });
+    return responder(t('escolher_servico', { lista }), 'aguardando_servico', { ...dados, hora: horaEscolhida, servicos });
   }
 
   if (sessao.estado_atual === 'aguardando_servico') {
     const idx = parseInt(msg, 10) - 1;
     const servicoEscolhido = (dados.servicos || [])[idx];
     if (!servicoEscolhido) {
-      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone);
+      const global = await tentarInterceptarGlobal(msg, msgLower, empresaId, telefone, t);
       if (global) return responder(global.texto, global.estado, global.dados);
-      return responder('Escolha um número válido da lista de serviços.', 'aguardando_servico');
+      return responder(t('servico_invalido'), 'aguardando_servico');
     }
 
     const usuarioExistente = await encontrarClientePorTelefone(empresaId, telefone);
@@ -383,13 +387,13 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
       return criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sessao, dados: novosDados, nomeCliente: usuarioExistente.nome_completo, config });
     }
 
-    return responder('Não te encontrei no cadastro. Qual seu nome completo?', 'aguardando_nome', novosDados);
+    return responder(t('pedir_nome'), 'aguardando_nome', novosDados);
   }
 
   if (sessao.estado_atual === 'aguardando_nome') {
-    if (msg.length < 2) return responder('Digite seu nome completo, por favor.', 'aguardando_nome');
+    if (msg.length < 2) return responder(t('nome_invalido'), 'aguardando_nome');
     return responder(
-      `Prazer, ${msg}! Agora preciso do seu e-mail pra confirmar o cadastro.`,
+      t('pedir_email', { nome: msg }),
       'aguardando_email',
       { ...dados, nome_cadastro: msg }
     );
@@ -398,7 +402,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   if (sessao.estado_atual === 'aguardando_email') {
     const emailNormalizado = msg.toLowerCase();
     if (!EMAIL_REGEX.test(emailNormalizado)) {
-      return responder('Esse e-mail não parece válido. Digite seu e-mail:', 'aguardando_email');
+      return responder(t('email_invalido'), 'aguardando_email');
     }
 
     const { data: emailJaExiste } = await supabase
@@ -409,11 +413,11 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
       .maybeSingle();
 
     if (emailJaExiste) {
-      return responder('Esse e-mail já tem cadastro por aqui. Digite outro e-mail, ou *SAIR* para cancelar.', 'aguardando_email');
+      return responder(t('email_ja_existe'), 'aguardando_email');
     }
 
     return responder(
-      'Show! Agora escolha uma senha (mínimo 6 caracteres), pode usar depois pra entrar no site como cliente.',
+      t('pedir_senha'),
       'aguardando_senha',
       { ...dados, email_cadastro: emailNormalizado }
     );
@@ -421,7 +425,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
 
   if (sessao.estado_atual === 'aguardando_senha') {
     if (msg.length < 6) {
-      return responder('A senha precisa ter pelo menos 6 caracteres. Digite uma senha:', 'aguardando_senha');
+      return responder(t('senha_curta'), 'aguardando_senha');
     }
 
     const senhaHash = await bcrypt.hash(msg, 12);
@@ -437,13 +441,13 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
 
     if (erroPendente) {
       console.error('Erro ao criar cadastro pendente via bot do WhatsApp:', erroPendente);
-      return responder('Não consegui gerar o código de confirmação agora. Tente novamente em instantes.', 'aguardando_senha', dados);
+      return responder(t('erro_gerar_codigo'), 'aguardando_senha', dados);
     }
 
     enviarEmailCodigoCadastro(dados.email_cadastro, dados.nome_cadastro, codigo);
 
     return responder(
-      `Mandamos um código de confirmação para ${dados.email_cadastro}. Digite o código aqui para concluir o cadastro (ou *REENVIAR* para receber um novo).`,
+      t('codigo_enviado', { email: dados.email_cadastro }),
       'aguardando_codigo_cadastro',
       dados
     );
@@ -463,7 +467,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
         .maybeSingle();
 
       if (!pendenteAtual) {
-        return responder('Seu cadastro pendente expirou. Digite *MENU* para recomeçar.', 'inicio', {});
+        return responder(t('cadastro_expirado'), 'inicio', {});
       }
 
       const codigo = gerarCodigoConfirmacao();
@@ -475,12 +479,12 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
         dados: pendenteAtual.dados
       });
       if (!erroPendente) enviarEmailCodigoCadastro(dados.email_cadastro, dados.nome_cadastro, codigo);
-      return responder('Novo código enviado! Digite ele aqui para concluir o cadastro.', 'aguardando_codigo_cadastro', dados);
+      return responder(t('codigo_reenviado'), 'aguardando_codigo_cadastro', dados);
     }
 
     const pendente = await buscarPendenteValido({ tipo: 'cliente', email: dados.email_cadastro, codigo: msg });
     if (!pendente) {
-      return responder('Código inválido ou expirado. Confira o e-mail e digite de novo, ou *REENVIAR* para receber um novo código.', 'aguardando_codigo_cadastro');
+      return responder(t('codigo_invalido'), 'aguardando_codigo_cadastro');
     }
 
     const { nome, nascimento, telefone: telefonePendente, senha, empresa_id } = pendente.dados;
@@ -501,7 +505,7 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
 
     if (erroCadastro) {
       console.error('Erro ao ativar cadastro via bot do WhatsApp:', erroCadastro);
-      return responder('Não consegui concluir seu cadastro agora. Tente novamente em instantes, ou digite *MENU*.', 'inicio', {});
+      return responder(t('erro_cadastro'), 'inicio', {});
     }
 
     await removerPendente(pendente.id);
@@ -513,12 +517,12 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
   // (ou qualquer coisa que não seja "sim") só encerra normalmente, sem travar o fluxo.
   if (sessao.estado_atual === 'aguardando_pix') {
     if (msgLower !== 'sim') {
-      return responder('Sem problema, é só pagar direto no local. Digite *MENU* para agendar outro horário.', 'inicio', {});
+      return responder(t('pix_recusado'), 'inicio', {});
     }
-    return gerarPixEEnviar({ empresaId, telefone, instancia, sessao, dados });
+    return gerarPixEEnviar({ empresaId, telefone, instancia, sessao, dados, config });
   }
 
-  return responder('Digite *MENU* para ver as opções.', 'inicio', {});
+  return responder(t('fallback'), 'inicio', {});
 }
 
 // Gera a mesma cobrança Pix usada no PDV (ver POST /admin/mercadopago/pix/:agendamentoId), só que
@@ -526,12 +530,12 @@ async function processarMensagem({ empresaId, telefone, texto, instancia }) {
 // 100% pelo webhook do Mercado Pago já existente (routes/mercadopago.js -> reconfirmarPagamento ->
 // notificarPagamentoConfirmado) — daqui só sai o convite pra pagar, o aviso de "pago" chega depois
 // por conta própria, de forma assíncrona.
-async function gerarPixEEnviar({ empresaId, telefone, instancia, sessao, dados }) {
+async function gerarPixEEnviar({ empresaId, telefone, instancia, sessao, dados, config }) {
   const finalizar = () => salvarSessao(sessao, 'inicio', {});
 
   const { data: empresa } = await supabase.from('empresas').select('nome, mercadopago_access_token').eq('id', empresaId).maybeSingle();
   if (!empresa?.mercadopago_access_token) {
-    await enviarMensagem(instancia, telefone, 'Não consegui gerar o Pix agora. Digite *MENU* para agendar outro horário.');
+    await enviarMensagem(instancia, telefone, config.msg('pix_erro'));
     return finalizar();
   }
 
@@ -557,10 +561,10 @@ async function gerarPixEEnviar({ empresaId, telefone, instancia, sessao, dados }
     if (!qrCode) throw new Error('Mercado Pago não devolveu o código Pix.');
 
     if (qrBase64) await enviarImagem(instancia, telefone, qrBase64, `Pix de R$ ${valor.toFixed(2)}`);
-    await enviarMensagem(instancia, telefone, `Código Pix Copia e Cola:\n${qrCode}\n\nAssim que o pagamento cair, te aviso por aqui.`);
+    await enviarMensagem(instancia, telefone, config.msg('pix_codigo', { codigo: qrCode, valor: valor.toFixed(2) }));
   } catch (err) {
     console.error('Erro ao gerar Pix via bot do WhatsApp:', err);
-    await enviarMensagem(instancia, telefone, 'Não consegui gerar o Pix agora. Pode pagar direto no local.');
+    await enviarMensagem(instancia, telefone, config.msg('pix_erro'));
   }
 
   return finalizar();
@@ -580,20 +584,20 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sess
   });
 
   if (resultado.conflito) {
-    await enviarMensagem(instancia, telefone, await comPersonalidade('Esse horário acabou de ser reservado por outra pessoa. Digite *MENU* para tentar outro horário.', config));
+    await enviarMensagem(instancia, telefone, await comPersonalidade(config.msg('horario_ocupado'), config));
     await salvarSessao(sessao, 'inicio', {});
     return;
   }
 
   if (resultado.jaTemNoDia) {
-    await enviarMensagem(instancia, telefone, await comPersonalidade('Você já tem um agendamento marcado para esse dia. Cancele o atual antes de marcar outro, ou escolha outra data. Digite *MENU* para ver as opções.', config));
+    await enviarMensagem(instancia, telefone, await comPersonalidade(config.msg('ja_tem_no_dia'), config));
     await salvarSessao(sessao, 'inicio', {});
     return;
   }
 
   if (!resultado.ok) {
     console.error('Erro ao criar agendamento via WhatsApp:', resultado.erro);
-    await enviarMensagem(instancia, telefone, await comPersonalidade('Não consegui concluir o agendamento agora. Tente novamente em instantes.', config));
+    await enviarMensagem(instancia, telefone, await comPersonalidade(config.msg('erro_agendamento'), config));
     await salvarSessao(sessao, 'inicio', {});
     return;
   }
@@ -605,19 +609,25 @@ async function criarAgendamentoEConfirmar({ empresaId, telefone, instancia, sess
   // o link de verdade em vez de supor, mesmo padrão de montarMensagemMenu logo acima.
   const linkConfirmacao = (await gerarLinkAcesso(config.empresaTenant, dados.usuario_id)) || config.linkLoja;
   const jaLogadoConfirmacao = !!linkConfirmacao && linkConfirmacao.includes('/entrar-magico');
-  const confirmacao = `Agendamento confirmado!\n${dados.barbeiro_nome}, ${dados.servico_nome}\n${dados.data.split('-').reverse().join('/')} às ${dados.hora}` +
-    (linkConfirmacao ? `\n\nGerenciar pelo site${jaLogadoConfirmacao ? ' (já logado)' : ''}: ${linkConfirmacao}` : '');
+  const confirmacao = config.msg('agendamento_confirmado', {
+    profissional: dados.barbeiro_nome,
+    servico: dados.servico_nome,
+    data: dados.data.split('-').reverse().join('/'),
+    hora: dados.hora,
+    link: linkConfirmacao || '',
+    ja_logado: jaLogadoConfirmacao ? ' (já logado)' : ''
+  });
 
   // Oferece adiantar o pagamento via Pix só quando a empresa tem Mercado Pago conectado (ver
   // routes/mercadopago.js) — sem conta conectada não tem pra onde gerar a cobrança.
   const { data: empresaPix } = await supabase.from('empresas').select('mercadopago_access_token').eq('id', empresaId).maybeSingle();
   if (empresaPix?.mercadopago_access_token) {
-    await enviarMensagem(instancia, telefone, await comPersonalidade(`${confirmacao}\n\nQuer adiantar o pagamento agora via Pix? Responda *SIM* ou *NAO*.`, config));
+    await enviarMensagem(instancia, telefone, await comPersonalidade(`${confirmacao}\n\n${config.msg('oferta_pix')}`, config));
     await salvarSessao(sessao, 'aguardando_pix', { agendamento_id: resultado.id, valor_pix: dados.servico_valor });
     return;
   }
 
-  await enviarMensagem(instancia, telefone, await comPersonalidade(`${confirmacao}\n\nDigite *MENU* para agendar outro horário.`, config));
+  await enviarMensagem(instancia, telefone, await comPersonalidade(`${confirmacao}\n\n${config.msg('confirmado_rodape')}`, config));
   await salvarSessao(sessao, 'inicio', {});
 }
 

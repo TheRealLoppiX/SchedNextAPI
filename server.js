@@ -108,6 +108,7 @@ app.use(require('./src/routes/superAdminPlataforma'));
 app.use(require('./src/routes/superAdminPrecificacao'));
 app.use(require('./src/routes/superAdminFinanceiro'));
 app.use(require('./src/routes/superAdminProspeccao'));
+app.use(require('./src/routes/superAdminWhatsappMensagens'));
 app.use(require('./src/routes/chavesAtivacao'));
 app.use(require('./src/routes/perfil'));
 app.use(require('./src/routes/barbeiros'));

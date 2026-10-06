@@ -513,6 +513,13 @@ const whatsappBotConfigSchema = z.object({
   numeros_bloqueados: z.array(z.string().trim().max(20)).max(200).optional()
 });
 
+// Mensagens do bot por estado da conversa (ver services/whatsapp/mensagensBot.js) — mesmo
+// formato pra empresa e pro padrão do admin absoluto. Chave desconhecida é descartada no serviço,
+// aqui só limita tamanho. Texto vazio = volta pro padrão.
+const whatsappBotMensagensSchema = z.object({
+  mensagens: z.record(z.string(), z.string().max(1000, 'Mensagem muito longa (máx. 1000 caracteres)'))
+});
+
 // --- dominioCustomizado.js ---
 
 const dominioCustomizadoSchema = z.object({
@@ -886,6 +893,7 @@ module.exports = {
   apiPublicaAgendamentoSchema,
   whatsappTesteSchema,
   whatsappBotConfigSchema,
+  whatsappBotMensagensSchema,
   dominioCustomizadoSchema,
   contatoEnterpriseSchema,
   superAdminLoginSchema,

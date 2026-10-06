@@ -1,7 +1,8 @@
 const express = require('express');
 const supabase = require('../config/supabase');
 const validate = require('../middleware/validate');
-const { whatsappTesteSchema, whatsappBotConfigSchema } = require('../schemas');
+const { whatsappTesteSchema, whatsappBotConfigSchema, whatsappBotMensagensSchema } = require('../schemas');
+const mensagensBot = require('../services/whatsapp/mensagensBot');
 const { permiteWhatsappBot, permiteIA } = require('../utils/limitesPlano');
 const { estaConfigurado, criarInstancia, obterQrCode, obterCodigoPareamento, obterStatusConexao, removerInstancia, enviarMensagem } = require('../services/whatsapp/provider');
 const { normalizarTelefoneBR } = require('../utils/telefone');
@@ -124,6 +125,37 @@ router.put('/admin/whatsapp/bot-config', validate(whatsappBotConfigSchema), asyn
     return res.status(500).json({ error: 'Erro ao salvar configuração do bot.' });
   }
   res.json({ success: true });
+});
+
+// Mensagens do bot por estado da conversa (ver services/whatsapp/mensagensBot.js). `padroes` é o
+// que vale hoje pra quem não personalizou (padrão do admin absoluto, ou o de fábrica), pra tela
+// mostrar como placeholder; `valores` só o que a empresa mudou.
+router.get('/admin/whatsapp/mensagens', async (req, res) => {
+  const empresa_id = req.empresaId;
+  if (!(await permiteWhatsappBot(empresa_id))) return res.status(403).json({ error: 'Recurso não disponível no seu plano.' });
+  try {
+    const [padroes, valores] = await Promise.all([mensagensBot.obterPadroes(), mensagensBot.obterMensagensEmpresa(empresa_id)]);
+    res.json({ grupos: mensagensBot.catalogo(), padroes, valores });
+  } catch (err) {
+    console.error('Erro ao carregar mensagens do bot:', err);
+    res.status(500).json({ error: 'Erro ao carregar as mensagens do bot.' });
+  }
+});
+
+router.put('/admin/whatsapp/mensagens', validate(whatsappBotMensagensSchema), async (req, res) => {
+  const empresa_id = req.empresaId;
+  if (!(await permiteWhatsappBot(empresa_id))) return res.status(403).json({ error: 'Recurso não disponível no seu plano.' });
+  try {
+    // Texto igual ao padrão atual não é guardado como personalizado: assim, se o admin absoluto
+    // mudar o padrão depois, essa empresa acompanha.
+    const valores = mensagensBot.limparMensagens(req.body.mensagens, await mensagensBot.obterPadroes());
+    const { error } = await supabase.from('empresas').update({ whatsapp_bot_mensagens: valores }).eq('id', empresa_id);
+    if (error) throw error;
+    res.json({ success: true, valores });
+  } catch (err) {
+    console.error('Erro ao salvar mensagens do bot:', err);
+    res.status(500).json({ error: 'Erro ao salvar as mensagens do bot.' });
+  }
 });
 
 // Envia uma mensagem de teste pro próprio admin confirmar que o envio outbound está de fato
