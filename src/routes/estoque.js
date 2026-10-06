@@ -43,14 +43,17 @@ const normalizarNome = (nome) => String(nome || '')
   .trim().replace(/\s+/g, ' ').toLowerCase();
 
 // Trava de duplicidade antes de gravar: devolve o produto já cadastrado com o mesmo código de
-// barras ou nome (fora o próprio, na edição), pra tela abrir ele em vez de criar outro. O índice
-// único de codigo_barras continua no banco como última barreira; nome não tem índice porque
-// empresas antigas podem já ter duplicados, que travariam a migração.
-async function buscarDuplicado(empresaId, { nome, codigo_barras }, ignorarId = null) {
+// barras ou nome (fora o próprio, na edição), pra tela abrir ele em vez de criar outro. Só dentro
+// do mesmo tipo: o mesmo produto pode ter um saldo de revenda ('venda') e outro de uso do
+// estabelecimento ('uso'), cada um numa linha. O índice único (empresa, tipo, codigo_barras)
+// continua no banco como última barreira; nome não tem índice porque empresas antigas podem já
+// ter duplicados, que travariam a migração.
+async function buscarDuplicado(empresaId, { nome, codigo_barras, tipo }, ignorarId = null) {
   const { data, error } = await supabase
     .from('produtos')
     .select('id, nome, codigo_barras')
     .eq('empresa_id', empresaId)
+    .eq('tipo', tipo || 'venda')
     .is('excluido_em', null);
   if (error) throw error;
   const outros = (data || []).filter((p) => String(p.id) !== String(ignorarId));
@@ -95,24 +98,28 @@ router.get('/admin/estoque/:empresaId', async (req, res) => {
 });
 
 // Leitura de código de barras (câmera ou leitor USB) na tela de estoque: acha o produto já
-// cadastrado, ou 404 pra tela oferecer o cadastro com o código já preenchido.
+// cadastrado, ou 404 pra tela oferecer o cadastro com o código já preenchido. O mesmo código pode
+// existir em revenda e em uso: ?tipo= escolhe, e sem ele a revenda vem primeiro.
 router.get('/admin/estoque/codigo/:codigo', async (req, res) => {
-  const { data, error } = await supabase
+  let query = supabase
     .from('produtos')
     .select('*')
     .eq('empresa_id', req.empresaId)
     .eq('codigo_barras', String(req.params.codigo).trim())
     .is('excluido_em', null)
-    .maybeSingle();
+    .order('tipo', { ascending: false })
+    .limit(1);
+  if (['venda', 'uso'].includes(req.query.tipo)) query = query.eq('tipo', req.query.tipo);
+  const { data, error } = await query;
 
   if (error) return res.status(500).json({ error: 'Erro ao buscar produto.' });
-  if (!data) return res.status(404).json({ error: 'Nenhum produto com esse código.' });
-  res.json(data);
+  if (!data?.[0]) return res.status(404).json({ error: 'Nenhum produto com esse código.' });
+  res.json(data[0]);
 });
 
 router.post('/admin/estoque', validate(estoqueProdutoSchema), async (req, res) => {
   const { nome, tipo, codigo_barras, valor, custo, data_compra, quantidade, usuario_nome } = req.body;
-  if (await recusarSeDuplicado(res, req.empresaId, { nome, codigo_barras })) return;
+  if (await recusarSeDuplicado(res, req.empresaId, { nome, codigo_barras, tipo })) return;
 
   const { data: produto, error } = await supabase
     .from('produtos')
@@ -162,7 +169,7 @@ router.post('/admin/estoque', validate(estoqueProdutoSchema), async (req, res) =
 // Quantidade não muda aqui, só por movimentação (entrada/saída com histórico).
 router.put('/admin/estoque/:id', validate(estoqueProdutoSchema), async (req, res) => {
   const { nome, tipo, codigo_barras, valor, custo } = req.body;
-  if (await recusarSeDuplicado(res, req.empresaId, { nome, codigo_barras }, req.params.id)) return;
+  if (await recusarSeDuplicado(res, req.empresaId, { nome, codigo_barras, tipo }, req.params.id)) return;
   const { data, error } = await supabase
     .from('produtos')
     .update({
