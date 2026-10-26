@@ -829,7 +829,23 @@ const prospeccaoTesteSchema = z.object({
   followup: z.boolean().optional()
 });
 
+// --- depoimentos.js (relatos de clientes na landing) ---
+const urlOuVazio = z.preprocess((v) => (v === null || v === undefined ? '' : v), z.string().trim().max(500).refine((t) => t === '' || /^https:\/\//.test(t), 'A foto precisa ser um link https.'));
+const depoimentosSchema = z.object({
+  depoimentos: z.array(z.object({
+    id: z.string().max(64).optional(),
+    nome: z.string().trim().min(2, 'Informe o nome de quem deu o depoimento.').max(80),
+    negocio: z.string().trim().max(100).optional().default(''),
+    cidade: z.string().trim().max(80).optional().default(''),
+    texto: z.string().trim().min(10, 'O depoimento está muito curto.').max(600),
+    nota: z.coerce.number().int().min(1).max(5).optional().default(5),
+    foto_url: urlOuVazio.optional().default(''),
+    ativo: z.boolean().optional().default(true)
+  })).max(30)
+});
+
 module.exports = {
+  depoimentosSchema,
   prospeccaoConfigSchema,
   prospeccaoImportarSchema,
   prospectAtualizarSchema,
