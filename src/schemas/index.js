@@ -840,12 +840,25 @@ const depoimentosSchema = z.object({
     texto: z.string().trim().min(10, 'O depoimento está muito curto.').max(600),
     nota: z.coerce.number().int().min(1).max(5).optional().default(5),
     foto_url: urlOuVazio.optional().default(''),
-    ativo: z.boolean().optional().default(true)
-  })).max(30)
+    ativo: z.boolean().optional().default(true),
+    // Campos de quem enviou pelo painel (ver routes/depoimentos.js) — precisam passar pela
+    // validação, senão o zod os descartaria quando o admin absoluto salva a lista.
+    empresa_id: z.union([z.number(), z.string()]).nullable().optional(),
+    status: z.enum(['pendente', 'aprovado', 'recusado']).optional(),
+    enviado_em: z.string().max(40).optional()
+  })).max(200)
+});
+
+const depoimentoEmpresaSchema = z.object({
+  nome: z.string().trim().min(2, 'Informe seu nome.').max(80),
+  cidade: z.string().trim().max(80).optional().default(''),
+  texto: z.string().trim().min(10, 'Escreva um pouco mais sobre sua experiência.').max(600, 'Use no máximo 600 caracteres.'),
+  nota: z.coerce.number().int().min(1, 'Escolha uma nota.').max(5)
 });
 
 module.exports = {
   depoimentosSchema,
+  depoimentoEmpresaSchema,
   prospeccaoConfigSchema,
   prospeccaoImportarSchema,
   prospectAtualizarSchema,
