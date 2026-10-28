@@ -12,6 +12,7 @@ const { registrarLead } = require('../services/leadsEnterprise');
 const { emailHtml, blocoCodigo } = require('../utils/emailTemplate');
 const { criarPendente, buscarPendenteValido, removerPendente } = require('../services/cadastroPendente');
 const { gerarCodigo } = require('../services/codigoSeguranca');
+const { ipDoCliente } = require('../utils/ipCliente');
 const { verificarCadastro, registrarCadastro } = require('../services/antifraude');
 const { normalizarDocumento } = require('../utils/antifraude');
 
@@ -157,7 +158,7 @@ router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmp
       telefone,
       documento,
       dias_teste: diasTeste || null,
-      ip: req.ip,
+      ip: ipDoCliente(req),
       status_assinatura: diasTeste ? 'trial' : 'ativa',
       horarios_funcionamento: JSON.stringify({
         0: { aberto: false, abre: '08:00', fecha: '18:00', label: 'Domingo' },

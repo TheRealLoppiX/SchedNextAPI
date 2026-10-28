@@ -32,8 +32,11 @@ const app = express();
 // API. São 2 hops confiáveis. Com 1, o req.ip virava o IP do Cloudflare, e o rate limit
 // (cadastro, login, código) passava a contar todos os usuários juntos por borda do CDN, além
 // de o antifraude gravar o IP errado. Configurável por TRUST_PROXY_HOPS caso a infra mude.
-// Atenção: acesso direto ao domínio .onrender.com (sem passar pelo Cloudflare) deixa o IP
-// forjável via X-Forwarded-For; ideal é o Render aceitar tráfego só do Cloudflare.
+// Correção (28/10): não existe Cloudflare nosso na frente da API — ela é chamada direto em
+// schednextapi.onrender.com, atrás só do Cloudflare do próprio Render, e o req.ip resultante às
+// vezes é o IP de uma borda do Cloudflare. Por isso rate limit e antifraude NÃO usam req.ip: usam
+// utils/ipCliente.js (cf-connecting-ip). Este trust proxy fica só pro Express montar req.ip/
+// req.protocol sem erro.
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS) || 2);
 
 // crossOriginResourcePolicy precisa ser "cross-origin": o front (porta 3000) e a API (porta 4000)

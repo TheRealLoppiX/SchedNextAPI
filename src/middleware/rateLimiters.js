@@ -1,4 +1,13 @@
-const rateLimit = require('express-rate-limit');
+const expressRateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = expressRateLimit;
+const { ipDoCliente } = require('../utils/ipCliente');
+
+// Todos os limitadores contam pelo IP real do cliente (ver utils/ipCliente.js), não pelo req.ip.
+// ipKeyGenerator agrupa IPv6 pela sub-rede, pra ninguém escapar do limite trocando de endereço
+// dentro do próprio bloco.
+function rateLimit(opcoes) {
+  return expressRateLimit({ keyGenerator: (req) => ipKeyGenerator(ipDoCliente(req)), ...opcoes });
+}
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -60,4 +69,4 @@ const whatsappWebhookLimiter = rateLimit({
   message: { error: 'Muitas requisições.' }
 });
 
-module.exports = { loginLimiter, cadastroEmpresaLimiter, cadastroClienteLimiter, apiPublicaLimiter, codigoLimiter, whatsappWebhookLimiter };
+module.exports = { rateLimit, loginLimiter, cadastroEmpresaLimiter, cadastroClienteLimiter, apiPublicaLimiter, codigoLimiter, whatsappWebhookLimiter };

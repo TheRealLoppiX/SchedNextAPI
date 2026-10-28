@@ -1,5 +1,5 @@
 const express = require('express');
-const rateLimit = require('express-rate-limit');
+const { rateLimit } = require('../middleware/rateLimiters');
 const supabase = require('../config/supabase');
 
 const router = express.Router();
@@ -21,6 +21,8 @@ const eventosLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Muitas requisições.' }
 });
+
+const { ipDoCliente } = require('../utils/ipCliente');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BOT_RE = /bot|crawl|spider|slurp|headless|lighthouse|pagespeed|preview|facebookexternalhit|embedly|quora link|pinterest|vkshare|w3c_validator|curl|wget|python-requests|axios/i;
@@ -52,7 +54,7 @@ const cacheGeo = new Map();
 const MAX_CACHE_GEO = 1000;
 
 function ipDoVisitante(req) {
-  const ip = String(req.headers['cf-connecting-ip'] || req.ip || '').replace(/^::ffff:/, '').trim();
+  const ip = ipDoCliente(req).trim();
   if (!ip || /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|fc|fd|fe80)/i.test(ip)) return null;
   return ip;
 }
