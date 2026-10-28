@@ -1,5 +1,6 @@
 const express = require('express');
 const supabase = require('../config/supabase');
+const { respostaErroInterno } = require('../utils/erros');
 const verificarTokenCliente = require('../middleware/clienteAuth');
 const validate = require('../middleware/validate');
 const { perfilAtualizarSchema, avaliarSchema } = require('../schemas');
@@ -21,7 +22,7 @@ router.put('/notificacoes/ler-todas/:userId', verificarTokenCliente, async (req,
   if (userId !== req.usuarioId) return res.status(403).json({ error: 'Acesso negado.' });
 
   const { error } = await supabase.from('notificacoes').update({ lida: true }).eq('usuario_id', userId);
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   res.json({ message: 'Notificações lidas' });
 });
 
@@ -35,7 +36,7 @@ router.get('/notificacoes/:userId', verificarTokenCliente, async (req, res) => {
     .order('criado_em', { ascending: false })
     .limit(15);
 
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   res.json(data);
 });
 

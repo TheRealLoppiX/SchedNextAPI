@@ -1,6 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 const supabase = require('../config/supabase');
+const { respostaErroInterno } = require('../utils/erros');
 const { permiteMultiUnidade } = require('../utils/limitesPlano');
 const { obterSlugTenant, resolverEmpresaPorSlug } = require('../utils/tenantContext');
 const validate = require('../middleware/validate');
@@ -221,7 +222,7 @@ router.get('/admin/unidade/equipe', async (req, res) => {
   if (!unidade || unidade.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Unidade não encontrada.' });
 
   const { data, error } = await supabase.from('barbeiros').select('*').eq('empresa_id', req.empresaId).eq('unidade_id', unidadeId);
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   res.json(data);
 });
 

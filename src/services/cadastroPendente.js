@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase');
+const { iguais, MAX_TENTATIVAS } = require('./codigoSeguranca');
 
 const VALIDADE_MINUTOS = 30;
 
@@ -15,23 +16,33 @@ async function criarPendente({ tipo, email, empresa_id, codigo, dados }) {
   return supabase
     .from('cadastros_pendentes')
     .upsert(
-      { tipo, email, empresa_id: empresa_id ?? 0, codigo_verificacao: codigo, dados, expira_em: expiraEm },
+      { tipo, email, empresa_id: empresa_id ?? 0, codigo_verificacao: codigo, dados, expira_em: expiraEm, tentativas: 0 },
       { onConflict: 'tipo,email,empresa_id' }
     );
 }
 
+// Busca pelo e-mail (não pelo código) pra cada palpite errado contar como tentativa: depois de
+// MAX_TENTATIVAS erros o cadastro pendente é descartado e é preciso começar de novo. Antes o
+// código podia ser tentado sem limite durante os 30 minutos de validade (ver codigoSeguranca.js).
 async function buscarPendenteValido({ tipo, email, codigo }) {
   const { data, error } = await supabase
     .from('cadastros_pendentes')
-    .select('id, dados, expira_em')
+    .select('id, dados, expira_em, codigo_verificacao, tentativas')
     .eq('tipo', tipo)
     .eq('email', email)
-    .eq('codigo_verificacao', codigo)
-    .maybeSingle();
+    .gte('expira_em', new Date().toISOString());
 
-  if (error || !data) return null;
-  if (new Date(data.expira_em) < new Date()) return null;
-  return data;
+  if (error || !data?.length) return null;
+  const certo = data.find((p) => (p.tentativas || 0) < MAX_TENTATIVAS && iguais(p.codigo_verificacao, codigo));
+  if (certo) return certo;
+
+  await Promise.all(data.map((p) => {
+    const tentativas = (p.tentativas || 0) + 1;
+    return tentativas >= MAX_TENTATIVAS
+      ? supabase.from('cadastros_pendentes').delete().eq('id', p.id)
+      : supabase.from('cadastros_pendentes').update({ tentativas }).eq('id', p.id);
+  }));
+  return null;
 }
 
 async function removerPendente(id) {

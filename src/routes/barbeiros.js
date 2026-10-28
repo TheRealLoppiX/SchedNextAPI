@@ -1,5 +1,6 @@
 const express = require('express');
 const supabase = require('../config/supabase');
+const { respostaErroInterno } = require('../utils/erros');
 const { obterSlugTenant, resolverEmpresaPorSlug } = require('../utils/tenantContext');
 const { limiteProfissionaisAtingido, confirmarLimiteProfissionaisOuDesfazer } = require('../utils/limitesPlano');
 const validate = require('../middleware/validate');
@@ -67,7 +68,7 @@ router.get('/admin/barbeiro-servicos/:barbeiro_id', async (req, res) => {
     .select('servico_id')
     .eq('barbeiro_id', req.params.barbeiro_id);
 
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   res.json(data.map((r) => r.servico_id));
 });
 
@@ -95,20 +96,20 @@ router.post('/admin/barbeiro-servicos', validate(barbeiroServicosSchema), async 
   }
 
   const { error: delError } = await supabase.from('barbeiro_servicos').delete().eq('barbeiro_id', barbeiro_id);
-  if (delError) return res.status(500).json(delError);
+  if (delError) return respostaErroInterno(res, delError);
 
   if (servicosIds.length === 0) return res.json({ message: 'Serviços removidos' });
 
   const rows = servicosIds.map((servico_id) => ({ barbeiro_id, servico_id }));
   const { error } = await supabase.from('barbeiro_servicos').insert(rows);
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   res.json({ message: 'Serviços atualizados com sucesso!' });
 });
 
 // Listar equipe completa para o Admin
 router.get('/admin/equipe/:empresaId', async (req, res) => {
   const { data, error } = await supabase.from('barbeiros').select('*').eq('empresa_id', req.empresaId);
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   res.json(data);
 });
 
@@ -152,7 +153,7 @@ router.post('/admin/barbeiro', validate(barbeiroCriarSchema), async (req, res) =
     .select('id')
     .single();
 
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
 
   if (!(await confirmarLimiteProfissionaisOuDesfazer(empresa_id, data.id))) {
     return res.status(403).json({ error: 'Você atingiu o limite de profissionais do seu plano atual. Faça upgrade para cadastrar mais.' });
@@ -181,7 +182,7 @@ router.put('/admin/barbeiro/editar', validate(barbeiroEditarSchema), async (req,
     .eq('empresa_id', req.empresaId)
     .select('id');
 
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   if (!data || data.length === 0) return res.status(404).json({ error: 'Profissional não encontrado.' });
   res.json({ success: true });
 });
@@ -225,7 +226,7 @@ router.post('/admin/bloqueio', validate(bloqueioSchema), async (req, res) => {
 
   if (error) {
     console.error('Erro ao inserir bloqueio:', error);
-    return res.status(500).json(error);
+    return respostaErroInterno(res, error);
   }
   res.json({ success: true });
 });
@@ -247,7 +248,7 @@ router.get('/admin/bloqueios/:barbeiro_id', async (req, res) => {
 
   if (error) {
     console.error('Erro no banco:', error);
-    return res.status(500).json(error);
+    return respostaErroInterno(res, error);
   }
   res.json(data);
 });
@@ -261,7 +262,7 @@ router.delete('/admin/bloqueio/:id', async (req, res) => {
   if (!barbeiro || barbeiro.empresa_id !== req.empresaId) return res.status(404).json({ message: 'Não encontrado' });
 
   const { data, error } = await supabase.from('bloqueios').delete().eq('id', req.params.id).select('id');
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   if (!data || data.length === 0) return res.status(404).json({ message: 'Não encontrado' });
   res.json({ success: true });
 });
@@ -284,7 +285,7 @@ router.get('/admin/agenda-barbeiro/:barbeiro_id', async (req, res) => {
     .neq('status', 'cancelado')
     .order('data_hora', { ascending: true });
 
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
 
   const resultado = agendamentos.map((a) => ({
     id: a.id,

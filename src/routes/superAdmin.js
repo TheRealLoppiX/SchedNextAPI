@@ -7,6 +7,7 @@ const transporter = require('../config/mailer');
 const validate = require('../middleware/validate');
 const { loginLimiter, codigoLimiter } = require('../middleware/rateLimiters');
 const { emailHtml, blocoCodigo } = require('../utils/emailTemplate');
+const { camposNovoCodigo, conferirCodigo, CAMPOS_LIMPOS } = require('../services/codigoSeguranca');
 const {
   superAdminLoginSchema,
   superAdminCriarSchema,
@@ -56,11 +57,11 @@ router.post('/super-admin/login', loginLimiter, validate(superAdminLoginSchema),
 // de 6 dígitos dos outros dois logins do projeto (ver sql/2026_recuperacao_senha_super_admin.sql).
 router.post('/super-admin/recuperar-senha', codigoLimiter, validate(recuperarSenhaAdminSchema), async (req, res) => {
   const { email } = req.body;
-  const codigo = Math.floor(100000 + Math.random() * 900000).toString();
+  const { codigo, campos } = camposNovoCodigo();
 
   const { data: superAdmin, error } = await supabase
     .from('super_admins')
-    .update({ codigo_verificacao: codigo })
+    .update(campos)
     .eq('email', email)
     .eq('ativo', true)
     .select('id')
@@ -89,19 +90,22 @@ router.post('/super-admin/resetar-senha', codigoLimiter, validate(resetarSenhaSc
   const { email, codigo, novaSenha } = req.body;
   const novaSenhaHash = await bcrypt.hash(novaSenha, 12);
 
+  // Busca pela conta, nunca pelo código (ver services/codigoSeguranca.js).
   const { data: candidatos, error: selError } = await supabase
     .from('super_admins')
-    .select('id, email')
-    .eq('codigo_verificacao', codigo);
+    .select('id, codigo_verificacao, codigo_expira_em, codigo_tentativas')
+    .eq('email', (email || '').trim())
+    .eq('ativo', true)
+    .not('codigo_verificacao', 'is', null);
 
   if (selError) return res.status(500).json({ error: 'Erro interno.' });
 
-  const alvo = (candidatos || []).find((s) => (s.email || '').trim() === (email || '').trim());
+  const alvo = await conferirCodigo('super_admins', candidatos, codigo);
   if (!alvo) return res.status(400).json({ error: 'Código inválido ou expirado.' });
 
   const { error } = await supabase
     .from('super_admins')
-    .update({ senha_hash: novaSenhaHash, codigo_verificacao: null })
+    .update({ senha_hash: novaSenhaHash, ...CAMPOS_LIMPOS })
     .eq('id', alvo.id);
 
   if (error) return res.status(400).json({ error: 'Código inválido ou expirado.' });

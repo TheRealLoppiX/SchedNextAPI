@@ -22,13 +22,15 @@ const {
 const validarSenhaComMigracao = require('../utils/senha');
 const { emailHtml, blocoCodigo } = require('../utils/emailTemplate');
 const { criarPendente, buscarPendenteValido, removerPendente } = require('../services/cadastroPendente');
+const { gerarCodigo, camposNovoCodigo, conferirCodigo, CAMPOS_LIMPOS } = require('../services/codigoSeguranca');
+const verificarTokenCliente = require('../middleware/clienteAuth');
 const { resolverEmpresaPorSlug, respostaEmpresaIndisponivel } = require('../utils/tenantContext');
 
 const router = express.Router();
 
 router.post('/registrar', cadastroClienteLimiter, validate(registrarSchema), async (req, res) => {
   const { nome, nascimento, email, telefone, senha, empresaSlug } = req.body;
-  const codigoVerificacao = Math.floor(100000 + Math.random() * 900000).toString();
+  const codigoVerificacao = gerarCodigo();
 
   const { empresa, error: empErr, indisponivel } = await resolverEmpresaPorSlug(empresaSlug, 'id');
   if (indisponivel) return respostaEmpresaIndisponivel(res);
@@ -111,7 +113,7 @@ router.post('/login', loginLimiter, validate(loginClienteSchema), async (req, re
       return res.status(401).json({ message: 'Senha incorreta' });
     }
 
-    const token = jwt.sign({ id: usuario.id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    const token = jwt.sign({ id: usuario.id, tipo: 'cliente' }, process.env.JWT_SECRET, { expiresIn: '1h' });
     return res.json({
       message: 'Sucesso!',
       token,
@@ -159,7 +161,7 @@ router.post('/login-magico', codigoLimiter, validate(loginMagicoSchema), async (
 
   if (erroUsuario || !usuario || !usuario.ativo) return res.status(401).json({ message: 'Conta não encontrada ou inativa.' });
 
-  const token = jwt.sign({ id: usuario.id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+  const token = jwt.sign({ id: usuario.id, tipo: 'cliente' }, process.env.JWT_SECRET, { expiresIn: '1h' });
   res.json({ message: 'Sucesso!', token, usuario: { id: usuario.id, nome: usuario.nome_completo } });
 });
 
@@ -197,7 +199,7 @@ router.post('/confirmar-codigo', codigoLimiter, validate(confirmarCodigoSchema),
 
 router.post('/recuperar-senha', codigoLimiter, validate(recuperarSenhaSchema), async (req, res) => {
   const { email, empresaSlug } = req.body;
-  const codigo = Math.floor(100000 + Math.random() * 900000).toString();
+  const { codigo, campos } = camposNovoCodigo();
 
   const { empresa, error: empErr, indisponivel } = await resolverEmpresaPorSlug(empresaSlug, 'id');
   if (indisponivel) return respostaEmpresaIndisponivel(res);
@@ -210,7 +212,7 @@ router.post('/recuperar-senha', codigoLimiter, validate(recuperarSenhaSchema), a
   // (/resetar-senha) realmente troca.
   const { data, error } = await supabase
     .from('usuarios')
-    .update({ codigo_verificacao: codigo })
+    .update(campos)
     .eq('email', email)
     .eq('empresa_id', empresa.id)
     .select('id');
@@ -236,32 +238,53 @@ router.post('/resetar-senha', codigoLimiter, validate(resetarSenhaSchema), async
   const { email, codigo, novaSenha } = req.body;
   const novaSenhaHash = await bcrypt.hash(novaSenha, 12);
 
-  // O MySQL original comparava com TRIM(email) = TRIM(?); replicamos isso buscando
-  // pelo código (mais seletivo) e comparando o e-mail já normalizado em JS.
+  // Busca pela conta (e-mail), nunca pelo código: assim cada palpite errado conta como
+  // tentativa daquela conta (ver services/codigoSeguranca.js). O mesmo e-mail pode ter uma
+  // linha por empresa, por isso confere todas as que têm código ativo.
   const { data: candidatos, error: selError } = await supabase
     .from('usuarios')
-    .select('id, email')
-    .eq('codigo_verificacao', codigo);
+    .select('id, codigo_verificacao, codigo_expira_em, codigo_tentativas')
+    .eq('email', (email || '').trim())
+    .not('codigo_verificacao', 'is', null);
 
   if (selError) return res.status(500).json({ error: 'Erro interno.' });
 
-  const alvo = (candidatos || []).find((u) => (u.email || '').trim() === (email || '').trim());
+  const alvo = await conferirCodigo('usuarios', candidatos, codigo);
   if (!alvo) return res.status(400).json({ error: 'Código inválido ou expirado.' });
 
   const { error } = await supabase
     .from('usuarios')
-    .update({ senha: novaSenhaHash, codigo_verificacao: null })
+    .update({ senha: novaSenhaHash, ...CAMPOS_LIMPOS })
     .eq('id', alvo.id);
 
   if (error) return res.status(400).json({ error: 'Código inválido ou expirado.' });
   res.json({ message: 'Senha alterada!' });
 });
 
-router.post('/seguranca-codigo', codigoLimiter, validate(segurancaCodigoSchema), async (req, res) => {
-  const { id } = req.body;
-  const codigo = Math.floor(100000 + Math.random() * 900000).toString();
+// Troca de e-mail/senha pelo painel do cliente. Exige o token do próprio cliente: antes estas três
+// rotas eram públicas e aceitavam o id de qualquer usuário, o que permitia pedir um código pra
+// conta de outra pessoa e tentar adivinhá-lo em /seguranca-update pra tomar a conta.
+function exigirProprioUsuario(id, req, res) {
+  if (String(id) === req.usuarioId) return true;
+  res.status(403).json({ error: 'Acesso negado.' });
+  return false;
+}
 
-  const { error: updError } = await supabase.from('usuarios').update({ codigo_verificacao: codigo }).eq('id', id);
+async function candidatoSeguranca(id) {
+  const { data } = await supabase
+    .from('usuarios')
+    .select('id, codigo_verificacao, codigo_expira_em, codigo_tentativas')
+    .eq('id', id)
+    .maybeSingle();
+  return data ? [data] : [];
+}
+
+router.post('/seguranca-codigo', verificarTokenCliente, codigoLimiter, validate(segurancaCodigoSchema), async (req, res) => {
+  const { id } = req.body;
+  if (!exigirProprioUsuario(id, req, res)) return;
+  const { codigo, campos } = camposNovoCodigo();
+
+  const { error: updError } = await supabase.from('usuarios').update(campos).eq('id', id);
   if (updError) return res.status(500).json({ error: 'Erro ao gerar código' });
 
   const { data: user, error: selError } = await supabase.from('usuarios').select('email').eq('id', id).maybeSingle();
@@ -282,16 +305,19 @@ router.post('/seguranca-codigo', codigoLimiter, validate(segurancaCodigoSchema),
   res.json({ message: 'Código enviado com sucesso!' });
 });
 
-router.put('/seguranca-update/:id', codigoLimiter, validate(segurancaUpdateSchema), async (req, res) => {
+router.put('/seguranca-update/:id', verificarTokenCliente, codigoLimiter, validate(segurancaUpdateSchema), async (req, res) => {
   const { email, senha, codigo } = req.body;
   const userId = req.params.id;
-  const senhaHash = await bcrypt.hash(senha, 12);
+  if (!exigirProprioUsuario(userId, req, res)) return;
 
+  const alvo = await conferirCodigo('usuarios', await candidatoSeguranca(userId), codigo);
+  if (!alvo) return res.status(400).json({ error: 'Código inválido ou expirado.' });
+
+  const senhaHash = await bcrypt.hash(senha, 12);
   const { data, error } = await supabase
     .from('usuarios')
-    .update({ email, senha: senhaHash, codigo_verificacao: null })
-    .eq('id', userId)
-    .eq('codigo_verificacao', codigo)
+    .update({ email, senha: senhaHash, ...CAMPOS_LIMPOS })
+    .eq('id', alvo.id)
     .select('id');
 
   if (error) {
@@ -306,19 +332,13 @@ router.put('/seguranca-update/:id', codigoLimiter, validate(segurancaUpdateSchem
   res.json({ message: 'Dados de segurança atualizados!' });
 });
 
-router.post('/seguranca-validar', codigoLimiter, validate(segurancaValidarSchema), async (req, res) => {
+router.post('/seguranca-validar', verificarTokenCliente, codigoLimiter, validate(segurancaValidarSchema), async (req, res) => {
   const { id, codigo } = req.body;
+  if (!exigirProprioUsuario(id, req, res)) return;
 
-  const { data, error } = await supabase
-    .from('usuarios')
-    .select('id')
-    .eq('id', id)
-    .eq('codigo_verificacao', codigo);
-
-  if (error) return res.status(500).json({ error: 'Erro interno' });
-  if (!data || data.length === 0) {
-    return res.status(400).json({ error: 'Código inválido ou expirado.' });
-  }
+  // Só confere (sem consumir): o código é usado de novo no /seguranca-update logo depois.
+  const alvo = await conferirCodigo('usuarios', await candidatoSeguranca(id), codigo);
+  if (!alvo) return res.status(400).json({ error: 'Código inválido ou expirado.' });
   res.json({ success: true, message: 'Código validado!' });
 });
 
@@ -446,11 +466,11 @@ router.post('/admin/login', loginLimiter, validate(loginSchema), async (req, res
 // segue a mesma ordem, igual ao /admin/login (ver sql/2026_recuperacao_senha_admin.sql).
 router.post('/admin/recuperar-senha', codigoLimiter, validate(recuperarSenhaAdminSchema), async (req, res) => {
   const { email } = req.body;
-  const codigo = Math.floor(100000 + Math.random() * 900000).toString();
+  const { codigo, campos } = camposNovoCodigo();
 
   const { data: empresa, error: empErr } = await supabase
     .from('empresas')
-    .update({ codigo_verificacao: codigo })
+    .update(campos)
     .eq('email', email)
     .is('excluida_em', null)
     .select('id')
@@ -461,7 +481,7 @@ router.post('/admin/recuperar-senha', codigoLimiter, validate(recuperarSenhaAdmi
   if (!empresa) {
     const { data: adminUnidade, error: unidErr } = await supabase
       .from('unidade_admins')
-      .update({ codigo_verificacao: codigo })
+      .update(campos)
       .eq('email', email)
       .select('id')
       .maybeSingle();
@@ -490,19 +510,23 @@ router.post('/admin/resetar-senha', codigoLimiter, validate(resetarSenhaSchema),
   const { email, codigo, novaSenha } = req.body;
   const novaSenhaHash = await bcrypt.hash(novaSenha, 12);
 
+  // Busca pela conta, nunca pelo código (ver resetar-senha do cliente acima).
+  const emailLimpo = (email || '').trim();
   const { data: candidatosEmpresa, error: empSelErr } = await supabase
     .from('empresas')
-    .select('id, email')
-    .eq('codigo_verificacao', codigo);
+    .select('id, codigo_verificacao, codigo_expira_em, codigo_tentativas')
+    .eq('email', emailLimpo)
+    .is('excluida_em', null)
+    .not('codigo_verificacao', 'is', null);
 
   if (empSelErr) return res.status(500).json({ error: 'Erro interno.' });
 
-  const empresaAlvo = (candidatosEmpresa || []).find((e) => (e.email || '').trim() === (email || '').trim());
+  const empresaAlvo = await conferirCodigo('empresas', candidatosEmpresa, codigo);
 
   if (empresaAlvo) {
     const { error } = await supabase
       .from('empresas')
-      .update({ senha: novaSenhaHash, codigo_verificacao: null })
+      .update({ senha: novaSenhaHash, ...CAMPOS_LIMPOS })
       .eq('id', empresaAlvo.id);
 
     if (error) return res.status(400).json({ error: 'Código inválido ou expirado.' });
@@ -511,17 +535,18 @@ router.post('/admin/resetar-senha', codigoLimiter, validate(resetarSenhaSchema),
 
   const { data: candidatosUnidade, error: unidSelErr } = await supabase
     .from('unidade_admins')
-    .select('id, email')
-    .eq('codigo_verificacao', codigo);
+    .select('id, codigo_verificacao, codigo_expira_em, codigo_tentativas')
+    .eq('email', emailLimpo)
+    .not('codigo_verificacao', 'is', null);
 
   if (unidSelErr) return res.status(500).json({ error: 'Erro interno.' });
 
-  const unidadeAlvo = (candidatosUnidade || []).find((u) => (u.email || '').trim() === (email || '').trim());
+  const unidadeAlvo = await conferirCodigo('unidade_admins', candidatosUnidade, codigo);
   if (!unidadeAlvo) return res.status(400).json({ error: 'Código inválido ou expirado.' });
 
   const { error } = await supabase
     .from('unidade_admins')
-    .update({ senha: novaSenhaHash, codigo_verificacao: null })
+    .update({ senha: novaSenhaHash, ...CAMPOS_LIMPOS })
     .eq('id', unidadeAlvo.id);
 
   if (error) return res.status(400).json({ error: 'Código inválido ou expirado.' });

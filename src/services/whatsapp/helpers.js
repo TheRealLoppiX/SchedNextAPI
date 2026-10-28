@@ -5,6 +5,7 @@
 // bot.js <-> agente.js ia deixar os exports incompletos dependendo de quem carrega primeiro).
 const supabase = require('../../config/supabase');
 const transporter = require('../../config/mailer');
+const { gerarCodigo } = require('../codigoSeguranca');
 const { emailHtml, blocoCodigo } = require('../../utils/emailTemplate');
 const { variantesTelefoneBR } = require('../../utils/telefone');
 const { paraConvencaoDoBanco } = require('../../utils/horarioBrasilia');
@@ -100,8 +101,9 @@ function enviarEmailCodigoCadastro(email, nome, codigo) {
   });
 }
 
+// Gerador criptográfico (ver services/codigoSeguranca.js), não Math.random().
 function gerarCodigoConfirmacao() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return gerarCodigo();
 }
 
 // hoje.toISOString() usaria o dia em UTC, não em Brasília: alguém digitando "hoje" entre ~21h e

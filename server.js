@@ -138,6 +138,9 @@ app.use(require('./src/routes/suporte'));
 app.use(require('./src/routes/superAdminSuporte'));
 app.use(require('./src/routes/analytics'));
 
+// Sempre por último: erro não tratado vira JSON genérico, sem stack trace (ver src/utils/erros.js).
+app.use(require('./src/utils/erros').tratadorDeErros);
+
 iniciarLembretes();
 iniciarProcessamentoCancelamentos();
 iniciarRecuperacaoClientes();

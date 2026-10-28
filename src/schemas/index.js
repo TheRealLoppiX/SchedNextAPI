@@ -1,5 +1,14 @@
 const { z } = require('zod');
 
+// Foto/logo: o painel redimensiona a imagem no navegador e manda como data URI base64 (ver
+// AdminConta.js e AdminBarbeiros.js); link https também vale. Antes aceitava qualquer texto, o
+// que deixava gravar data:image/svg+xml com script ou javascript: no lugar da imagem.
+const IMAGEM_VALIDA = /^(data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+/=]+|https:\/\/[^\s"'<>()]+)$/;
+const imagemOpcional = z.preprocess(
+  (v) => (typeof v === 'string' ? v.trim() : v),
+  z.string().max(900000, 'Imagem grande demais.').refine((t) => t === '' || IMAGEM_VALIDA.test(t), 'Imagem inválida: envie um arquivo JPG, PNG, WebP ou GIF.').optional().nullable()
+);
+
 // Peças reutilizáveis. `idLike` cobre valores de ID que podem chegar como number (enviados
 // direto de state numérico) ou string (vindos de params/inputs). Sempre repassados pro
 // Supabase como estão, nunca usados em aritmética, então não precisam de coerção.
@@ -122,7 +131,7 @@ const perfilAtualizarSchema = z.object({
   nome_completo: z.string().trim().min(1).max(150).optional().nullable(),
   telefone: z.string().trim().max(20).optional().nullable(),
   nascimento: z.string().optional().nullable(),
-  foto_url: z.string().trim().optional().nullable()
+  foto_url: imagemOpcional
 });
 
 const avaliarSchema = z.object({
@@ -136,7 +145,7 @@ const avaliarSchema = z.object({
 
 const empresaAtualizarSchema = z.object({
   nome: z.string().trim().min(1).max(150).optional(),
-  logo_url: z.string().trim().optional().nullable(),
+  logo_url: imagemOpcional,
   horarios: z.record(z.string(), z.any()).optional().nullable(),
   cor_principal: z.string().trim().max(20).optional(),
   cor_destaque: z.string().trim().max(20).optional()
@@ -208,7 +217,7 @@ const servicoGestaoSchema = z.object({
 
 const barbeiroCriarSchema = z.object({
   nome: z.string().trim().min(1, 'Nome é obrigatório').max(150),
-  foto_url: z.string().trim().optional().nullable(),
+  foto_url: imagemOpcional,
   telefone: z.string().trim().max(20).optional().nullable(),
   unidade_id: idLikeNullable
 });
@@ -216,7 +225,7 @@ const barbeiroCriarSchema = z.object({
 const barbeiroEditarSchema = z.object({
   id: idLike,
   nome: z.string().trim().min(1, 'Nome é obrigatório').max(150),
-  foto_url: z.string().trim().optional().nullable(),
+  foto_url: imagemOpcional,
   telefone: z.string().trim().max(20).optional().nullable(),
   percentual_comissao: z.coerce.number().min(0, 'Comissão não pode ser negativa').max(100, 'Comissão não pode passar de 100%').nullable().optional(),
   unidade_id: idLikeNullable
@@ -578,7 +587,7 @@ const superAdminCriarSchema = z.object({
   senha_atual: z.string().min(1, 'Confirme sua senha atual para continuar'),
   // Opcional — mesmo padrão de foto do resto do sistema (data URI base64 já redimensionada no
   // navegador, ver sql/2026_super_admins_foto.sql).
-  foto_url: z.string().trim().optional().nullable()
+  foto_url: imagemOpcional
 });
 
 // Edição do PRÓPRIO perfil (ver PUT /super-admin/super-admins/me em routes/superAdmin.js) — um
@@ -591,7 +600,7 @@ const superAdminEditarSchema = z.object({
     .optional(),
   senha: z.string().min(8, 'A senha precisa ter pelo menos 8 caracteres').optional(),
   senha_atual: z.string().min(1, 'Confirme sua senha atual para continuar'),
-  foto_url: z.string().trim().optional().nullable()
+  foto_url: imagemOpcional
 });
 
 const leadStatusSchema = z.object({

@@ -1,5 +1,6 @@
 const express = require('express');
 const supabase = require('../config/supabase');
+const { respostaErroInterno } = require('../utils/erros');
 const validate = require('../middleware/validate');
 const { assinaturaPlanoSchema, ativoSchema, clientePlanoSchema, assinaturaConfigSchema } = require('../schemas');
 const { calcularProximaCobranca } = require('../utils/limitesAssinatura');
@@ -98,7 +99,7 @@ router.post('/admin/assinaturas', validate(assinaturaPlanoSchema), async (req, r
     res.json({ success: true, id: plano.id });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    respostaErroInterno(res, err);
   }
 });
 
@@ -129,7 +130,7 @@ router.put('/admin/assinaturas/:id', validate(assinaturaPlanoSchema), async (req
     res.json({ success: true });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    respostaErroInterno(res, err);
   }
 });
 
@@ -224,7 +225,7 @@ router.put('/admin/assinaturas/:id/status', validate(ativoSchema), async (req, r
   if (!planoAtual || planoAtual.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Plano não encontrado.' });
 
   const { error } = await supabase.from('planos_assinatura').update({ ativo: !!ativo }).eq('id', req.params.id);
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) return respostaErroInterno(res, error);
   res.json({ success: true });
 });
 
@@ -234,7 +235,7 @@ router.delete('/admin/assinaturas/:id', async (req, res) => {
   if (!planoAtual || planoAtual.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Plano não encontrado.' });
 
   const { error } = await supabase.from('planos_assinatura').delete().eq('id', req.params.id);
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) return respostaErroInterno(res, error);
   res.json({ success: true });
 });
 
@@ -272,7 +273,7 @@ router.put('/admin/clientes/:id/plano', validate(clientePlanoSchema), async (req
     : { plano_id: null, assinante: false };
 
   const { error } = await supabase.from('usuarios').update(update).eq('id', req.params.id);
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) return respostaErroInterno(res, error);
   res.json({ success: true });
 });
 

@@ -3,6 +3,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
 const supabase = require('../config/supabase');
+const { respostaErroInterno } = require('../utils/erros');
 const transporter = require('../config/mailer');
 const validate = require('../middleware/validate');
 const { cadastroEmpresaLimiter, codigoLimiter } = require('../middleware/rateLimiters');
@@ -10,6 +11,7 @@ const { registrarEmpresaSchema, contatoEnterpriseSchema, confirmarCodigoSchema }
 const { registrarLead } = require('../services/leadsEnterprise');
 const { emailHtml, blocoCodigo } = require('../utils/emailTemplate');
 const { criarPendente, buscarPendenteValido, removerPendente } = require('../services/cadastroPendente');
+const { gerarCodigo } = require('../services/codigoSeguranca');
 const { verificarCadastro, registrarCadastro } = require('../services/antifraude');
 const { normalizarDocumento } = require('../utils/antifraude');
 
@@ -37,7 +39,7 @@ router.get('/planos-plataforma', async (req, res) => {
     .is('empresa_exclusiva_id', null)
     .order('id');
 
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
 
   // Campanha em vigor agora pra cada plano (mesmo critério de buscarCampanhaParaNovoCadastro em
   // services/precificacaoPlataforma.js), pra landing/cadastro mostrarem o preço promocional que
@@ -135,7 +137,7 @@ router.post('/empresas/registrar', cadastroEmpresaLimiter, validate(registrarEmp
   // Dias de teste do plano em que a conta de fato nasce (o Grátis, se o escolhido é pago).
   const diasTeste = ehPago ? planoGratis.dias_teste : plano.dias_teste;
   const senhaHash = await bcrypt.hash(senha, 12);
-  const codigoVerificacao = Math.floor(100000 + Math.random() * 900000).toString();
+  const codigoVerificacao = gerarCodigo();
 
   // Nada vai pra tabela `empresas` ainda — fica em espera em `cadastros_pendentes` até o
   // código ser confirmado em /empresas/confirmar-codigo (mesmo padrão do cadastro de

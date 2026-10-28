@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 
 const supabase = require('../config/supabase');
+const { respostaErroInterno } = require('../utils/erros');
 const validate = require('../middleware/validate');
 const { clienteRapidoSchema, clienteAtualizarSchema, clienteAssinanteSchema, clienteFollowupSchema } = require('../schemas');
 const { enviarMensagemCliente } = require('../services/mensagensCliente');
@@ -166,7 +167,7 @@ router.put('/admin/clientes/:id', validate(clienteAtualizarSchema), async (req, 
     .eq('tipo', 'cliente')
     .select('id');
 
-  if (error) { console.error('Erro update cliente:', error); return res.status(500).json({ error: error.message }); }
+  if (error) { console.error('Erro update cliente:', error); return respostaErroInterno(res, error); }
   if (!data || data.length === 0) return res.status(404).json({ error: 'Cliente não encontrado.' });
   res.json({ success: true });
 });
@@ -184,7 +185,7 @@ router.put('/admin/clientes/:id/assinante', validate(clienteAssinanteSchema), as
     .eq('tipo', 'cliente')
     .select('id');
 
-  if (error) { console.error('Erro assinante:', error); return res.status(500).json({ error: error.message }); }
+  if (error) { console.error('Erro assinante:', error); return respostaErroInterno(res, error); }
   if (!data || data.length === 0) return res.status(404).json({ error: 'Cliente não encontrado.' });
   res.json({ success: true });
 });
@@ -200,7 +201,7 @@ router.delete('/admin/clientes/:id', async (req, res) => {
     .eq('tipo', 'cliente')
     .select('id');
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) return respostaErroInterno(res, error);
   if (!data || data.length === 0) return res.status(404).json({ error: 'Cliente nao encontrado.' });
   res.json({ success: true });
 });
@@ -236,7 +237,7 @@ router.post('/admin/clientes/followup', validate(clienteFollowupSchema), async (
     res.json({ success: true, ...resultado });
   } catch (err) {
     console.error('Erro followup:', err);
-    res.status(500).json({ error: err.message });
+    respostaErroInterno(res, err);
   }
 });
 

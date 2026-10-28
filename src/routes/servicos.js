@@ -1,5 +1,6 @@
 const express = require('express');
 const supabase = require('../config/supabase');
+const { respostaErroInterno } = require('../utils/erros');
 const validate = require('../middleware/validate');
 const { servicoGestaoSchema, ativoSchema } = require('../schemas');
 
@@ -101,7 +102,7 @@ router.get('/admin/servicos-gestao', async (req, res) => {
     .eq('empresa_id', req.empresaId)
     .order('nome', { ascending: true });
 
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   res.json(data);
 });
 
@@ -115,7 +116,7 @@ router.post('/admin/servicos-gestao', validate(servicoGestaoSchema), async (req,
     .select('id')
     .single();
 
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   res.json({ message: 'Serviço criado!', id: data.id });
 });
 
@@ -129,7 +130,7 @@ router.put('/admin/servicos-gestao/:id', validate(servicoGestaoSchema), async (r
     .eq('empresa_id', req.empresaId)
     .select('id');
 
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   if (!data || data.length === 0) return res.status(404).json({ error: 'Serviço não encontrado.' });
   res.json({ message: 'Serviço atualizado com sucesso!' });
 });
@@ -143,7 +144,7 @@ router.delete('/admin/servicos-gestao/:id', async (req, res) => {
     .eq('empresa_id', req.empresaId)
     .select('id');
 
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   if (!data || data.length === 0) return res.status(404).json({ error: 'Serviço não encontrado.' });
   res.json({ message: 'Serviço removido!' });
 });
@@ -170,7 +171,7 @@ router.get('/servicos-por-barbeiro/:barbeiro_id', async (req, res) => {
 
   if (error) {
     console.error('Erro no SQL:', error);
-    return res.status(500).json(error);
+    return respostaErroInterno(res, error);
   }
   res.json(data.map((r) => r.servicos).filter(Boolean));
 });

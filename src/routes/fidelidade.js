@@ -1,5 +1,6 @@
 const express = require('express');
 const supabase = require('../config/supabase');
+const { respostaErroInterno } = require('../utils/erros');
 const validate = require('../middleware/validate');
 const { acaoFidelidadeSchema, acaoStatusSchema } = require('../schemas');
 const { notificarNovaCampanhaFidelidade } = require('../services/fidelidade');
@@ -13,7 +14,7 @@ router.get('/admin/acoes/:empresaId', async (req, res) => {
     .eq('empresa_id', req.empresaId)
     .order('data_fim', { ascending: false });
 
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   res.json(data);
 });
 
@@ -54,7 +55,7 @@ router.post('/admin/acoes', validate(acaoFidelidadeSchema), async (req, res) => 
     ativa: true
   }).select('*').single();
 
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
 
   // Fire-and-forget de propósito (ver services/fidelidade.js) — não faz sentido o admin esperar
   // o envio de e-mail/WhatsApp pra cada cliente antes de ver a campanha criada.
@@ -89,7 +90,7 @@ router.delete('/admin/acoes/:id', async (req, res) => {
   if (!campanha || campanha.empresa_id !== req.empresaId) return res.status(404).json({ error: 'Ação não encontrada.' });
 
   const { error } = await supabase.from('campanhas_fidelidade').delete().eq('id', req.params.id);
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   res.json({ message: 'Ação excluída!' });
 });
 

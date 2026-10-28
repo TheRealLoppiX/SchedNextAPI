@@ -12,7 +12,10 @@ function verificarTokenCliente(req, res, next) {
   const token = authHeader.slice('Bearer '.length);
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    if (!payload.id) {
+    // Todos os tokens do sistema usam o mesmo segredo; o tipo é o que separa um do outro. Sem
+    // essa checagem, o token do admin absoluto (que também tem `id`) passava aqui como se fosse
+    // de cliente. Tokens de cliente antigos não têm `tipo` (expiram em 1h): aceitos ainda.
+    if (!payload.id || (payload.tipo && payload.tipo !== 'cliente')) {
       return res.status(403).json({ error: 'Acesso negado.' });
     }
     req.usuarioId = String(payload.id);

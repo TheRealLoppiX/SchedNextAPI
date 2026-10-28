@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 
 const supabase = require('../config/supabase');
+const { respostaErroInterno } = require('../utils/erros');
 const transporter = require('../config/mailer');
 const { emailHtml } = require('../utils/emailTemplate');
 const { resolverEmpresaPorSlug, respostaEmpresaIndisponivel } = require('../utils/tenantContext');
@@ -433,7 +434,7 @@ router.post('/admin/confirmar-agendamento', validate(confirmarAgendamentoSchema)
   // própria unidade.
   if (req.unidadeId) query = query.eq('unidade_id', req.unidadeId);
   const { data, error } = await query.select('id');
-  if (error) return res.status(500).json(error);
+  if (error) return respostaErroInterno(res, error);
   if (!data || data.length === 0) return res.status(404).json({ error: 'Agendamento não encontrado.' });
   res.json({ success: true });
 });
