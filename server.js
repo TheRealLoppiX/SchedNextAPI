@@ -105,6 +105,21 @@ app.use('/admin', (req, res, next) => {
 // token de admin de empresa, e vice-versa.
 app.use('/super-admin', verificarTokenSuperAdmin);
 
+// DIAGNÓSTICO TEMPORÁRIO (28/10): de onde vem o IP do cliente atrás do Render. Não devolve
+// nenhum IP nem valor de header, só nomes e contagens. Remover depois.
+app.get('/diagnostico-ip', (req, res) => {
+  const xff = String(req.headers['x-forwarded-for'] || '');
+  res.json({
+    render: process.env.RENDER || null,
+    temCfConnectingIp: !!req.headers['cf-connecting-ip'],
+    temTrueClientIp: !!req.headers['true-client-ip'],
+    temXRealIp: !!req.headers['x-real-ip'],
+    entradasXff: xff ? xff.split(',').length : 0,
+    reqIpIgualCf: req.ip === req.headers['cf-connecting-ip'],
+    headersProxy: Object.keys(req.headers).filter((h) => /forward|real|client|cf-|rndr|via/i.test(h))
+  });
+});
+
 app.use(require('./src/routes/auth'));
 app.use(require('./src/routes/superAdmin'));
 app.use(require('./src/routes/superAdminPlataforma'));
