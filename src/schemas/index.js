@@ -507,10 +507,25 @@ const whatsappBotConfigSchema = z.object({
   horario_inicio: z.string().trim().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Horário inválido (use HH:MM)').optional(),
   horario_fim: z.string().trim().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Horário inválido (use HH:MM)').optional(),
   horario_dias: z.array(z.coerce.number().int().min(0).max(6)).min(1, 'Escolha pelo menos um dia').optional(),
-  mensagem_fora: z.string().trim().max(500).nullable().optional(),
-  // Filtro de contatos pessoais (ver routes/whatsapp.js e services/whatsapp/provider.js).
-  ignorar_contatos_salvos: z.boolean().optional(),
-  numeros_bloqueados: z.array(z.string().trim().max(20)).max(200).optional()
+  mensagem_fora: z.string().trim().max(500).nullable().optional()
+});
+
+// Seleção de contatos do bot (ver services/whatsapp/contatosBot.js).
+const whatsappContatosModoSchema = z.object({
+  modo: z.enum(['todos', 'somente_marcados', 'todos_exceto'])
+});
+const whatsappContatosMarcarSchema = z.object({
+  marcado: z.boolean(),
+  contatos: z.array(z.object({
+    jid: z.string().trim().regex(/^\d{5,20}@(s\.whatsapp\.net|lid)$/, 'Contato inválido'),
+    nome: z.string().trim().max(120).nullable().optional(),
+    telefone: z.string().trim().max(20).nullable().optional()
+  })).min(1).max(500)
+});
+const whatsappContatosMarcarFiltroSchema = z.object({
+  marcado: z.boolean(),
+  busca: z.string().trim().max(100).optional(),
+  filtro: z.enum(['todos', 'com_nome', 'com_numero', 'marcados'])
 });
 
 // Mensagens do bot por estado da conversa (ver services/whatsapp/mensagensBot.js) — mesmo
@@ -923,6 +938,9 @@ module.exports = {
   whatsappTesteSchema,
   whatsappBotConfigSchema,
   whatsappBotMensagensSchema,
+  whatsappContatosModoSchema,
+  whatsappContatosMarcarSchema,
+  whatsappContatosMarcarFiltroSchema,
   dominioCustomizadoSchema,
   contatoEnterpriseSchema,
   superAdminLoginSchema,

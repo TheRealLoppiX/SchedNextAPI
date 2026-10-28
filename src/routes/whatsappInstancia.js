@@ -1,11 +1,11 @@
 const express = require('express');
 const supabase = require('../config/supabase');
 const validate = require('../middleware/validate');
-const { whatsappTesteSchema, whatsappBotConfigSchema, whatsappBotMensagensSchema } = require('../schemas');
+const { whatsappTesteSchema, whatsappBotConfigSchema, whatsappBotMensagensSchema, whatsappContatosModoSchema, whatsappContatosMarcarSchema, whatsappContatosMarcarFiltroSchema } = require('../schemas');
 const mensagensBot = require('../services/whatsapp/mensagensBot');
 const { permiteWhatsappBot, permiteIA } = require('../utils/limitesPlano');
 const { estaConfigurado, criarInstancia, obterQrCode, obterCodigoPareamento, obterStatusConexao, removerInstancia, enviarMensagem } = require('../services/whatsapp/provider');
-const { normalizarTelefoneBR } = require('../utils/telefone');
+const contatosBot = require('../services/whatsapp/contatosBot');
 const { obterHorarioBot, MENSAGEM_PADRAO } = require('../services/whatsapp/horarioBot');
 const { MODO_LIVRE_BOT_DISPONIVEL, PERSONALIDADE_BOT_DISPONIVEL } = require('../config/featureFlags');
 
@@ -25,7 +25,7 @@ router.get('/admin/whatsapp', async (req, res) => {
 
   const { data: empresa, error } = await supabase
     .from('empresas')
-    .select('whatsapp_phone_number_id, whatsapp_bot_modo, whatsapp_bot_nome, whatsapp_bot_personalidade, whatsapp_bot_boas_vindas, whatsapp_bot_temperatura, whatsapp_resumo_profissionais_ativo, whatsapp_resumo_profissionais_horario, whatsapp_bot_ignorar_salvos, whatsapp_bot_numeros_bloqueados')
+    .select('whatsapp_phone_number_id, whatsapp_bot_modo, whatsapp_bot_nome, whatsapp_bot_personalidade, whatsapp_bot_boas_vindas, whatsapp_bot_temperatura, whatsapp_resumo_profissionais_ativo, whatsapp_resumo_profissionais_horario, whatsapp_bot_contatos_modo')
     .eq('id', empresa_id)
     .maybeSingle();
 
@@ -47,8 +47,7 @@ router.get('/admin/whatsapp', async (req, res) => {
     temperatura: empresa?.whatsapp_bot_temperatura != null ? Number(empresa.whatsapp_bot_temperatura) : 0.6,
     resumoProfissionaisAtivo: !!empresa?.whatsapp_resumo_profissionais_ativo,
     resumoProfissionaisHorario: empresa?.whatsapp_resumo_profissionais_horario || '08:00',
-    ignorarContatosSalvos: !!empresa?.whatsapp_bot_ignorar_salvos,
-    numerosBloqueados: (empresa?.whatsapp_bot_numeros_bloqueados || '').split(',').map((n) => n.trim()).filter(Boolean)
+    contatosModo: empresa?.whatsapp_bot_contatos_modo || 'todos'
   };
   // Consulta separada e tolerante a falha (ver obterHorarioBot): sem as colunas no banco ainda,
   // a tela continua abrindo e mostra o bot como 24h.
@@ -85,7 +84,7 @@ router.put('/admin/whatsapp/bot-config', validate(whatsappBotConfigSchema), asyn
   if (!(await permiteWhatsappBot(empresa_id))) return res.status(403).json({ error: 'Recurso não disponível no seu plano.' });
 
   const iaLiberada = await permiteIA(empresa_id);
-  const { modo, nome, personalidade, boas_vindas, temperatura, resumo_profissionais_ativo, resumo_profissionais_horario, horario_ativo, horario_inicio, horario_fim, horario_dias, mensagem_fora, ignorar_contatos_salvos, numeros_bloqueados } = req.body;
+  const { modo, nome, personalidade, boas_vindas, temperatura, resumo_profissionais_ativo, resumo_profissionais_horario, horario_ativo, horario_inicio, horario_fim, horario_dias, mensagem_fora } = req.body;
 
   const atualizacao = { whatsapp_bot_boas_vindas: boas_vindas || null };
   if (resumo_profissionais_ativo !== undefined) atualizacao.whatsapp_resumo_profissionais_ativo = resumo_profissionais_ativo;
@@ -95,17 +94,6 @@ router.put('/admin/whatsapp/bot-config', validate(whatsappBotConfigSchema), asyn
   if (horario_fim !== undefined) atualizacao.whatsapp_bot_horario_fim = horario_fim;
   if (horario_dias !== undefined) atualizacao.whatsapp_bot_horario_dias = [...new Set(horario_dias)].sort().join(',');
   if (mensagem_fora !== undefined) atualizacao.whatsapp_bot_mensagem_fora = mensagem_fora || null;
-  if (ignorar_contatos_salvos !== undefined) atualizacao.whatsapp_bot_ignorar_salvos = ignorar_contatos_salvos;
-  if (numeros_bloqueados !== undefined) {
-    // Normalizado pro mesmo formato do `telefone` no webhook (DDI 55 + DDD + número, só dígitos,
-    // ver routes/whatsapp.js) — comparar formatos diferentes nunca bateria.
-    const limpos = [...new Set(
-      numeros_bloqueados
-        .map((n) => `55${normalizarTelefoneBR(n)}`)
-        .filter((n) => n.length === 12 || n.length === 13)
-    )];
-    atualizacao.whatsapp_bot_numeros_bloqueados = limpos.length ? limpos.join(',') : null;
-  }
 
   // Sem IA no plano, essas colunas ficam travadas nos valores padrão — mesmo que o front não
   // devesse mandar isso pra uma empresa sem o recurso, a rota não confia só na UI.
@@ -155,6 +143,86 @@ router.put('/admin/whatsapp/mensagens', validate(whatsappBotMensagensSchema), as
   } catch (err) {
     console.error('Erro ao salvar mensagens do bot:', err);
     res.status(500).json({ error: 'Erro ao salvar as mensagens do bot.' });
+  }
+});
+
+// Seleção de contatos do bot (ver services/whatsapp/contatosBot.js). A lista vem da Evolution
+// (com cache curto, ?atualizar=1 força buscar de novo) e a seleção fica no nosso banco.
+async function instanciaDaEmpresa(empresaId) {
+  const { data } = await supabase.from('empresas').select('whatsapp_phone_number_id, whatsapp_bot_contatos_modo').eq('id', empresaId).maybeSingle();
+  return { instancia: data?.whatsapp_phone_number_id || null, modo: data?.whatsapp_bot_contatos_modo || 'todos' };
+}
+
+router.get('/admin/whatsapp/contatos', async (req, res) => {
+  const empresa_id = req.empresaId;
+  if (!(await permiteWhatsappBot(empresa_id))) return res.status(403).json({ error: 'Recurso não disponível no seu plano.' });
+  const filtro = ['todos', 'com_nome', 'com_numero', 'marcados'].includes(req.query.filtro) ? req.query.filtro : 'todos';
+  try {
+    const { instancia, modo } = await instanciaDaEmpresa(empresa_id);
+    const resultado = await contatosBot.listar({
+      empresaId: empresa_id,
+      instancia,
+      busca: String(req.query.busca || '').slice(0, 100),
+      filtro,
+      pagina: parseInt(req.query.pagina, 10) || 1,
+      atualizar: req.query.atualizar === '1'
+    });
+    res.json({ modo, ...resultado });
+  } catch (err) {
+    console.error('Erro ao listar contatos do bot:', err);
+    res.status(500).json({ error: 'Erro ao carregar os contatos.' });
+  }
+});
+
+router.put('/admin/whatsapp/contatos/modo', validate(whatsappContatosModoSchema), async (req, res) => {
+  const empresa_id = req.empresaId;
+  if (!(await permiteWhatsappBot(empresa_id))) return res.status(403).json({ error: 'Recurso não disponível no seu plano.' });
+  try {
+    await contatosBot.definirModo(empresa_id, req.body.modo);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Erro ao salvar modo de contatos do bot:', err);
+    res.status(500).json({ error: 'Erro ao salvar o modo.' });
+  }
+});
+
+router.post('/admin/whatsapp/contatos/marcar', validate(whatsappContatosMarcarSchema), async (req, res) => {
+  const empresa_id = req.empresaId;
+  if (!(await permiteWhatsappBot(empresa_id))) return res.status(403).json({ error: 'Recurso não disponível no seu plano.' });
+  try {
+    const alterados = await contatosBot.marcar(empresa_id, req.body.contatos, req.body.marcado);
+    res.json({ success: true, alterados });
+  } catch (err) {
+    console.error('Erro ao marcar contatos do bot:', err);
+    res.status(500).json({ error: 'Erro ao salvar a seleção.' });
+  }
+});
+
+// "Marcar todos do filtro": resolve a lista no servidor (pode ter milhares de contatos, não vale
+// mandar todos os jids do front).
+router.post('/admin/whatsapp/contatos/marcar-filtro', validate(whatsappContatosMarcarFiltroSchema), async (req, res) => {
+  const empresa_id = req.empresaId;
+  if (!(await permiteWhatsappBot(empresa_id))) return res.status(403).json({ error: 'Recurso não disponível no seu plano.' });
+  try {
+    const { instancia } = await instanciaDaEmpresa(empresa_id);
+    const alterados = await contatosBot.marcarFiltro({ empresaId: empresa_id, instancia, busca: req.body.busca || '', filtro: req.body.filtro, marcado: req.body.marcado });
+    res.json({ success: true, alterados });
+  } catch (err) {
+    console.error('Erro ao marcar contatos do filtro:', err);
+    res.status(500).json({ error: 'Erro ao salvar a seleção.' });
+  }
+});
+
+router.post('/admin/whatsapp/contatos/manual', validate(whatsappTesteSchema), async (req, res) => {
+  const empresa_id = req.empresaId;
+  if (!(await permiteWhatsappBot(empresa_id))) return res.status(403).json({ error: 'Recurso não disponível no seu plano.' });
+  try {
+    const numero = await contatosBot.adicionarManual(empresa_id, req.body.telefone);
+    if (!numero) return res.status(400).json({ error: 'Informe um número com DDD. Ex: (11) 91234-5678.' });
+    res.json({ success: true, telefone: numero });
+  } catch (err) {
+    console.error('Erro ao adicionar contato manual do bot:', err);
+    res.status(500).json({ error: 'Erro ao adicionar o número.' });
   }
 });
 

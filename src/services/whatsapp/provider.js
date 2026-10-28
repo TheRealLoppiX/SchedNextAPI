@@ -49,7 +49,10 @@ async function enviarMensagem(instancia, telefone, texto) {
     method: 'POST',
     headers: headers(),
     body: JSON.stringify({
-      number: telefone.replace(/\D/g, ''), // Evolution espera só dígitos, com DDI
+      // Só dígitos com DDI — ou o jid inteiro quando o contato chegou só com código LID, sem número
+      // (ver identificarRemetente em contatosBot.js): tirar os não-dígitos de "123@lid" mandava a
+      // resposta pra um "número" 123 que não existe.
+      number: String(telefone).endsWith('@lid') ? telefone : telefone.replace(/\D/g, ''),
       text: texto,
     }),
   });
@@ -78,7 +81,7 @@ async function enviarImagem(instancia, telefone, base64, legenda) {
     method: 'POST',
     headers: headers(),
     body: JSON.stringify({
-      number: telefone.replace(/\D/g, ''),
+      number: String(telefone).endsWith('@lid') ? telefone : telefone.replace(/\D/g, ''), // ver enviarMensagem
       mediatype: 'image',
       mimetype: 'image/png',
       fileName: 'pix.png',
@@ -184,24 +187,21 @@ async function obterCodigoPareamento(instancia, numero) {
   return dados; // { pairingCode, code, base64, count } ou {count} se já conectado
 }
 
-// Verifica se o número está salvo na agenda do celular conectado (ver whatsapp_bot_ignorar_salvos
-// em routes/whatsapp.js) — não é "já teve uma conversa", é de fato ter um nome salvo no telefone
-// (contato sincronizado pelo próprio WhatsApp). Falha de rede/instância indisponível cai pra
-// "não salvo" (false) de propósito: esse filtro nunca deve travar o bot inteiro por causa de uma
-// consulta extra que falhou.
-async function contatoSalvo(instancia, numero) {
-  try {
-    const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/chat/findContacts/${instancia}`, {
-      method: 'POST',
-      headers: headers(),
-      body: JSON.stringify({ where: { remoteJid: `${numero}@s.whatsapp.net` } }),
-    });
-    if (!resposta.ok) return false;
-    const dados = await lerJson(resposta);
-    return Array.isArray(dados) && dados.some((c) => c.isSaved);
-  } catch {
-    return false;
-  }
+// Todos os contatos que a Evolution conhece pra essa instância (ver services/whatsapp/contatosBot.js).
+// O `pushName` é o nome que cada pessoa pôs no próprio perfil, não o salvo na agenda do celular
+// (o WhatsApp não entrega a agenda pra aparelho conectado), e `isSaved` não é confiável: numa
+// instância de produção veio true pra todos os 12 mil contatos — por isso o antigo filtro "não
+// responder quem está salvo" foi substituído pela seleção manual.
+async function listarContatos(instancia) {
+  const resposta = await fetch(`${process.env.EVOLUTION_API_URL}/chat/findContacts/${instancia}`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({ where: {} }),
+    signal: AbortSignal.timeout(60000),
+  });
+  const dados = await lerJson(resposta);
+  if (!resposta.ok) throw new Error(dados?.response?.message?.[0] || dados?.message || `Evolution respondeu HTTP ${resposta.status}.`);
+  return Array.isArray(dados) ? dados : [];
 }
 
 // Com tempo limite: quando a VPS da Evolution está sobrecarregada (ex: sincronizando o histórico
@@ -263,4 +263,4 @@ async function removerInstancia(instancia) {
   }
 }
 
-module.exports = { EvolutionIndisponivelError, estaConfigurado, enviarMensagem, enviarImagem, criarInstancia, atualizarWebhook, obterQrCode, obterCodigoPareamento, contatoSalvo, obterStatusConexao, aplicarConfiguracoes, removerInstancia };
+module.exports = { EvolutionIndisponivelError, estaConfigurado, enviarMensagem, enviarImagem, criarInstancia, atualizarWebhook, obterQrCode, obterCodigoPareamento, listarContatos, obterStatusConexao, aplicarConfiguracoes, removerInstancia };

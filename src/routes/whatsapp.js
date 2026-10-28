@@ -2,7 +2,8 @@ const crypto = require('crypto');
 const express = require('express');
 const supabase = require('../config/supabase');
 const { processarMensagem } = require('../services/whatsapp/bot');
-const { enviarMensagem, contatoSalvo } = require('../services/whatsapp/provider');
+const { enviarMensagem } = require('../services/whatsapp/provider');
+const { identificarRemetente, deveResponder } = require('../services/whatsapp/contatosBot');
 const { liberarOuAvisarForaDoHorario } = require('../services/whatsapp/horarioBot');
 const { whatsappWebhookLimiter } = require('../middleware/rateLimiters');
 const { empresaForaDoAr } = require('../utils/tenantContext');
@@ -59,7 +60,12 @@ router.post('/whatsapp/webhook', whatsappWebhookLimiter, async (req, res) => {
       conteudoMsg.listResponseMessage?.singleSelectReply?.selectedRowId ||
       conteudoMsg.templateButtonReplyMessage?.selectedId ||
       '';
-    const telefone = (key.remoteJid || '').replace('@s.whatsapp.net', '');
+    // Em contas novas o WhatsApp manda o remetente como LID (@lid), com o número real (quando
+    // existe) em remoteJidAlt/senderPn. Antes só o @s.whatsapp.net era removido: quem chegava por
+    // LID virava telefone "123@lid", o bot não reconhecia o cadastro e respondia pra um número
+    // inexistente. Ver identificarRemetente em services/whatsapp/contatosBot.js.
+    const remetente = identificarRemetente(key);
+    const telefone = remetente.telefone;
     const instancia = req.body?.instance;
 
     if (!telefone || !texto || !instancia) return;
@@ -72,19 +78,17 @@ router.post('/whatsapp/webhook', whatsappWebhookLimiter, async (req, res) => {
 
     const { data: empresa } = await supabase
       .from('empresas')
-      .select('id, status_assinatura, excluida_em, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot), whatsapp_bot_ignorar_salvos, whatsapp_bot_numeros_bloqueados')
+      .select('id, status_assinatura, excluida_em, plano_plataforma:plano_plataforma_id(permite_whatsapp_bot), whatsapp_bot_contatos_modo')
       .eq('whatsapp_phone_number_id', instancia)
       .maybeSingle();
 
     // Empresa suspensa/excluída pelo admin absoluto: o bot fica mudo, igual ao painel e ao site.
     if (!empresa || empresaForaDoAr(empresa) || !empresa.plano_plataforma?.permite_whatsapp_bot) return;
 
-    // Filtro de contatos pessoais (configurável em /admin/whatsapp, ver routes/whatsappInstancia.js)
-    // — de propósito antes até da checagem de horário: um número bloqueado/pessoal não deve nem
-    // receber o aviso de "fora do horário", só silêncio total.
-    const numerosBloqueados = (empresa.whatsapp_bot_numeros_bloqueados || '').split(',').filter(Boolean);
-    if (numerosBloqueados.includes(telefone)) return;
-    if (empresa.whatsapp_bot_ignorar_salvos && (await contatoSalvo(instancia, telefone))) return;
+    // Seleção de contatos (configurável em /admin/whatsapp, ver services/whatsapp/contatosBot.js)
+    // — de propósito antes até da checagem de horário: um contato que o bot não atende não deve
+    // nem receber o aviso de "fora do horário", só silêncio total.
+    if (!(await deveResponder(empresa, remetente))) return;
 
     // Horário de funcionamento do bot (opcional, ver services/whatsapp/horarioBot.js): fora dele,
     // avisa uma vez por período fechado e não passa a mensagem pro bot.
