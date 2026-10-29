@@ -343,11 +343,19 @@ router.post('/admin/estoque/movimentar', validate(estoqueMovimentarSchema), asyn
   res.json({ message: 'Movimentação registrada!' });
 });
 
+const DATA_ISO = /^\d{4}-\d{2}-\d{2}$/;
+// data_movimentacao é timestamptz (gravado em UTC). Sem o fuso, o Postgres lia o limite do dia
+// como UTC e o que entrava entre 21h e meia-noite de Brasília caía no dia seguinte.
+const FUSO_BRASILIA = '-03:00';
+
 // 4. HISTÓRICO DE ESTOQUE (Auditoria por data)
 // Cada linha leva tipo e código do produto e o nome da empresa, pro comprovante em PDF de
 // cada movimentação que o painel gera.
 router.get('/admin/estoque/relatorio/:empresaId', async (req, res) => {
   const { inicio, fim } = req.query;
+  if (!DATA_ISO.test(inicio || '') || !DATA_ISO.test(fim || '')) {
+    return res.status(400).json({ error: 'Informe o período (inicio e fim).' });
+  }
 
   // estoque_movimentacoes.produto_id não tem FK real no banco (igual no MySQL original),
   // então o PostgREST não consegue fazer o embed automático. Buscamos os produtos da empresa
@@ -367,8 +375,8 @@ router.get('/admin/estoque/relatorio/:empresaId', async (req, res) => {
     .from('estoque_movimentacoes')
     .select('*')
     .in('produto_id', produtoIds)
-    .gte('data_movimentacao', `${inicio}T00:00:00`)
-    .lte('data_movimentacao', `${fim}T23:59:59`)
+    .gte('data_movimentacao', `${inicio}T00:00:00${FUSO_BRASILIA}`)
+    .lte('data_movimentacao', `${fim}T23:59:59.999${FUSO_BRASILIA}`)
     .order('data_movimentacao', { ascending: false });
 
   if (error) {
@@ -392,7 +400,6 @@ router.get('/admin/estoque/relatorio/:empresaId', async (req, res) => {
 // compra ficou em branco), separada em produtos de uso e de venda. Vale pra todo plano.
 // Vendas: receita, custo e receita líquida por produto vendido no caixa (produto_vendas, com
 // preço e custo congelados na venda). Recurso de plano, do Profissional pra cima.
-const DATA_ISO = /^\d{4}-\d{2}-\d{2}$/;
 const arredondar = (v) => Math.round(v * 100) / 100;
 
 router.get('/admin/estoque/financeiro/:empresaId', async (req, res) => {
@@ -418,7 +425,7 @@ router.get('/admin/estoque/financeiro/:empresaId', async (req, res) => {
       .in('produto_id', produtoIds)
       .eq('tipo', 'ADICIONAR')
       .not('custo_unitario', 'is', null)
-      .or(`and(data_compra.gte.${inicio},data_compra.lte.${fim}),and(data_compra.is.null,data_movimentacao.gte.${inicio}T00:00:00,data_movimentacao.lte.${fim}T23:59:59)`);
+      .or(`and(data_compra.gte.${inicio},data_compra.lte.${fim}),and(data_compra.is.null,data_movimentacao.gte.${inicio}T00:00:00${FUSO_BRASILIA},data_movimentacao.lte.${fim}T23:59:59.999${FUSO_BRASILIA})`);
     if (error) {
       console.error('Erro ao buscar compras do estoque:', error);
       return res.status(500).json({ error: 'Erro ao buscar relatório.' });
