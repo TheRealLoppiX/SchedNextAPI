@@ -343,18 +343,23 @@ router.post('/admin/estoque/movimentar', validate(estoqueMovimentarSchema), asyn
   res.json({ message: 'Movimentação registrada!' });
 });
 
-// 4. RELATÓRIO DE ESTOQUE (Auditoria por data)
+// 4. HISTÓRICO DE ESTOQUE (Auditoria por data)
+// Cada linha leva tipo e código do produto e o nome da empresa, pro comprovante em PDF de
+// cada movimentação que o painel gera.
 router.get('/admin/estoque/relatorio/:empresaId', async (req, res) => {
   const { inicio, fim } = req.query;
 
   // estoque_movimentacoes.produto_id não tem FK real no banco (igual no MySQL original),
   // então o PostgREST não consegue fazer o embed automático. Buscamos os produtos da empresa
   // primeiro e juntamos em JS.
-  const { data: produtos, error: prodErr } = await supabase.from('produtos').select('id, nome').eq('empresa_id', req.empresaId);
+  const [{ data: produtos, error: prodErr }, { data: empresa }] = await Promise.all([
+    supabase.from('produtos').select('id, nome, tipo, codigo_barras').eq('empresa_id', req.empresaId),
+    supabase.from('empresas').select('nome').eq('id', req.empresaId).maybeSingle()
+  ]);
   if (prodErr) return res.status(500).json({ error: 'Erro ao buscar relatório.' });
 
   const produtoIds = produtos.map((p) => p.id);
-  const nomePorProduto = Object.fromEntries(produtos.map((p) => [p.id, p.nome]));
+  const produtoPorId = Object.fromEntries(produtos.map((p) => [p.id, p]));
 
   if (produtoIds.length === 0) return res.json([]);
 
@@ -374,7 +379,10 @@ router.get('/admin/estoque/relatorio/:empresaId', async (req, res) => {
   res.json(
     data.map((m) => ({
       ...m,
-      produto_nome: nomePorProduto[m.produto_id]
+      produto_nome: produtoPorId[m.produto_id]?.nome,
+      produto_tipo: produtoPorId[m.produto_id]?.tipo || 'venda',
+      produto_codigo_barras: produtoPorId[m.produto_id]?.codigo_barras || null,
+      empresa_nome: empresa?.nome || null
     }))
   );
 });
