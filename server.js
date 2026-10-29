@@ -105,6 +105,12 @@ app.use('/admin', (req, res, next) => {
 // token de admin de empresa, e vice-versa.
 app.use('/super-admin', verificarTokenSuperAdmin);
 
+// Health check do Render (Settings → Health Check Path = /health). Sem esta rota, todo deploy
+// novo ficava esperando um 200 que nunca vinha e o Render mantinha a versão anterior no ar —
+// nenhum deploy de backend entrou entre 26/10 e 28/10 por causa disso. Não consulta o banco de
+// propósito: uma instabilidade do Supabase não deve impedir deploy nem derrubar a instância.
+app.get('/health', (req, res) => res.json({ ok: true }));
+
 // DIAGNÓSTICO TEMPORÁRIO (28/10): de onde vem o IP do cliente atrás do Render. Não devolve
 // nenhum IP nem valor de header, só nomes e contagens. Remover depois.
 app.get('/diagnostico-ip', (req, res) => {
